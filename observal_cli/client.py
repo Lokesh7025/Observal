@@ -1,5 +1,6 @@
 import httpx
 import typer
+from rich import print as rprint
 from observal_cli import config
 
 
@@ -16,9 +17,11 @@ def get(path: str, params: dict | None = None) -> dict:
         return r.json()
     except httpx.HTTPStatusError as e:
         detail = e.response.json().get("detail", e.response.text) if e.response.headers.get("content-type", "").startswith("application/json") else e.response.text
-        raise typer.Exit(f"Error {e.response.status_code}: {detail}")
+        rprint(f"[red]Error {e.response.status_code}: {detail}[/red]")
+        raise typer.Exit(code=1)
     except httpx.ConnectError:
-        raise typer.Exit("Connection failed. Is the server running?")
+        rprint("[red]Connection failed. Is the server running?[/red]")
+        raise typer.Exit(code=1)
 
 
 def post(path: str, json_data: dict | None = None) -> dict:
@@ -29,6 +32,8 @@ def post(path: str, json_data: dict | None = None) -> dict:
         return r.json()
     except httpx.HTTPStatusError as e:
         detail = e.response.json().get("detail", e.response.text) if e.response.headers.get("content-type", "").startswith("application/json") else e.response.text
-        raise typer.Exit(f"Error {e.response.status_code}: {detail}")
+        rprint(f"[red]Error {e.response.status_code}: {detail}[/red]")
+        raise typer.Exit(code=1)
     except httpx.ConnectError:
-        raise typer.Exit("Connection failed. Is the server running?")
+        rprint("[red]Connection failed. Is the server running?[/red]")
+        raise typer.Exit(code=1)

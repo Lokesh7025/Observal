@@ -8,7 +8,15 @@ from observal_cli import config, client
 
 app = typer.Typer(name="observal", help="Observal MCP Server Registry CLI")
 review_app = typer.Typer(help="Admin review commands")
+agent_app = typer.Typer(help="Agent registry commands")
+telemetry_app = typer.Typer(help="Telemetry commands")
+eval_app = typer.Typer(help="Evaluation commands")
+admin_app = typer.Typer(help="Admin commands")
 app.add_typer(review_app, name="review")
+app.add_typer(agent_app, name="agent")
+app.add_typer(telemetry_app, name="telemetry")
+app.add_typer(eval_app, name="eval")
+app.add_typer(admin_app, name="admin")
 console = Console()
 
 # ── Phase 1 ──────────────────────────────────────────────
@@ -69,7 +77,7 @@ def whoami():
     rprint(f"Role: {user.get('role', 'N/A')}")
 
 
-# ── Phase 2 ──────────────────────────────────────────────
+# ── Phase 2: MCP ─────────────────────────────────────────
 
 
 @app.command()
@@ -78,7 +86,7 @@ def submit(git_url: str = typer.Argument(..., help="Git repository URL")):
     rprint(f"[dim]Analyzing {git_url}...[/dim]")
     try:
         prefill = client.post("/api/v1/mcps/analyze", {"git_url": git_url})
-    except (Exception,SystemExit):
+    except (Exception, SystemExit):
         rprint("[yellow]Could not analyze repo, please fill in details manually[/yellow]")
         prefill = {}
 
@@ -200,6 +208,361 @@ def review_reject(
     """Reject a submission (admin only)."""
     result = client.post(f"/api/v1/review/{review_id}/reject", {"reason": reason})
     rprint(f"[yellow]Rejected: {result.get('name', review_id)}[/yellow]")
+
+
+# ── Phase 3: Agent subcommands ───────────────────────────
+
+
+@agent_app.command(name="create")
+def agent_create():
+    """Create a new agent interactively."""
+    name = typer.prompt("Agent name")
+    version = typer.prompt("Version", default="1.0.0")
+    description = typer.prompt("Description (min 100 chars)")
+    owner = typer.prompt("Owner / Team")
+    prompt_text = typer.prompt("System prompt (min 50 chars)")
+    model_name = typer.prompt("Model name", default="claude-sonnet-4")
+
+    max_tokens = typer.prompt("Max tokens", default="4096")
+    temperature = typer.prompt("Temperature", default="0.2")
+    model_cfg = {"max_tokens": int(max_tokens), "temperature": float(temperature)}
+
+    ide_choices = ["cursor", "kiro", "claude-code", "gemini-cli"]
+    rprint(f"Available IDEs: {', '.join(ide_choices)}")
+    ides_input = typer.prompt("Supported IDEs (comma-separated)")
+    supported_ides = [i.strip() for i in ides_input.split(",") if i.strip()]
+
+    # MCP server selection
+    rprint("[dim]Fetching approved MCP servers...[/dim]")
+    try:
+        mcps = client.get("/api/v1/mcps")
+        if mcps:
+            table = Table(title="Available MCP Servers")
+            table.add_column("ID", style="dim")
+            table.add_column("Name", style="bold")
+            for m in mcps:
+                table.add_row(str(m["id"]), m["name"])
+            console.print(table)
+        else:
+            rprint("[yellow]No approved MCP servers found.[/yellow]")
+    except (Exception, SystemExit):
+        mcps = []
+
+    mcp_input = typer.prompt("MCP server IDs (comma-separated, or empty)", default="")
+    mcp_ids = [i.strip() for i in mcp_input.split(",") if i.strip()]
+
+    # Goal template
+    goal_desc = typer.prompt("Goal template description")
+    sections = []
+    while True:
+        sec_name = typer.prompt("Goal section name (or 'done' to finish)")
+        if sec_name.lower() == "done":
+            break
+        sec_desc = typer.prompt(f"  Description for '{sec_name}'", default="")
+        grounding = typer.confirm(f"  Grounding required for '{sec_name}'?", default=False)
+        sections.append({"name": sec_name, "description": sec_desc, "grounding_required": grounding})
+
+    if not sections:
+        rprint("[red]At least one goal section is required.[/red]")
+        raise typer.Exit(1)
+
+    result = client.post("/api/v1/agents", {
+        "name": name,
+        "version": version,
+        "description": description,
+        "owner": owner,
+        "prompt": prompt_text,
+        "model_name": model_name,
+        "model_config_json": model_cfg,
+        "supported_ides": supported_ides,
+        "mcp_server_ids": mcp_ids,
+        "goal_template": {"description": goal_desc, "sections": sections},
+    })
+    rprint(f"[green]Agent created! ID: {result['id']}[/green]")
+
+
+@agent_app.command(name="list")
+def agent_list(search: Optional[str] = typer.Option(None, "--search", "-s")):
+    """List active agents."""
+    params = {"search": search} if search else {}
+    data = client.get("/api/v1/agents", params=params)
+    table = Table(title="Agents")
+    table.add_column("ID", style="dim")
+    table.add_column("Name", style="bold")
+    table.add_column("Version")
+    table.add_column("Model")
+    table.add_column("Owner")
+    for item in data:
+        table.add_row(str(item["id"]), item["name"], item.get("version", ""), item.get("model_name", ""), item.get("owner", ""))
+    console.print(table)
+
+
+@agent_app.command(name="show")
+def agent_show(agent_id: str = typer.Argument(..., help="Agent ID")):
+    """Show full agent details."""
+    item = client.get(f"/api/v1/agents/{agent_id}")
+    rprint(f"[bold]{item['name']}[/bold] v{item.get('version', '?')}")
+    rprint(f"Owner: {item.get('owner', 'N/A')}")
+    rprint(f"Model: {item.get('model_name', 'N/A')}")
+    rprint(f"Description: {item.get('description', '')}")
+    rprint(f"IDEs: {', '.join(item.get('supported_ides', []))}")
+    rprint(f"Status: {item.get('status', 'N/A')}")
+    if item.get("mcp_links"):
+        rprint("MCP Servers:")
+        for link in item["mcp_links"]:
+            rprint(f"  - {link.get('mcp_name', link.get('mcp_listing_id', ''))}")
+    if item.get("goal_template"):
+        gt = item["goal_template"]
+        rprint(f"Goal: {gt.get('description', '')}")
+        for sec in gt.get("sections", []):
+            grounding = " [grounding required]" if sec.get("grounding_required") else ""
+            rprint(f"  - {sec['name']}{grounding}")
+
+
+@agent_app.command(name="install")
+def agent_install(
+    agent_id: str = typer.Argument(..., help="Agent ID"),
+    ide: str = typer.Option(..., "--ide", help="Target IDE"),
+):
+    """Get install config for an agent."""
+    result = client.post(f"/api/v1/agents/{agent_id}/install", {"ide": ide})
+    rprint(f"[green]Config for {ide}:[/green]")
+    import json
+    rprint(json.dumps(result.get("config_snippet", {}), indent=2))
+
+
+# ── Phase 4: Telemetry subcommands ───────────────────────
+
+
+@telemetry_app.command(name="status")
+def telemetry_status():
+    """Check telemetry data flow status."""
+    data = client.get("/api/v1/telemetry/status")
+    rprint(f"Status: [green]{data.get('status', 'unknown')}[/green]")
+    rprint(f"Tool call events (last hour): {data.get('tool_call_events', 0)}")
+    rprint(f"Agent interaction events (last hour): {data.get('agent_interaction_events', 0)}")
+
+
+@telemetry_app.command(name="test")
+def telemetry_test():
+    """Send a test telemetry event."""
+    result = client.post("/api/v1/telemetry/events", {
+        "tool_calls": [{
+            "mcp_server_id": "test-mcp",
+            "tool_name": "test_tool",
+            "status": "success",
+            "latency_ms": 42,
+            "ide": "test",
+        }],
+    })
+    rprint(f"[green]Test event sent! Ingested: {result.get('ingested', 0)}[/green]")
+
+
+# ── Phase 5: Dashboard commands ──────────────────────────
+
+
+@app.command(name="metrics")
+def metrics(
+    item_id: str = typer.Argument(..., help="MCP or Agent ID"),
+    item_type: str = typer.Option("mcp", "--type", "-t", help="mcp or agent"),
+):
+    """Show metrics for an MCP server or agent."""
+    if item_type == "agent":
+        data = client.get(f"/api/v1/agents/{item_id}/metrics")
+        rprint(f"[bold]Agent Metrics[/bold]")
+        rprint(f"  Total interactions: {data.get('total_interactions', 0)}")
+        rprint(f"  Total downloads: {data.get('total_downloads', 0)}")
+        rprint(f"  Acceptance rate: {(data.get('acceptance_rate') or 0):.1%}")
+        rprint(f"  Avg tool calls: {data.get('avg_tool_calls', 0)}")
+        rprint(f"  Avg latency: {(data.get('avg_latency_ms') or 0):.0f}ms")
+    else:
+        data = client.get(f"/api/v1/mcps/{item_id}/metrics")
+        rprint(f"[bold]MCP Metrics[/bold]")
+        rprint(f"  Total downloads: {data.get('total_downloads', 0)}")
+        rprint(f"  Total calls: {data.get('total_calls', 0)}")
+        rprint(f"  Error rate: {(data.get('error_rate') or 0):.1%}")
+        rprint(f"  Avg latency: {(data.get('avg_latency_ms') or 0):.0f}ms")
+        rprint(f"  p50/p90/p99: {data.get('p50_latency_ms', 0)}/{data.get('p90_latency_ms', 0)}/{data.get('p99_latency_ms', 0)}ms")
+
+
+@app.command(name="overview")
+def overview():
+    """Show enterprise overview stats."""
+    data = client.get("/api/v1/overview/stats")
+    rprint(f"[bold]Enterprise Overview[/bold]")
+    rprint(f"  MCPs: {data.get('total_mcps', 0)}")
+    rprint(f"  Agents: {data.get('total_agents', 0)}")
+    rprint(f"  Users: {data.get('total_users', 0)}")
+    rprint(f"  Tool calls today: {data.get('total_tool_calls_today', 0)}")
+    rprint(f"  Agent interactions today: {data.get('total_agent_interactions_today', 0)}")
+
+
+# ── Phase 6: Feedback commands ───────────────────────────
+
+
+@app.command()
+def rate(
+    listing_id: str = typer.Argument(..., help="MCP or Agent ID"),
+    stars: int = typer.Option(..., "--stars", "-s", min=1, max=5, help="Rating 1-5"),
+    listing_type: str = typer.Option("mcp", "--type", "-t", help="mcp or agent"),
+    comment: Optional[str] = typer.Option(None, "--comment", "-c", help="Optional comment"),
+):
+    """Rate an MCP server or agent."""
+    result = client.post("/api/v1/feedback", {
+        "listing_id": listing_id,
+        "listing_type": listing_type,
+        "rating": stars,
+        "comment": comment,
+    })
+    rprint(f"[green]Rated {stars}/5 ✓[/green]")
+
+
+@app.command()
+def feedback(
+    listing_id: str = typer.Argument(..., help="MCP or Agent ID"),
+    listing_type: str = typer.Option("mcp", "--type", "-t", help="mcp or agent"),
+):
+    """Show feedback for an MCP server or agent."""
+    data = client.get(f"/api/v1/feedback/{listing_type}/{listing_id}")
+    if not data:
+        rprint("[dim]No feedback yet.[/dim]")
+        return
+    summary = client.get(f"/api/v1/feedback/summary/{listing_id}")
+    rprint(f"[bold]Average: {summary.get('average_rating', 0):.1f}/5 ({summary.get('total_reviews', 0)} reviews)[/bold]")
+    for fb in data:
+        stars = "★" * fb.get("rating", 0) + "☆" * (5 - fb.get("rating", 0))
+        comment = f" — {fb['comment']}" if fb.get("comment") else ""
+        rprint(f"  {stars}{comment}")
+
+
+# ── Phase 7: Eval commands ───────────────────────────────
+
+
+@eval_app.command(name="run")
+def eval_run(
+    agent_id: str = typer.Argument(..., help="Agent ID"),
+    trace_id: Optional[str] = typer.Option(None, "--trace", help="Specific trace ID"),
+):
+    """Run evaluation on an agent's traces."""
+    body = {}
+    if trace_id:
+        body["trace_id"] = trace_id
+    result = client.post(f"/api/v1/eval/agents/{agent_id}", body)
+    rprint(f"[bold]Eval Run: {result.get('id', 'N/A')}[/bold]")
+    rprint(f"  Status: {result.get('status', 'N/A')}")
+    rprint(f"  Traces evaluated: {result.get('traces_evaluated', 0)}")
+    for sc in result.get("scorecards", []):
+        rprint(f"  Scorecard {sc['id'][:8]}... — Score: {sc['overall_score']}/10 ({sc['overall_grade']})")
+
+
+@eval_app.command(name="scorecards")
+def eval_scorecards(
+    agent_id: str = typer.Argument(..., help="Agent ID"),
+    version: Optional[str] = typer.Option(None, "--version", "-v"),
+):
+    """List scorecards for an agent."""
+    params = {}
+    if version:
+        params["version"] = version
+    data = client.get(f"/api/v1/eval/agents/{agent_id}/scorecards", params=params)
+    table = Table(title="Scorecards")
+    table.add_column("ID", style="dim")
+    table.add_column("Version")
+    table.add_column("Score")
+    table.add_column("Grade")
+    table.add_column("Bottleneck")
+    table.add_column("Date")
+    for sc in data:
+        table.add_row(
+            str(sc["id"])[:8] + "...",
+            sc.get("version", ""),
+            f"{sc.get('overall_score', 0):.1f}",
+            sc.get("overall_grade", ""),
+            sc.get("bottleneck", ""),
+            sc.get("evaluated_at", "")[:19],
+        )
+    console.print(table)
+
+
+@eval_app.command(name="show")
+def eval_show(scorecard_id: str = typer.Argument(..., help="Scorecard ID")):
+    """Show scorecard details."""
+    sc = client.get(f"/api/v1/eval/scorecards/{scorecard_id}")
+    rprint(f"[bold]Scorecard {sc['id']}[/bold]")
+    rprint(f"  Overall: {sc.get('overall_score', 0):.1f}/10 ({sc.get('overall_grade', '')})")
+    rprint(f"  Bottleneck: {sc.get('bottleneck', 'N/A')}")
+    rprint(f"  Recommendations: {sc.get('recommendations', 'N/A')}")
+    rprint(f"  Dimensions:")
+    for dim in sc.get("dimensions", []):
+        score = dim.get('score', 0) or 0
+        rprint(f"    {dim.get('dimension', '?')}: {score:.1f}/10 ({dim.get('grade', '?')}) — {dim.get('notes', '')}")
+
+
+@eval_app.command(name="compare")
+def eval_compare(
+    agent_id: str = typer.Argument(..., help="Agent ID"),
+    version_a: str = typer.Option(..., "--a", help="Version A"),
+    version_b: str = typer.Option(..., "--b", help="Version B"),
+):
+    """Compare two agent versions."""
+    data = client.get(f"/api/v1/eval/agents/{agent_id}/compare", params={"version_a": version_a, "version_b": version_b})
+    a = data.get("version_a", {})
+    b = data.get("version_b", {})
+    rprint(f"[bold]Version Comparison[/bold]")
+    rprint(f"  {a.get('version', '?')}: avg {a.get('avg_score', 0):.1f}/10 ({a.get('count', 0)} scorecards)")
+    rprint(f"  {b.get('version', '?')}: avg {b.get('avg_score', 0):.1f}/10 ({b.get('count', 0)} scorecards)")
+
+
+# ── Phase 8: Admin commands ──────────────────────────────
+
+
+@admin_app.command(name="settings")
+def admin_settings():
+    """List enterprise settings."""
+    data = client.get("/api/v1/admin/settings")
+    table = Table(title="Enterprise Settings")
+    table.add_column("Key", style="bold")
+    table.add_column("Value")
+    for item in data:
+        table.add_row(item["key"], item["value"])
+    console.print(table)
+
+
+@admin_app.command(name="set")
+def admin_set(
+    key: str = typer.Argument(..., help="Setting key"),
+    value: str = typer.Argument(..., help="Setting value"),
+):
+    """Set an enterprise setting."""
+    from observal_cli import config as cli_config
+    cfg = cli_config.get_or_exit()
+    try:
+        r = httpx.put(
+            f"{cfg['server_url'].rstrip('/')}/api/v1/admin/settings/{key}",
+            headers={"X-API-Key": cfg["api_key"]},
+            json={"value": value},
+            timeout=30,
+        )
+        if r.status_code == 200:
+            rprint(f"[green]Set {key} = {value}[/green]")
+        else:
+            rprint(f"[red]Error {r.status_code}: {r.text}[/red]")
+    except httpx.ConnectError:
+        rprint("[red]Connection failed. Is the server running?[/red]")
+
+
+@admin_app.command(name="users")
+def admin_users():
+    """List all users."""
+    data = client.get("/api/v1/admin/users")
+    table = Table(title="Users")
+    table.add_column("ID", style="dim")
+    table.add_column("Email")
+    table.add_column("Name")
+    table.add_column("Role")
+    for u in data:
+        table.add_row(str(u["id"])[:8] + "...", u["email"], u["name"], u["role"])
+    console.print(table)
 
 
 if __name__ == "__main__":

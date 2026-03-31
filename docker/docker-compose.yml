@@ -7,6 +7,11 @@ services:
       - "8000:8000"
     env_file:
       - ../.env
+    environment:
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID:-}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY:-}
+      - AWS_SESSION_TOKEN=${AWS_SESSION_TOKEN:-}
+      - AWS_REGION=${AWS_REGION:-us-east-1}
     depends_on:
       observal-db:
         condition: service_healthy
@@ -37,6 +42,10 @@ services:
     image: clickhouse/clickhouse-server:latest
     ports:
       - "8123:8123"
+    environment:
+      CLICKHOUSE_DB: observal
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-default}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-clickhouse}
     volumes:
       - chdata:/var/lib/clickhouse
     networks:

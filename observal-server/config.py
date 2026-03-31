@@ -6,6 +6,11 @@ class Settings(BaseSettings):
     CLICKHOUSE_URL: str = "clickhouse://localhost:8123/observal"
     SECRET_KEY: str = "change-me-in-production"
     API_KEY_LENGTH: int = 32
+    EVAL_MODEL_URL: str = ""       # OpenAI-compatible endpoint (e.g., https://bedrock-runtime.us-east-1.amazonaws.com)
+    EVAL_MODEL_API_KEY: str = ""   # API key or empty for AWS credential chain
+    EVAL_MODEL_NAME: str = ""      # e.g., us.anthropic.claude-3-5-haiku-20241022-v1:0
+    EVAL_MODEL_PROVIDER: str = ""  # "bedrock", "openai", or "" for auto-detect
+    AWS_REGION: str = "us-east-1"
 
     model_config = {"env_file": ".env"}
 

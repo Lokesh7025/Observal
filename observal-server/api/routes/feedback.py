@@ -1,0 +1,96 @@
+import uuid
+
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from api.deps import get_current_user, get_db
+from models.agent import Agent
+from models.feedback import Feedback
+from models.mcp import McpListing
+from models.user import User
+from schemas.feedback import FeedbackCreateRequest, FeedbackResponse, FeedbackSummary
+
+router = APIRouter(prefix="/api/v1/feedback", tags=["feedback"])
+
+
+@router.post("", response_model=FeedbackResponse)
+async def create_feedback(
+    req: FeedbackCreateRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    # Validate listing exists
+    if req.listing_type == "mcp":
+        exists = await db.scalar(select(McpListing.id).where(McpListing.id == req.listing_id))
+    else:
+        exists = await db.scalar(select(Agent.id).where(Agent.id == req.listing_id))
+    if not exists:
+        raise HTTPException(status_code=404, detail="Listing not found")
+
+    fb = Feedback(
+        listing_id=req.listing_id,
+        listing_type=req.listing_type,
+        user_id=current_user.id,
+        rating=req.rating,
+        comment=req.comment,
+    )
+    db.add(fb)
+    await db.commit()
+    await db.refresh(fb)
+    return FeedbackResponse.model_validate(fb)
+
+
+@router.get("/mcp/{listing_id}", response_model=list[FeedbackResponse])
+async def get_mcp_feedback(listing_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(
+        select(Feedback)
+        .where(Feedback.listing_id == listing_id, Feedback.listing_type == "mcp")
+        .order_by(Feedback.created_at.desc())
+    )
+    return [FeedbackResponse.model_validate(f) for f in result.scalars().all()]
+
+
+@router.get("/agent/{listing_id}", response_model=list[FeedbackResponse])
+async def get_agent_feedback(listing_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(
+        select(Feedback)
+        .where(Feedback.listing_id == listing_id, Feedback.listing_type == "agent")
+        .order_by(Feedback.created_at.desc())
+    )
+    return [FeedbackResponse.model_validate(f) for f in result.scalars().all()]
+
+
+@router.get("/me", response_model=list[FeedbackResponse])
+async def my_feedback_received(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Feedback received on listings submitted/created by the current user."""
+    mcp_ids = list((await db.execute(select(McpListing.id).where(McpListing.submitted_by == current_user.id))).scalars().all())
+    agent_ids = list((await db.execute(select(Agent.id).where(Agent.created_by == current_user.id))).scalars().all())
+
+    all_ids = mcp_ids + agent_ids
+    if not all_ids:
+        return []
+
+    result = await db.execute(
+        select(Feedback).where(Feedback.listing_id.in_(all_ids)).order_by(Feedback.created_at.desc())
+    )
+    return [FeedbackResponse.model_validate(f) for f in result.scalars().all()]
+
+
+@router.get("/summary/{listing_id}", response_model=FeedbackSummary)
+async def feedback_summary(listing_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(
+        select(
+            func.avg(Feedback.rating).label("avg_rating"),
+            func.count(Feedback.id).label("total"),
+        ).where(Feedback.listing_id == listing_id)
+    )
+    row = result.one()
+    return FeedbackSummary(
+        listing_id=listing_id,
+        average_rating=round(float(row.avg_rating or 0), 2),
+        total_reviews=row.total,
+    )
