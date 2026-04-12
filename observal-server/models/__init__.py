@@ -11,6 +11,7 @@ from models.feedback import Feedback
 from models.hook import HookDownload, HookListing
 from models.invite import InviteCode
 from models.mcp import ListingStatus, McpDownload, McpListing, McpValidationResult
+from models.oauth_token import VALID_PROVIDERS, OAuthProvider, OAuthToken
 from models.organization import Organization
 from models.prompt import PromptDownload, PromptListing
 from models.sandbox import SandboxDownload, SandboxListing
@@ -31,6 +32,7 @@ from models.user import User, UserRole
 __all__ = [
     "DEFAULT_DIMENSION_WEIGHTS",
     "DEFAULT_PENALTIES",
+    "VALID_PROVIDERS",
     "Agent",
     "AgentComponent",
     "AgentDownloadRecord",
@@ -54,6 +56,8 @@ __all__ = [
     "McpDownload",
     "McpListing",
     "McpValidationResult",
+    "OAuthProvider",
+    "OAuthToken",
     "Organization",
     "PenaltyDefinition",
     "PenaltySeverity",

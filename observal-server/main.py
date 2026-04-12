@@ -17,6 +17,7 @@ from api.routes.dashboard import router as dashboard_router
 from api.routes.eval import router as eval_router
 from api.routes.feedback import router as feedback_router
 from api.routes.hook import router as hook_router
+from api.routes.integrations import router as integrations_router
 from api.routes.mcp import router as mcp_router
 from api.routes.otel_dashboard import router as otel_dashboard_router
 from api.routes.otlp import router as otlp_router
@@ -38,9 +39,7 @@ async def _ensure_columns(conn):
     from sqlalchemy import text
 
     try:
-        await conn.execute(text(
-            "ALTER TABLE users ADD COLUMN IF NOT EXISTS password_hash VARCHAR(255)"
-        ))
+        await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS password_hash VARCHAR(255)"))
     except Exception:
         pass  # column already exists or DB doesn't support IF NOT EXISTS
 
@@ -83,6 +82,7 @@ app.include_router(admin_router)
 app.include_router(alert_router)
 app.include_router(otel_dashboard_router)
 app.include_router(component_source_router)
+app.include_router(integrations_router)
 
 
 @app.get("/health")

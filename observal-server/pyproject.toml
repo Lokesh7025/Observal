@@ -20,4 +20,5 @@ dependencies = [
     "redis[hiredis]",
     "arq",
     "strawberry-graphql[fastapi]",
+    "cryptography>=46.0.7",
 ]
