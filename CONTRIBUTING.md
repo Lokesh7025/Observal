@@ -69,6 +69,19 @@ The web UI starts at http://localhost:3000. Set `NEXT_PUBLIC_API_URL=http://loca
 
 See [SETUP.md](SETUP.md) for detailed configuration and troubleshooting.
 
+## Enterprise Directory (`ee/`)
+
+The `ee/` directory contains proprietary enterprise features licensed under the [Observal Enterprise License](ee/LICENSE). This code is **source-available** but requires a commercial license for production use.
+
+**Community contributions are not accepted into `ee/`.** All code in that directory is written exclusively by the Observal team. Pull requests that modify files under `ee/` will be closed.
+
+If you are unsure whether your change belongs in the open-source core or the enterprise directory, open an issue to discuss it first.
+
+The open-source core must never depend on code in `ee/`. The dependency direction is strictly one-way:
+
+- `ee/` code **can** import from the open-source core
+- Open-source code **cannot** import from `ee/`
+
 ## Finding Work
 
 Before starting work, check the [open issues](https://github.com/BlazeUp-AI/Observal/issues) to see what needs attention.
@@ -130,7 +143,7 @@ Keep the subject line under 72 characters, use the imperative mood ("add", not "
 
 ### DCO Sign-off
 
-All commits must include a `Signed-off-by` line to certify the [Developer Certificate of Origin (DCO)](https://developercertificate.org/). The DCO is a lightweight agreement that confirms you wrote (or have the right to submit) your contribution and that it is licensed under the project's Apache 2.0 license.
+All commits must include a `Signed-off-by` line to certify the [Developer Certificate of Origin (DCO)](https://developercertificate.org/). The DCO is a lightweight agreement that confirms you wrote (or have the right to submit) your contribution and that it is licensed under the project's open-source Apache 2.0 license (for all code outside `ee/`).
 
 Add the sign-off automatically with the `-s` flag:
 
@@ -209,4 +222,6 @@ See [AGENTS.md](AGENTS.md) for internal architecture notes, file layout, and con
 
 ## License
 
-By contributing, you agree that your contributions will be licensed under the [Apache License 2.0](LICENSE). The DCO sign-off on each commit is your explicit acknowledgement of this.
+This repository uses a dual-license structure. By contributing, you agree that your contributions will be licensed under the [Apache License 2.0](LICENSE), which covers all code outside the `ee/` directory. The `ee/` directory is licensed separately under the [Observal Enterprise License](ee/LICENSE) and does not accept community contributions.
+
+The DCO sign-off on each commit is your explicit acknowledgement of this.

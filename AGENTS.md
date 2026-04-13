@@ -242,6 +242,12 @@ Three route groups organize the UI by access level:
 - `mock_mcp.py`, `mock_agent_mcp.py` : Mock MCP servers for local testing
 - `run_demo.sh` : Automated demo script
 
+### Enterprise (`ee/`)
+
+The `ee/` directory contains proprietary enterprise features licensed under the Observal Enterprise License (see `ee/LICENSE`). This code is source-available but requires a commercial license for production use. Community contributions are not accepted into this directory.
+
+**Critical constraint:** The open-source core must never import from `ee/`. The dependency is strictly one-way: `ee/` code can import from the open-source core, but not the reverse. The open-source edition must be fully functional without `ee/`.
+
 ## Implementation notes
 
 - Two databases: PostgreSQL for relational data (users, MCPs, agents, feedback, eval runs), ClickHouse for time-series telemetry (traces, spans, scores). They are not interchangeable.
