@@ -328,6 +328,38 @@ def _scan_kiro_home(
             except (json.JSONDecodeError, OSError):
                 pass
 
+    # Skills from ~/.kiro/skills/*/SKILL.md
+    skills_dir = kiro_dir / "skills"
+    if skills_dir.is_dir():
+        for skill_md in sorted(skills_dir.rglob("SKILL.md")):
+            skill_name = skill_md.parent.name
+            desc = ""
+            task_type = "general"
+            try:
+                content = skill_md.read_text()
+                desc = _parse_frontmatter_field(content, "description") or ""
+                task_type = _parse_frontmatter_field(content, "task_type") or "general"
+                if not desc:
+                    has_frontmatter = content.startswith("---")
+                    if has_frontmatter:
+                        desc = _first_content_line(content)
+                    else:
+                        for line in content.splitlines():
+                            stripped = line.strip()
+                            if stripped and not stripped.startswith("#"):
+                                desc = stripped[:200]
+                                break
+            except OSError:
+                pass
+            skills.append(
+                DiscoveredSkill(
+                    name=skill_name,
+                    description=desc or f"Kiro skill: {skill_name}",
+                    source="kiro:skills",
+                    task_type=task_type,
+                )
+            )
+
     # Deduplicate MCPs by name (global + agent-level may overlap)
     seen: set[str] = set()
     deduped: list[DiscoveredMcp] = []
