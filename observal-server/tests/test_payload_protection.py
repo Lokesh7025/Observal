@@ -11,9 +11,8 @@ import pytest
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from httpx import ASGITransport, AsyncClient
-from starlette.requests import Request
-
 from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.requests import Request
 
 from api.middleware.content_type import MAX_JSON_DEPTH, ContentTypeMiddleware
 from api.middleware.request_id import RequestIDMiddleware
@@ -42,6 +41,7 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         )
         response.headers["X-Permitted-Cross-Domain-Policies"] = "none"
         return response
+
 
 # ---------------------------------------------------------------------------
 # Lightweight test app
