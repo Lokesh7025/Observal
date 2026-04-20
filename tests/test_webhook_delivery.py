@@ -99,9 +99,7 @@ class TestDeliverWebhook:
             mock_client_cls.return_value = mock_client
 
             with patch("services.webhook_delivery.asyncio.sleep", new_callable=AsyncMock):
-                result = await deliver_webhook(
-                    TEST_URL, TEST_SECRET, TEST_PAYLOAD, ALERT_RULE_ID, max_retries=3
-                )
+                result = await deliver_webhook(TEST_URL, TEST_SECRET, TEST_PAYLOAD, ALERT_RULE_ID, max_retries=3)
 
         assert result.success is False
         assert result.attempts == 3
@@ -110,9 +108,7 @@ class TestDeliverWebhook:
     @pytest.mark.asyncio
     async def test_ssrf_rejection(self):
         """Private/internal URLs are rejected immediately."""
-        result = await deliver_webhook(
-            "http://127.0.0.1/webhook", TEST_SECRET, TEST_PAYLOAD, ALERT_RULE_ID
-        )
+        result = await deliver_webhook("http://127.0.0.1/webhook", TEST_SECRET, TEST_PAYLOAD, ALERT_RULE_ID)
         assert result.success is False
         assert result.attempts == 0
         assert "SSRF" in result.error
@@ -128,9 +124,7 @@ class TestDeliverWebhook:
             mock_client_cls.return_value = mock_client
 
             with patch("services.webhook_delivery.asyncio.sleep", new_callable=AsyncMock):
-                result = await deliver_webhook(
-                    TEST_URL, TEST_SECRET, TEST_PAYLOAD, ALERT_RULE_ID, max_retries=2
-                )
+                result = await deliver_webhook(TEST_URL, TEST_SECRET, TEST_PAYLOAD, ALERT_RULE_ID, max_retries=2)
 
         assert result.success is False
         assert mock_client.post.call_count == 2
@@ -213,21 +207,15 @@ class TestDeliverWebhook:
 class TestBufferAndFlush:
     def test_buffer_delivery_record_adds_to_buffer(self):
         """Records are added to the in-memory buffer."""
-        _buffer_delivery_record(
-            ALERT_RULE_ID, uuid.uuid4(), 1, TEST_URL, 200, "delivered", None, 100.0, 256
-        )
+        _buffer_delivery_record(ALERT_RULE_ID, uuid.uuid4(), 1, TEST_URL, 200, "delivered", None, 100.0, 256)
         assert len(_delivery_buffer) == 1
         assert _delivery_buffer[0]["delivery_status"] == "delivered"
 
     @pytest.mark.asyncio
     async def test_flush_clears_buffer(self):
         """Flush empties the buffer and returns count."""
-        _buffer_delivery_record(
-            ALERT_RULE_ID, uuid.uuid4(), 1, TEST_URL, 200, "delivered", None, 100.0, 256
-        )
-        _buffer_delivery_record(
-            ALERT_RULE_ID, uuid.uuid4(), 1, TEST_URL, 500, "failed", None, 200.0, 256
-        )
+        _buffer_delivery_record(ALERT_RULE_ID, uuid.uuid4(), 1, TEST_URL, 200, "delivered", None, 100.0, 256)
+        _buffer_delivery_record(ALERT_RULE_ID, uuid.uuid4(), 1, TEST_URL, 500, "failed", None, 200.0, 256)
 
         with patch("services.clickhouse._insert_webhook_deliveries", new_callable=AsyncMock) as mock_insert:
             count = await flush_delivery_records()

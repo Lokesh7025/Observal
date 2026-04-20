@@ -215,9 +215,7 @@ class TestDeliverWebhook:
             mock_client.__aenter__ = AsyncMock(return_value=mock_client)
             mock_client.__aexit__ = AsyncMock(return_value=False)
             mock_client_cls.return_value = mock_client
-            code, err = await _deliver_webhook_signed(
-                "https://example.com/hook", "", {"test": True}, uuid.uuid4()
-            )
+            code, err = await _deliver_webhook_signed("https://example.com/hook", "", {"test": True}, uuid.uuid4())
         assert code == 200
         assert err is None
 
