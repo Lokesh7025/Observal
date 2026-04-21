@@ -58,6 +58,8 @@ observal scan                       # auto-detect, register, and instrument ever
 observal pull <agent> --ide cursor  # install a complete agent
 ```
 
+This detects MCP servers from your IDE config files and wraps them with `observal-shim` for telemetry without breaking your existing setup. A timestamped backup is created automatically. Everything happens locally — nothing is uploaded to the server.
+
 ## Supported IDEs
 
 | IDE | Support |

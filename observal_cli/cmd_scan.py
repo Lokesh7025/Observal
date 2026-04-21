@@ -1,4 +1,4 @@
-"""observal scan: auto-detect IDE configs, discover components, and instrument for telemetry."""
+"""observal scan: auto-detect IDE configs and wrap with telemetry shims."""
 
 from __future__ import annotations
 
@@ -702,17 +702,14 @@ def _backup_config(config_path: Path) -> Path:
     return backup
 
 
-def _auto_shim_home_config(result: dict, config_path: Path, ide: str):
+def _auto_shim_home_config(config_path: Path, ide: str):
     """Auto-wrap un-shimmed MCP servers in a home-directory config file.
 
     For IDEs without native hook/telemetry systems (Codex, Copilot, OpenCode),
     wrapping MCP servers with observal-shim is the primary telemetry path.
+    Uses the MCP server name as the shim correlation key.
     """
     if not config_path.exists():
-        return
-
-    id_map = {r["name"]: r["id"] for r in result.get("registered", []) if r["type"] == "mcp"}
-    if not id_map:
         return
 
     try:
@@ -731,9 +728,8 @@ def _auto_shim_home_config(result: dict, config_path: Path, ide: str):
         servers = _parse_project_mcp_servers(data, ide)
         shimmed = 0
         for name, entry in servers.items():
-            mcp_id = id_map.get(name)
-            if mcp_id and not _is_already_shimmed(entry):
-                servers[name] = _wrap_with_shim(entry, mcp_id)
+            if not _is_already_shimmed(entry):
+                servers[name] = _wrap_with_shim(entry, name)
                 shimmed += 1
 
         if shimmed:
@@ -792,9 +788,7 @@ def register_scan(app: typer.Typer):
         project_dir: str = typer.Argument(".", help="Project directory to scan"),
         ide: str | None = typer.Option(None, "--ide", "-i", help="Target IDE (auto-detected if omitted)"),
         home: bool = typer.Option(False, "--home", help="Scan IDE home directories for plugins, agents, skills, hooks"),
-        all_ides: bool = typer.Option(
-            False, "--all-ides", help="Scan home directories for ALL supported IDEs"
-        ),
+        all_ides: bool = typer.Option(False, "--all-ides", help="Scan home directories for ALL supported IDEs"),
         dry_run: bool = typer.Option(False, "--dry-run", "-n", help="Show discovered components without instrumenting"),
         yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation"),
         shim: bool = typer.Option(
@@ -1025,25 +1019,24 @@ def register_scan(app: typer.Typer):
             )
             return
 
+        if not yes and not typer.confirm("Instrument these components for telemetry?"):
+            raise typer.Abort()
+
         # ── Optionally shim project MCP configs ─────
         if shim and project_mcp_entries:
-            if not yes and not typer.confirm("Rewrite project MCP configs to add telemetry shims?"):
-                rprint("[dim]Skipped shimming.[/dim]")
-            else:
-                shimmed_count = 0
-                configs_to_update: dict[str, dict] = {}
+            shimmed_count = 0
+            configs_to_update: dict[str, dict] = {}
 
-                for ide_name, name, _mcp, config_path in project_mcp_entries:
-                    mcp_id = _deterministic_mcp_id(name)
-                    path_str = str(config_path)
-                    if path_str not in configs_to_update:
-                        configs_to_update[path_str] = json.loads(config_path.read_text())
+            for ide_name, name, _mcp, config_path in project_mcp_entries:
+                path_str = str(config_path)
+                if path_str not in configs_to_update:
+                    configs_to_update[path_str] = json.loads(config_path.read_text())
 
-                    config = configs_to_update[path_str]
-                    servers = _parse_project_mcp_servers(config, ide_name)
-                    if name in servers and not _is_already_shimmed(servers[name]):
-                        servers[name] = _wrap_with_shim(servers[name], mcp_id)
-                        shimmed_count += 1
+                config = configs_to_update[path_str]
+                servers = _parse_project_mcp_servers(config, ide_name)
+                if name in servers and not _is_already_shimmed(servers[name]):
+                    servers[name] = _wrap_with_shim(servers[name], name)
+                    shimmed_count += 1
 
                 for path_str, config in configs_to_update.items():
                     config_path = Path(path_str)

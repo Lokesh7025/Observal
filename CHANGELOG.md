@@ -27,6 +27,16 @@ Adds first-class support for **Codex CLI**, **Gemini CLI**, **GitHub Copilot**, 
   - `_generate_gemini_cli()` enhanced: emits `.gemini/settings.json` with OTEL telemetry block
 - **Preview panel**: web builder shows config previews for all 8 IDEs
 
+### Changed — Scan is Now Local-Only
+
+`observal scan` no longer uploads discovered components to the server. It only instruments
+locally: wrapping MCP servers with `observal-shim` and injecting telemetry hooks into IDE configs.
+The shim now uses the MCP server name as its correlation key instead of a server-side UUID.
+
+- **CLI**: Removed bulk upload from `observal scan` and post-login onboarding
+- **Server**: Deprecated `POST /api/v1/scan` endpoint (retained for older CLI versions)
+- **Dashboard**: `mcp_id` resolution now handles both UUID (legacy) and name strings
+
 ## [0.2.0] - 2026-04-21
 
 ### Added — Kiro CLI Setup Guide

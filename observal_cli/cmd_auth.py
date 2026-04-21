@@ -511,7 +511,7 @@ def _post_auth_onboarding():
             return
 
         rprint()
-        rprint("[bold]Detected local IDE components:[/bold]")
+        rprint("[bold]\N{ELECTRIC LIGHT BULB} Detected local IDE configs.[/bold]")
         rprint()
         for label, _key, agents, mcps in found:
             parts = []
@@ -521,15 +521,10 @@ def _post_auth_onboarding():
                 parts.append(f"{mcps} MCP{'s' if mcps != 1 else ''}")
             rprint(f"  [bold]{label}[/bold] — {', '.join(parts)} found")
         rprint()
-        rprint("[dim]Telemetry hooks are now configured. Your IDE sessions will be tracked.[/dim]")
-        rprint("[dim]Tip: Run 'observal scan --shim' in a project dir to wrap MCP configs with telemetry shims.[/dim]")
-        rprint(
-            "[dim]Tip: Run 'observal registry <type> submit <git_url>' to publish a component."
-            " Only submit if you are the creator or point-of-contact.[/dim]"
-        )
+        rprint("[dim]Run `observal scan --all-ides` to wrap MCP servers with telemetry shims.[/dim]")
 
-    except Exception as e:
-        rprint(f"[yellow]Onboarding skipped: {e}[/yellow]")
+    except Exception:
+        pass
 
 
 def _configure_kiro(server_url: str):

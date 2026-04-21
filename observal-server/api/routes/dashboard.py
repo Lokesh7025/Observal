@@ -547,21 +547,25 @@ async def token_stats(
     mcp_ids = [r["mcp_id"] for r in by_mcp_rows if r.get("mcp_id")]
     mcp_names: dict[str, str] = {}
     if mcp_ids:
-        valid_uuids = []
+        uuid_ids = []
+        name_ids = []
         for m in mcp_ids:
             try:
-                valid_uuids.append(uuid.UUID(m))
+                uuid_ids.append(uuid.UUID(m))
             except (ValueError, AttributeError):
-                pass
-        if valid_uuids:
-            rows = (
-                await db.execute(select(McpListing.id, McpListing.name).where(McpListing.id.in_(valid_uuids)))
-            ).all()
-            mcp_names = {str(r.id): r.name for r in rows}
+                name_ids.append(m)
+        if uuid_ids:
+            rows = (await db.execute(select(McpListing.id, McpListing.name).where(McpListing.id.in_(uuid_ids)))).all()
+            mcp_names.update({str(r.id): r.name for r in rows})
+        if name_ids:
+            rows = (await db.execute(select(McpListing.id, McpListing.name).where(McpListing.name.in_(name_ids)))).all()
+            mcp_names.update({r.name: r.name for r in rows})
+            for n in name_ids:
+                mcp_names.setdefault(n, n)
     by_mcp = [
         TokenByEntity(
             id=r["mcp_id"],
-            name=mcp_names.get(r["mcp_id"], ""),
+            name=mcp_names.get(r["mcp_id"], r["mcp_id"]),
             input=int(r["input"]),
             output=int(r["output"]),
             total=int(r["total"]),
