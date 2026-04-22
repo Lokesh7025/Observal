@@ -1062,7 +1062,7 @@ def register_scan(app: typer.Typer):
             # Stop uses a command hook to read transcript for Claude's response
             stop_script = Path(__file__).parent / "hooks" / "observal-stop-hook.sh"
             stop_hook = (
-                [{"hooks": [{"type": "command", "command": str(stop_script.resolve())}]}]
+                [{"hooks": [{"type": "command", "command": stop_script.resolve().as_posix()}]}]
                 if stop_script.is_file()
                 else http_hook
             )
@@ -1152,7 +1152,7 @@ def register_scan(app: typer.Typer):
                 if model:
                     args += f" --model {model}"
                 if hook_script.is_file():
-                    return f"cat | python3 {hook_script.resolve()} {args}"
+                    return f"cat | python3 {hook_script.resolve().as_posix()} {args}"
                 return f'cat | curl -sf -X POST {kiro_hooks_url} -H "Content-Type: application/json" -d @-'
 
             def _kiro_stop_cmd(agent_name: str, model: str) -> str:
@@ -1161,7 +1161,7 @@ def register_scan(app: typer.Typer):
                 if model:
                     args += f" --model {model}"
                 if stop_script.is_file():
-                    return f"cat | python3 {stop_script.resolve()} {args}"
+                    return f"cat | python3 {stop_script.resolve().as_posix()} {args}"
                 return f'cat | curl -sf -X POST {kiro_hooks_url} -H "Content-Type: application/json" -d @-'
 
             def _kiro_hooks_block(agent_name: str, model: str) -> dict:
