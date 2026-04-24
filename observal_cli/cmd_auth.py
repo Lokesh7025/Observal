@@ -757,8 +757,6 @@ def _configure_kiro(server_url: str):
         changes = 0
 
         # 1. Inject into agent JSON files (merge, preserve existing hooks)
-        # If kiro_default.json doesn't exist, create it so hooks attach to the
-        # built-in kiro_default agent instead of a separate workspace agent.
         agents_dir = kiro_dir / "agents"
         agents_dir.mkdir(parents=True, exist_ok=True)
 
@@ -789,30 +787,11 @@ def _configure_kiro(server_url: str):
                 pass
 
         agent_files = sorted(agents_dir.glob("*.json"))
-        default_agent = agents_dir / "kiro_default.json"
-        if not default_agent.exists():
-            cmd = _hook_cmd("kiro_default")
-            stop = _stop_cmd("kiro_default")
-            default_agent.write_text(
-                _json.dumps(
-                    {
-                        "name": "kiro_default",
-                        "hooks": {
-                            "agentSpawn": [{"command": cmd}],
-                            "userPromptSubmit": [{"command": cmd}],
-                            "preToolUse": [{"matcher": "*", "command": cmd}],
-                            "postToolUse": [{"matcher": "*", "command": cmd}],
-                            "stop": [{"command": stop}],
-                        },
-                    },
-                    indent=2,
-                )
-                + "\n"
-            )
-            changes += 1
-            agent_files = sorted(agents_dir.glob("*.json"))
 
         for af in agent_files:
+            # Skip kiro_default — only trace registered agents
+            if af.stem == "kiro_default":
+                continue
             try:
                 data = _json.loads(af.read_text())
                 existing = data.get("hooks", {})

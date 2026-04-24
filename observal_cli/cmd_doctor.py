@@ -767,34 +767,11 @@ def _install_kiro_hooks(server_url: str) -> tuple[list[str], bool]:
             pass
     agent_files = list(agents_dir.glob("*.json"))
 
-    # Create kiro_default agent config if it doesn't exist, so hooks attach to
-    # the built-in kiro_default agent instead of a separate workspace agent.
-    default_agent = agents_dir / "kiro_default.json"
-    if not default_agent.exists():
-        cmd = "cat | python3 " + hook_py_str + " --url " + hooks_url + " --agent-name kiro_default"
-        stop_cmd = "cat | python3 " + stop_py_str + " --url " + hooks_url + " --agent-name kiro_default"
-        default_agent.write_text(
-            json.dumps(
-                {
-                    "name": "kiro_default",
-                    "hooks": {
-                        "agentSpawn": [{"command": cmd}],
-                        "userPromptSubmit": [{"command": cmd}],
-                        "preToolUse": [{"matcher": "*", "command": cmd}],
-                        "postToolUse": [{"matcher": "*", "command": cmd}],
-                        "stop": [{"command": stop_cmd}],
-                    },
-                },
-                indent=2,
-            )
-            + "\n"
-        )
-        changes.append("+ kiro_default: created with Observal hooks")
-        changed = True
-        agent_files = list(agents_dir.glob("*.json"))
-
     for af in agent_files:
         agent_name = af.stem
+        # Skip kiro_default — only trace registered agents
+        if agent_name == "kiro_default":
+            continue
         try:
             data = json.loads(af.read_text())
         except (json.JSONDecodeError, OSError):
