@@ -112,6 +112,7 @@ CLICKHOUSE_TABLES: list[TableCfg] = [
     {"name": "audit_log", "engine": "mergetree", "time_col": "timestamp", "fk_cols": ["actor_id"]},
     {"name": "mcp_tool_calls", "engine": "mergetree", "time_col": "timestamp", "fk_cols": ["mcp_server_id", "user_id"]},
     {"name": "agent_interactions", "engine": "mergetree", "time_col": "timestamp", "fk_cols": ["agent_id", "user_id"]},
+    # otel_logs DDL uses capital-T "Timestamp" (OpenTelemetry convention)
     {"name": "otel_logs", "engine": "mergetree", "time_col": "Timestamp", "fk_cols": []},
     {"name": "security_events", "engine": "mergetree", "time_col": "timestamp", "fk_cols": []},
     {"name": "webhook_deliveries", "engine": "mergetree", "time_col": "timestamp", "fk_cols": []},
@@ -404,7 +405,8 @@ async def _insert_table(
     inserted = 0
     skipped = 0
     batch: list[dict] = []
-    columns: list[str] | None = None
+    columns = sorted(col_types.keys())
+    logged_skipped = False
 
     with open(jsonl_path, encoding="utf-8") as f:
         for line in f:
@@ -413,15 +415,14 @@ async def _insert_table(
                 continue
             row = json.loads(line)
 
-            if columns is None:
-                target_columns = set(col_types.keys())
-                columns = [k for k in row if k in target_columns]
-                skipped_cols = set(row) - target_columns
+            if not logged_skipped:
+                skipped_cols = set(row) - set(columns)
                 if skipped_cols:
                     rprint(
                         f"[dim]  {jsonl_path.stem}: skipping archive columns not in target: "
                         f"{', '.join(sorted(skipped_cols))}[/dim]"
                     )
+                    logged_skipped = True
 
             batch.append(row)
 
@@ -509,7 +510,7 @@ def _rewrite_project_id(parquet_path: Path, target_project_id: str) -> Path:
     if "project_id" not in table.column_names:
         return parquet_path
     idx = table.column_names.index("project_id")
-    new_col = pa.array([target_project_id] * len(table), type=pa.string())
+    new_col = pa.nulls(len(table), type=pa.string()).fill_null(target_project_id)
     table = table.set_column(idx, "project_id", new_col)
     tmp_path = parquet_path.with_suffix(".tmp.parquet")
     pq.write_table(table, tmp_path)
