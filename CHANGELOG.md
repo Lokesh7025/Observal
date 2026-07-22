@@ -804,7 +804,7 @@ All notable changes to this project will be documented in this file.
 
 ### Documentation
 
-- remove BlazeUp references ([0923059](https://github.com/Observal/Observal/commit/092305999abf2b8b5c1f248836ddd03d815463be))
+- remove legacy branding references ([0923059](https://github.com/Observal/Observal/commit/092305999abf2b8b5c1f248836ddd03d815463be))
 - add license commitment ([35a6f54](https://github.com/Observal/Observal/commit/35a6f54c568446f9eeb2e7b76a326740aaa9b581))
 - remove outdated rules references (**cursor**) ([0b47917](https://github.com/Observal/Observal/commit/0b479172a8e447697c8c5ed6294f95106b46c947))
 - add Cursor integration to summary ([186e3bb](https://github.com/Observal/Observal/commit/186e3bb6e556789ee9139bd8ed2df65967590dec))
@@ -1241,7 +1241,7 @@ All notable changes to this project will be documented in this file.
 - update postgres volume mount for v18 compatibility (**docker**) ([93c0600](https://github.com/Observal/Observal/commit/93c060078f3eb3234b21d24278f807ce9619a2ff))
 - trigger EC2 deploy on push to main instead of tags (**deploy**) ([6cda8b1](https://github.com/Observal/Observal/commit/6cda8b18250a3b8eb719c2f64d73a847f19fc2da))
 - trigger EC2 deploy on push to main instead of tags (**deploy**) ([cb7bae4](https://github.com/Observal/Observal/commit/cb7bae4963ea3b3654417c62f666447225213679))
-- replace all Apache 2.0 references with AGPL-3.0 ([66abe34](https://github.com/Observal/Observal/commit/66abe34ddb19d779eeb75174aa7038192f60105b))
+- align license references across the repo ([66abe34](https://github.com/Observal/Observal/commit/66abe34ddb19d779eeb75174aa7038192f60105b))
 - update redis image assertion to 8-alpine (**tests**) ([7da9551](https://github.com/Observal/Observal/commit/7da955197387f74d2fbedc3fcdf57f24c844eabc))
 - capture post-Stop tail lines via delayed flush subprocess (**cli**) ([357fdee](https://github.com/Observal/Observal/commit/357fdeeb356784242097f95b6b3713cf4d99f64c))
 - exclude subagent sessions from top-level list (**sessions**) ([ac0052c](https://github.com/Observal/Observal/commit/ac0052c8d3b54ed4b90bee2ab7d823eace3469f3))

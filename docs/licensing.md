@@ -50,7 +50,7 @@ Community contributions to the `ee/` directory are not accepted.
 
 If your legal or procurement team needs clarification:
 
-- **Contact:** contact@observal.io
+- **Contact:** harisrini21@gmail.com
 - **Website:** https://observal.io/
 
 ### Common questions

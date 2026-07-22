@@ -166,13 +166,13 @@ if [ -n "$LICENSE_KEY" ]; then
     else
         EXIT_CODE=$?
         if [ "$EXIT_CODE" -eq 2 ]; then
-            die "License key has expired. Contact sales@observal.dev to renew."
+            die "License key has expired. Contact harisrini21@gmail.com to renew."
         elif [ "$EXIT_CODE" -eq 3 ]; then
             warn "Cannot verify license locally (python3 cryptography package not found)."
             warn "Proceeding with enterprise install — the server will validate at startup."
             EDITION="enterprise"
         else
-            die "Invalid license key. Check your key or contact support@observal.dev"
+            die "Invalid license key. Check your key or contact harisrini21@gmail.com"
         fi
     fi
 else

@@ -164,13 +164,13 @@ if [ -z "$LICENSE_KEY" ]; then
         else
             EXIT_CODE=$?
             if [ "$EXIT_CODE" -eq 2 ]; then
-                die "License key has expired. Contact sales@observal.dev to renew."
+                die "License key has expired. Contact harisrini21@gmail.com to renew."
             elif [ "$EXIT_CODE" -eq 3 ]; then
                 warn "Cannot verify license locally (python3 cryptography not found)."
                 warn "Proceeding with enterprise — the server will validate at startup."
                 EDITION="enterprise"
             else
-                die "Invalid license key. Check your key or contact support@observal.dev"
+                die "Invalid license key. Check your key or contact harisrini21@gmail.com"
             fi
         fi
     else
@@ -253,7 +253,7 @@ if [ "$EDITION" = "enterprise" ]; then
         info "Authenticated with enterprise container registry."
     else
         warn "Could not authenticate with container registry. Enterprise images may not pull."
-        warn "If you see pull errors, contact support@observal.dev"
+        warn "If you see pull errors, contact harisrini21@gmail.com"
     fi
 fi
 
