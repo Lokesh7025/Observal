@@ -163,6 +163,7 @@ from observal_cli.cmd_ops import (
 from observal_cli.cmd_outdated import register_outdated
 from observal_cli.cmd_prompt import prompt_app
 from observal_cli.cmd_pull import register_pull
+from observal_cli.cmd_recommend import recommend_app
 from observal_cli.cmd_sandbox import sandbox_app
 from observal_cli.cmd_scan import register_scan
 from observal_cli.cmd_skill import skill_app
@@ -188,6 +189,7 @@ registry_app.add_typer(prompt_app, name="prompt")
 registry_app.add_typer(sandbox_app, name="sandbox")
 registry_app.add_typer(models_app, name="models")
 registry_app.add_typer(version_app, name="version")
+registry_app.add_typer(recommend_app, name="recommend")
 
 # ── Co-authors and ownership sub-commands ─────────────────
 mcp_app.add_typer(make_co_authors_typer("mcps"), name="co-authors")

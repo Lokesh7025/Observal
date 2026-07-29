@@ -4,8 +4,8 @@
 # SPDX-License-Identifier: Apache-2.0
 name: observal
 command: observal
-description: "Core Observal CLI operations: pull agents into your harness, scan installed components, diagnose and patch harness configs, authenticate, manage CLI settings, and discuss agent insights. Use when the user wants to install an agent, check setup, login, configure the CLI, or ask how an agent is doing."
-version: 2.4.0
+description: "Core Observal CLI operations: pull agents into your harness, scan installed components, diagnose and patch harness configs, authenticate, manage CLI settings, get components recommended for you, and discuss agent insights. Use when the user wants to install an agent, check setup, login, configure the CLI, ask what they should install, or ask how an agent is doing."
+version: 2.5.0
 owner: observal
 ---
 
@@ -39,6 +39,8 @@ observal registry mcp list --search 'github docker' --output json
 ```
 
 Summarize the top matches by `qualified_name`, description, and why they fit. If no results, retry with fewer keywords.
+
+For open-ended asks instead ("what am I missing", "what should I install"), do not guess keywords — ask what fits this user's own sessions with `observal registry recommend --output json`. Check `personalized` first: `false` means no session history yet, so these are merely the most-used components; say so rather than implying they were chosen for the user. Fields and dismissals are in the `observal-registry` skill.
 
 ## Procedure: Pull Agent
 

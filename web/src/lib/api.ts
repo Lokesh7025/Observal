@@ -1010,6 +1010,43 @@ export const bulk = {
 };
 
 // ── Insights ───────────────────────────────────────────────────────
+export interface RecommendationItem {
+	type: string;
+	id: string;
+	name: string;
+	namespace: string;
+	slug: string;
+	qualified_name: string;
+	description: string;
+	category: string | null;
+	latest_version: string;
+	download_count: number;
+	matched_on: string[];
+	score: number;
+	reason: string;
+}
+
+export interface RecommendationsResponse {
+	items: RecommendationItem[];
+	/** False when the user has no session history, so the UI can say so. */
+	personalized: boolean;
+	profile_sessions: number;
+	topics: string[];
+}
+
+export const recommendations = {
+	me: (limit = 8, type?: string) =>
+		get<RecommendationsResponse>(
+			`/recommendations/me?limit=${limit}${type ? `&type=${encodeURIComponent(type)}` : ""}`,
+		),
+	feedback: (componentType: string, componentId: string, action: string) =>
+		post<void>("/recommendations/feedback", {
+			component_type: componentType,
+			component_id: componentId,
+			action,
+		}),
+};
+
 export const insights = {
 	status: () => get<{ available: boolean; reason: string | null }>("/insights/status"),
 	sessionCount: (agentId: string, agentVersion?: string) =>

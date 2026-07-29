@@ -33,6 +33,7 @@ from models.submission import Submission
 from models.team import Team, TeamMembership, TeamRole
 from models.user import User, UserRole
 from models.user_group import UserGroup
+from models.user_profile import RecommendationFeedback, UserWorkProfile
 
 __all__ = [
     "Agent",
@@ -66,6 +67,7 @@ __all__ = [
     "MigrationStatus",
     "PromptDownload",
     "PromptListing",
+    "RecommendationFeedback",
     "SamlConfig",
     "SandboxDownload",
     "SandboxListing",
@@ -79,4 +81,5 @@ __all__ = [
     "User",
     "UserGroup",
     "UserRole",
+    "UserWorkProfile",
 ]

@@ -3,8 +3,8 @@
 # SPDX-License-Identifier: Apache-2.0
 name: observal-registry
 command: observal
-description: Submit, browse, install, edit, archive, restore, transfer, and version MCPs, skills, hooks, prompts, and sandboxes in the Observal registry. Use when the user wants to submit a component, install one, edit a draft, publish a new version, or browse the component library.
-version: 2.0.0
+description: Submit, browse, install, edit, archive, restore, transfer, and version MCPs, skills, hooks, prompts, and sandboxes in the Observal registry, and get components recommended for the current user. Use when the user wants to submit a component, install one, edit a draft, publish a new version, browse the component library, or asks what they should install or are missing.
+version: 2.1.0
 owner: observal
 ---
 
@@ -47,6 +47,35 @@ After `list`, use row numbers (1, 2, 3...) in subsequent commands. Add `--intera
 **MCP categories:** `browser-automation`, `cloud-platforms`, `code-execution`, `communication`, `databases`, `developer-tools`, `devops`, `file-systems`, `finance`, `knowledge-memory`, `monitoring`, `multimedia`, `productivity`, `search`, `security`, `version-control`, `ai-ml`, `data-analytics`, `general`
 
 **Skill task types:** `code-review`, `code-generation`, `testing`, `documentation`, `debugging`, `refactoring`, `deployment`, `security-audit`, `performance`, `general`
+
+---
+
+## Procedure: Recommend Components For This User
+
+Use when the user asks what to install, what is worth trying, or what they are missing. Ranked against the signed-in user's own sessions, so check here before browsing — it beats guessing keywords for `list --search`. `--refresh` recomputes the profile instead of using the 24h cache: slower, so only when recent work changed and results look stale.
+
+```bash
+observal registry recommend --output json
+observal registry recommend --limit 12 --type mcp --refresh --output json
+```
+
+| Field | Meaning |
+|-------|---------|
+| `personalized` | `true` = ranked against this user's sessions. `false` = popularity only |
+| `profile_sessions` | How many sessions the profile was built from |
+| `topics` | Dominant work areas detected (e.g. `databases`, `frontend`) |
+| `items[].reason` | Why this was picked. Quote it; do not invent a better reason |
+| `items[].matched_on` | The user's own terms that matched |
+
+**What you may claim:** `personalized: false` → say plainly there is no session history yet and these are simply the most-used components; never present them as tailored. `items: []` → say either nothing in the registry is visible to them or they already installed or dismissed it all; this is not an error, so do not report it as one. `profile_sessions` under ~5 → give the answer, and say the profile is thin.
+
+```bash
+observal registry recommend dismiss skill NAMESPACE/SLUG
+observal registry recommend dismiss mcp NAMESPACE/SLUG --action not_relevant
+observal registry recommend dismiss hook NAMESPACE/SLUG --action installed
+```
+
+Dismissals are per-user and permanent until overwritten, so confirm before dismissing. A work profile is visible only to its owner: no flag or server route exposes another user's recommendations, so if asked, say it is unavailable rather than improvising a workaround.
 
 ---
 

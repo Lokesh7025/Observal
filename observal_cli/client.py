@@ -333,6 +333,9 @@ def post(path: str, json_data: dict | None = None) -> dict:
     base, headers = _client()
     try:
         r = _request_with_retry("post", f"{base}{path}", headers, json=json_data)
+        # Some endpoints answer 204 No Content; decoding that as JSON raises.
+        if r.status_code == 204 or not r.content:
+            return {}
         return r.json()
     except httpx.HTTPStatusError as e:
         _handle_error(e, path)

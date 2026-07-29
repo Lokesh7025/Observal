@@ -29,6 +29,7 @@ from api.routes.logs_stream import router as logs_stream_router
 from api.routes.mcp import router as mcp_router
 from api.routes.preview import router as preview_router
 from api.routes.prompt import router as prompt_router
+from api.routes.recommendations import router as recommendations_router
 from api.routes.registry import router as registry_router
 from api.routes.review import router as review_router
 from api.routes.sandbox import router as sandbox_router
@@ -79,6 +80,7 @@ REST_ROUTERS = (
     sso_saml_router,
     scim_router,
     exec_dashboard_router,
+    recommendations_router,
 )
 
 

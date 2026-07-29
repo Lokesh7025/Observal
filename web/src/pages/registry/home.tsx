@@ -24,6 +24,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { AgentCard } from "@/components/registry/agent-card";
+import { RecommendedForYou } from "@/components/registry/recommended-for-you";
 import { RegistryName } from "@/components/registry/registry-name";
 import { registryIdentity, registryNameWithHandle } from "@/lib/registry-name";
 import { PageHeader } from "@/components/layouts/page-header";
@@ -534,6 +535,8 @@ export default function RegistryHome() {
             </div>
           </div>
         </section>
+
+        <RecommendedForYou />
 
         <section className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_minmax(360px,420px)]">
           <div className="rounded-md border border-border bg-card">

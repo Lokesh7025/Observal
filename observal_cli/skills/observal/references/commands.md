@@ -158,6 +158,9 @@ Every command available in the installed CLI. This block is generated from the T
   - `observal registry prompt submit`: Submit a new prompt template for review.
   - `observal registry prompt transfer-owner`: Transfer ownership to another username.
   - `observal registry prompt unarchive`: Restore an archived component.
+- `observal registry recommend`: Components recommended for you, based on your own sessions
+  - `observal registry recommend dismiss`: Stop recommending a component to you.
+  - `observal registry recommend list`: Show components recommended for you.
 - `observal registry sandbox`: Sandbox registry commands
   - `observal registry sandbox co-authors`: Manage co-authors for sandboxes
     - `observal registry sandbox co-authors add`: Add a co-author.
