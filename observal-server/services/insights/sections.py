@@ -21,10 +21,15 @@ from __future__ import annotations
 
 import asyncio
 import json
+from typing import TYPE_CHECKING
 
 import structlog
 
 from ._deps import get_call_model
+from .registry_match import catalog_block
+
+if TYPE_CHECKING:
+    from .registry_match import CatalogOffer
 
 logger = structlog.get_logger(__name__)
 
@@ -205,9 +210,10 @@ RESPOND WITH ONLY A VALID JSON OBJECT:
     "features_to_try": [
       {{
         "action_type": "reuse_existing_component | attach_registry_component | remove_component | create_new_skill | create_new_hook | no_action",
-        "feature": "Skill | Hook | Prompt | Component",
+        "feature": "Skill | Hook | Prompt | MCP | Sandbox | Component",
         "name": "short-kebab-name (max 30 chars, e.g. 'scope-guard', 'pr-review', 'test-runner')",
-        "existing_component_id": "registry/current component id when action_type is reuse/attach/remove, else null",
+        "existing_component_id": "the exact `id` copied from the reusable-components list when action_type is reuse/attach/remove, else null",
+        "match_reason": "for reuse only: which observed problem this existing component solves, citing the data",
         "one_liner": "what it does in one sentence",
         "why_for_you": "why this would help YOU based on your sessions",
         "confidence": "high | medium | low | insufficient_data",
@@ -228,11 +234,27 @@ RESPOND WITH ONLY A VALID JSON OBJECT:
 
 Rules:
 - config_additions: PRIORITIZE instructions from USER INSTRUCTIONS and REPEATED INSTRUCTIONS sections. These are things the user has ALREADY told the agent but it keeps forgetting. Maximum 7.
-- features_to_try: 2-3 concrete suggestions. Prefer reuse_existing_component or attach_registry_component when the registry/current agent already has a matching component. ONLY create new Skills or Hooks when no existing component fits. NEVER suggest MCP servers.
+- features_to_try: 2-3 concrete suggestions.
 - usage_patterns: 2-4 suggestions for how to prompt differently. Each must include a copyable prompt the user can try immediately.
 - NEVER suggest vague improvements. Be specific: include the exact text, command, or config.
 - If COMPONENT UTILIZATION marks a component unused/harmful, you may suggest action_type=remove_component with the existing component id/name and risk.
 - Every suggested action must include confidence and risk.
+
+REUSING WHAT ALREADY EXISTS (most important rule):
+If a "Reusable Components Already In This Registry" section is present, it lists approved
+components this agent is NOT yet using. Building something the user already owns wastes
+their time, so:
+- FIRST check whether a listed component genuinely solves an observed problem.
+- If one does, use action_type=reuse_existing_component, set "existing_component_id" to that
+  entry's `id` copied EXACTLY, set "feature" to its type, and explain the fit in "match_reason".
+- Only suggest create_new_skill / create_new_hook when NOTHING listed fits. When you create
+  something new despite the list being non-empty, say why in "why_for_you".
+- ONLY suggest a match when it genuinely fits. A forced or approximate match is worse than
+  no suggestion: it sends the user to install something that will not help. If nothing fits,
+  do not reuse anything.
+- NEVER invent an id. Any id not copied from the list is discarded, and the suggestion with it.
+- MCP servers may be RECOMMENDED FOR REUSE from the list, but never invented: do not propose
+  creating a new MCP server.
 
 FEATURE FORMAT REQUIREMENTS:
 
@@ -277,9 +299,10 @@ If "Agent Configuration" is present:
 - If tool_errors are high, suggest a validation hook
 - For registry components, include: `observal agent add skill <id>`
 
-SKILLS TO ADD (always include at least 1 skill suggestion):
+SKILLS (include at least 1 skill suggestion, reused or new):
 - Identify the user's most repetitive workflows from goal_categories and session summaries
-- Suggest a specific skill with name, description, and the full SKILL.md content
+- If a listed reusable component already covers that workflow, reuse it instead of writing a new one
+- Otherwise suggest a specific skill with name, description, and the full SKILL.md content
 - The skill content must be actionable steps using real tools, not pseudocode
 
 HOOKS TO ADD (include if friction warrants it):
@@ -537,14 +560,14 @@ async def _call_section(section_name: str, prompt: str, model: str | None = None
 async def generate_sections(
     data_block: str,
     previous_report: dict | None = None,
-    registry_catalog: dict | None = None,
+    registry_offer: CatalogOffer | None = None,
 ) -> dict:
     """Run parallel section prompts + 1 synthesis, return combined narrative.
 
     Args:
         data_block: Formatted string with all metrics, facets, and session data.
         previous_report: Previous report's aggregated_data for regression comparison.
-        registry_catalog: Filtered catalog of available components (only for suggestions).
+        registry_offer: Shortlist of reusable components (only for suggestions).
 
     Returns:
         Dict with structured section outputs for each narrative section.
@@ -558,13 +581,7 @@ async def generate_sections(
     else:
         previous_data_block = "## Previous Period Metrics\nNo previous period data available."
 
-    # Build catalog block for suggestions
-    catalog_block = ""
-    if registry_catalog:
-        catalog_block = (
-            "\n\n## Available Components (registry catalog, NOT yet configured on this agent)\n"
-            + json.dumps(registry_catalog, indent=2)
-        )
+    offer_block = catalog_block(registry_offer) if registry_offer else ""
 
     # Resolve models
     deep_model = await _get_section_model()
@@ -574,9 +591,7 @@ async def generate_sections(
         "insight_sections_starting",
         deep_model=deep_model or "default",
         fast_model=fast_model or "default",
-        catalog_items=(len(registry_catalog.get("mcps", [])) + len(registry_catalog.get("skills", [])))
-        if registry_catalog
-        else 0,
+        catalog_items=registry_offer.item_count if registry_offer else 0,
     )
 
     # Build prompts for all sections
@@ -588,7 +603,7 @@ async def generate_sections(
                 previous_data_block=previous_data_block,
             )
         elif name == "suggestions":
-            built = template.format(data_block=data_block + catalog_block)
+            built = template.format(data_block=data_block + offer_block)
         else:
             built = template.format(data_block=data_block)
         section_prompts[name] = SECTION_PREAMBLE + built

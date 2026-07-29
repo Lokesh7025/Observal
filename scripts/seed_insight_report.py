@@ -16,6 +16,66 @@ import sys
 sys.path.insert(0, "/app")
 
 
+async def _find_reusable_skill(db):
+    """Return (id, qualified_name, version) for an approved skill, if any."""
+    from sqlalchemy import select as _select
+
+    from models.mcp import ListingStatus
+    from models.skill import SkillListing, SkillVersion
+
+    row = (
+        await db.execute(
+            _select(SkillListing, SkillVersion)
+            .join(SkillVersion, SkillListing.latest_version_id == SkillVersion.id)
+            .where(SkillVersion.status == ListingStatus.approved)
+            .limit(1)
+        )
+    ).first()
+    if not row:
+        return None
+    listing, version = row
+    return {
+        "type": "skill",
+        "id": str(listing.id),
+        "name": listing.name,
+        "qualified_name": f"{listing.namespace}/{listing.slug}",
+        "latest_version": version.version,
+    }
+
+
+def _features_to_try(reuse_component):
+    """Suggestions covering both the reuse path and the create-new path."""
+    features = []
+    if reuse_component:
+        features.append(
+            {
+                "action_type": "reuse_existing_component",
+                "feature": "Skill",
+                "name": reuse_component["name"],
+                "existing_component_id": reuse_component["id"],
+                "component_ref": reuse_component,
+                "match_reason": "You repeat this workflow by hand in 6 sessions; this skill already does it.",
+                "one_liner": f"Reuse {reuse_component['name']} instead of building it again",
+                "why_for_you": "It is already approved in your registry and matches what you keep doing manually.",
+                "confidence": "high",
+                "risk": "low",
+            }
+        )
+    features.append(
+        {
+            "action_type": "create_new_hook",
+            "feature": "Lifecycle hook",
+            "name": "pre-commit-gate",
+            "one_liner": "Pre-commit validation gate",
+            "why_for_you": "Catches forgotten test runs before they reach CI",
+            "example": "# Hook: before git commit\npytest --tb=short -q\nruff check .",
+            "confidence": "medium",
+            "risk": "low",
+        }
+    )
+    return features
+
+
 async def main():
     from datetime import UTC, datetime, timedelta
 
@@ -29,6 +89,10 @@ async def main():
         # Find any approved agent
         result = await db.execute(select(Agent).where(Agent.status == "approved").limit(1))
         agent = result.scalar_one_or_none()
+
+        # Pick a real approved skill so the reuse-suggestion path can be
+        # exercised end to end without an LLM call.
+        reuse_component = await _find_reusable_skill(db)
 
         if not agent:
             print("ERROR: No approved agent found. Create one first:")
@@ -194,20 +258,7 @@ async def main():
                             "where": "system_prompt",
                         },
                     ],
-                    "features_to_try": [
-                        {
-                            "feature": "Custom skill",
-                            "one_liner": "PR review workflow that checks tests, lint, and security",
-                            "why_for_you": "You do PR reviews in 40% of sessions",
-                            "example": "---\nname: pr-review\ndescription: Review PR for correctness, tests, and security\ntrigger: /review\n---\n\n1. Read the git diff\n2. Check all modified files have tests\n3. Run ruff check on changed Python files\n4. Look for security issues (SQL injection, path traversal)\n5. Summarize findings with severity ratings",
-                        },
-                        {
-                            "feature": "Lifecycle hook",
-                            "one_liner": "Pre-commit validation gate",
-                            "why_for_you": "Catches forgotten test runs before they reach CI",
-                            "example": "# Hook: before git commit\npytest --tb=short -q\nruff check .",
-                        },
-                    ],
+                    "features_to_try": _features_to_try(reuse_component),
                     "usage_patterns": [
                         {
                             "title": "Structured debugging",
@@ -260,7 +311,14 @@ async def main():
         print(f"  Agent: {agent.name} ({agent.id})")
         print("  Status: completed")
         print("  Sessions: 12")
-        print("  Suggestions: 4 config_additions, 2 features_to_try, 2 usage_patterns")
+        feature_count = len(_features_to_try(reuse_component))
+        print(f"  Suggestions: 4 config_additions, {feature_count} features_to_try, 2 usage_patterns")
+        if reuse_component:
+            print(
+                f"  Reuse suggestion points at {reuse_component['qualified_name']} v{reuse_component['latest_version']}"
+            )
+        else:
+            print("  No approved skill found, so no reuse suggestion was seeded")
         print(f"\n  → Go to: http://localhost:3000/insights/{report.id}")
         print("  → Click 'Apply Suggestions' to test self-learn!")
 

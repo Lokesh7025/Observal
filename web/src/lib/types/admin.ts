@@ -226,6 +226,12 @@ export interface InsightNarrative {
 	on_the_horizon?: unknown;
 	fun_ending?: unknown;
 	regressions?: InsightRegression[];
+	/**
+	 * Outcome of the reuse search: how many registry components were offered
+	 * to the model and how many survived validation. Absent on reports
+	 * generated before reuse suggestions existed.
+	 */
+	registry_match?: unknown;
 }
 
 export interface InsightRegression {

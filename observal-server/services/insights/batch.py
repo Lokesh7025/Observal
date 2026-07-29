@@ -10,6 +10,7 @@ This module stays in the main repo because it directly interacts with
 PostgreSQL models (Agent, InsightReport) and Redis job queues.
 """
 
+import uuid
 from datetime import UTC, datetime, timedelta
 
 import structlog
@@ -22,6 +23,8 @@ from services.clickhouse import _query
 from services.insight_version_filters import agent_version_filter
 from services.redis import _get_arq_pool
 from services.secrets_redactor import redact_secrets
+
+from .registry_match import RegistryScope
 
 logger = structlog.get_logger(__name__)
 
@@ -104,51 +107,31 @@ async def _load_agent_config(db, agent_id) -> dict | None:
     return config
 
 
-async def _load_registry_catalog(db) -> dict:
-    """Load a summary of available MCPs and skills from the registry.
+def _build_registry_scope(agent: Agent | None, agent_config: dict | None) -> RegistryScope:
+    """Describe which registry components this agent may be offered.
 
-    Returns a compact catalog for the LLM to reference when suggesting
-    new components the agent could benefit from.
+    Attached components come from ``agent_config``, which is built from the
+    latest *approved* version — the same one the report analyses. Reading
+    ``agent.latest_version`` instead could exclude the wrong set whenever a
+    newer version is still pending review.
+
+    The shortlist itself is built later, inside the pipeline, once the
+    report's signals exist — see :mod:`services.insights.registry_match`.
     """
-    from models.mcp import ListingStatus, McpListing, McpVersion
-    from models.skill import SkillListing, SkillVersion
+    if agent is None:
+        return RegistryScope(org_id=None, attached_ids=())
 
-    catalog: dict = {"mcps": [], "skills": []}
+    attached: list = []
+    for component in (agent_config or {}).get("current_components", []) or []:
+        component_id = component.get("id") if isinstance(component, dict) else None
+        if not component_id:
+            continue
+        try:
+            attached.append(uuid.UUID(str(component_id)))
+        except (ValueError, TypeError):
+            continue
 
-    # Public MCPs with their latest version description
-    mcp_stmt = (
-        select(McpListing.id, McpListing.name, McpListing.category, McpVersion.description)
-        .join(McpVersion, McpListing.latest_version_id == McpVersion.id, isouter=True)
-        .where(McpListing.is_private == False, McpVersion.status == ListingStatus.approved)  # noqa: E712
-    )
-    mcp_result = await db.execute(mcp_stmt)
-    for row in mcp_result.all():
-        catalog["mcps"].append(
-            {
-                "id": str(row[0]),
-                "name": row[1],
-                "category": row[2],
-                "description": (row[3] or "")[:120],
-            }
-        )
-
-    # Public skills with their latest version description
-    skill_stmt = (
-        select(SkillListing.id, SkillListing.name, SkillVersion.description)
-        .join(SkillVersion, SkillListing.latest_version_id == SkillVersion.id, isouter=True)
-        .where(SkillListing.is_private == False, SkillVersion.status == ListingStatus.approved)  # noqa: E712
-    )
-    skill_result = await db.execute(skill_stmt)
-    for row in skill_result.all():
-        catalog["skills"].append(
-            {
-                "id": str(row[0]),
-                "name": row[1],
-                "description": (row[2] or "")[:120],
-            }
-        )
-
-    return catalog
+    return RegistryScope(org_id=agent.owner_org_id, attached_ids=tuple(attached))
 
 
 # Maximum time a report can stay in 'running' before being considered stale.
@@ -238,8 +221,9 @@ async def run_single_report(report_id: str) -> None:
                 if prev_report and prev_report.aggregated_data:
                     previous_metrics = prev_report.aggregated_data
 
-            # Load registry catalog for component-aware suggestions
-            registry_catalog = await _load_registry_catalog(db)
+            # Scope for registry reuse suggestions. The shortlist itself is
+            # built inside the pipeline once the report's signals exist.
+            registry_scope = _build_registry_scope(agent, agent_config)
 
             async def progress_callback(phase: str, current: int, total: int, message: str) -> None:
                 await _update_report_progress(db, report, phase, current, total, message)
@@ -254,7 +238,7 @@ async def run_single_report(report_id: str) -> None:
                 period_end=end_str,
                 previous_metrics=previous_metrics,
                 agent_config=agent_config,
-                registry_catalog=registry_catalog,
+                registry_scope=registry_scope,
                 db=db,
                 progress_callback=progress_callback,
             )

@@ -642,12 +642,41 @@ def render_report_html(report: dict) -> str:
                 if isinstance(f, dict):
                     example = f.get("example", "")
                     example_attr = html.escape(example, quote=True) if example else ""
+                    ref = f.get("component_ref") if isinstance(f.get("component_ref"), dict) else None
+                    # A validated reuse suggestion shows the real component
+                    # instead of generated content there is nothing to copy from.
+                    reuse_html = ""
+                    if ref:
+                        reuse_html = (
+                            '<div style="margin-top:10px;padding:10px 12px;border:1px solid var(--border);'
+                            'border-radius:var(--radius-xs);background:var(--bg-alt)">'
+                            '<div style="font-size:11px;text-transform:uppercase;letter-spacing:.04em;'
+                            'color:var(--text-muted);margin-bottom:4px">Already in your registry</div>'
+                            f'<div style="font-size:13px;font-weight:600">{_esc(ref.get("qualified_name") or ref.get("name", ""))}'
+                            f'<span style="font-family:monospace;font-weight:400;color:var(--text-muted);margin-left:8px">'
+                            f"v{_esc(ref.get('latest_version', ''))}</span></div></div>"
+                        )
+                    match_reason = f.get("match_reason") or ""
+                    match_html = (
+                        f'<p style="font-size:12px;color:var(--text-muted);margin-top:8px;font-style:italic">'
+                        f"Why this fits: {_esc(match_reason)}</p>"
+                        if match_reason
+                        else ""
+                    )
+                    badge = "Reuse existing" if ref else f.get("feature", "")
+                    example_html = (
+                        f'<pre style="background:var(--bg-alt);border:1px solid var(--border);border-radius:var(--radius-xs);padding:12px 14px;font-family:monospace;font-size:12px;color:var(--text-secondary);white-space:pre-wrap;word-break:break-all;margin-top:10px">{_esc(example)}</pre><button class="copy-btn" style="margin-top:6px" onclick="navigator.clipboard.writeText(this.getAttribute(&quot;data-text&quot;)).then(()=>{{this.textContent=&quot;Copied!&quot;;setTimeout(()=>this.textContent=&quot;Copy&quot;,1500)}})" data-text="{example_attr}">Copy</button>'
+                        if example and not ref
+                        else ""
+                    )
                     feat_cards += f"""
         <div class="suggestion-card">
-          <span class="meta-badge" style="margin-bottom:8px;display:inline-block">{_esc(f.get("feature", ""))}</span>
+          <span class="meta-badge" style="margin-bottom:8px;display:inline-block">{_esc(badge)}</span>
           <h4 style="font-size:14px;margin-bottom:4px">{_esc(f.get("one_liner", ""))}</h4>
           <p style="font-size:13px;color:var(--text-secondary);margin-top:6px">{_esc(f.get("why_for_you", ""))}</p>
-          {f'<pre style="background:var(--bg-alt);border:1px solid var(--border);border-radius:var(--radius-xs);padding:12px 14px;font-family:monospace;font-size:12px;color:var(--text-secondary);white-space:pre-wrap;word-break:break-all;margin-top:10px">{_esc(example)}</pre><button class="copy-btn" style="margin-top:6px" onclick="navigator.clipboard.writeText(this.getAttribute(&quot;data-text&quot;)).then(()=>{{this.textContent=&quot;Copied!&quot;;setTimeout(()=>this.textContent=&quot;Copy&quot;,1500)}})" data-text="{example_attr}">Copy</button>' if example else ""}
+          {reuse_html}
+          {match_html}
+          {example_html}
         </div>"""
             sugg_parts.append(f"""
       <h3 style="font-size:15px;font-weight:600;margin:24px 0 12px">Features to Try</h3>

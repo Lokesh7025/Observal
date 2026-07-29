@@ -502,7 +502,11 @@ async def test_insights_connection(
     kwargs: dict = {
         "model": model,
         "messages": [{"role": "user", "content": "Say hello in exactly one word."}],
-        "max_tokens": 10,
+        # Reasoning models (Gemini 3, o-series, Claude thinking) spend their
+        # budget thinking before emitting text. A budget of 10 leaves nothing
+        # for the answer, so the call "succeeds" with zero choices and the
+        # test reports a bogus IndexError. Give it room to actually reply.
+        "max_tokens": 2048,
         "timeout": 15,
         "drop_params": True,
     }

@@ -5,7 +5,7 @@
 name: observal
 command: observal
 description: "Core Observal CLI operations: pull agents into your harness, scan installed components, diagnose and patch harness configs, authenticate, manage CLI settings, and discuss agent insights. Use when the user wants to install an agent, check setup, login, configure the CLI, or ask how an agent is doing."
-version: 2.3.0
+version: 2.4.0
 owner: observal
 ---
 
@@ -221,6 +221,8 @@ observal ops insights generate AGENT_NAME --version 1.2.0 --compare 1.1.0 --peri
 ```
 
 Keep the answer grounded in the JSON. Say when the report is missing a section or has low session count.
+
+**Reuse suggestions come first.** A `suggestions.features_to_try` entry carrying a `component_ref` object already exists in this registry — the server validated it and strips the field from anything it could not resolve. Report those ahead of create-new suggestions, quoting `component_ref.qualified_name` and `latest_version` verbatim. No `component_ref` means it is not a registry component: never tell the user to install it. When nothing is reused, `narrative.registry_match` says why; see `observal-ops` for its fields.
 
 ---
 

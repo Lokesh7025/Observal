@@ -3,8 +3,8 @@
 # SPDX-License-Identifier: Apache-2.0
 name: observal-ops
 command: observal
-description: View traces, spans, metrics, feedback, telemetry health, and agent insight reports. Use when the user wants to see traces, check metrics, view top items, submit ratings, diagnose telemetry, or discuss how an agent is doing.
-version: 2.1.0
+description: View traces, spans, metrics, feedback, telemetry health, and agent insight reports, including suggestions that reuse components already in the registry. Use when the user wants to see traces, check metrics, view top items, submit ratings, diagnose telemetry, or discuss how an agent is doing.
+version: 2.2.0
 owner: observal
 ---
 
@@ -118,6 +118,63 @@ observal ops insights show AGENT_NAME latest --output json
 ```
 
 Answer like an analyst: cite the report period, session count, strengths, friction, cost, version notes, and two or three concrete next actions. If data is thin, say so.
+
+### Reuse suggestions: components the registry already has
+
+A suggestion under `suggestions.features_to_try` may point at a component that already exists in
+this registry instead of proposing a new one. Those entries carry a `component_ref`:
+
+```json
+{
+  "action_type": "reuse_existing_component",
+  "feature": "Skill",
+  "match_reason": "Sessions repeatedly hand-review terraform plans",
+  "component_ref": {
+    "type": "skill",
+    "id": "0f2b...",
+    "qualified_name": "super/terraform-plan-review",
+    "latest_version": "1.0.0"
+  }
+}
+```
+
+**`component_ref` is the only trustworthy registry reference in a report.** The server validates
+it against the registry and strips it from anything it cannot resolve, so:
+
+- **Lead with these.** "You already have this" beats "go build this". Report reuse suggestions
+  before create-new ones, whatever order the JSON happens to be in.
+- Use `component_ref.qualified_name` and `latest_version` verbatim. Never reconstruct a name or
+  version from prose elsewhere in the report.
+- If `component_ref` is absent or null, it is **not** a registry component. Do not tell the user
+  to install it, and do not go looking for a matching name in the registry to fill the gap.
+- Never treat `existing_component_id` as valid on its own — a suggestion whose reference failed
+  validation keeps its text but has its ids nulled.
+
+To act on one:
+
+```bash
+observal registry skill show NAMESPACE/SLUG --output json
+observal agent add skill COMPONENT_UUID
+```
+
+`observal agent add` writes to a local `observal-agent.yaml`, so it only applies when the user is
+authoring that agent locally. Otherwise use the harness install command from `observal-registry`.
+
+### When a report suggests nothing to reuse
+
+A completed report carries `narrative.registry_match`, which says whether reuse was even possible:
+
+| Field | Meaning |
+|-------|---------|
+| `enabled` | `false` = an operator turned reuse suggestions off |
+| `offered` | How many existing components were considered |
+| `reused` | How many suggestions ended up pointing at one |
+| `registry_has_components` | `false` = nothing published yet. `null` = not checked |
+
+Use it to answer "why didn't it recommend anything?" precisely: `offered > 0, reused: 0` means the
+match ran and nothing fit — a real answer, not a failure. `registry_has_components: false` means
+there was nothing to match against. A report generated before this feature has no `registry_match`
+key at all; say the report predates it rather than guessing.
 
 ---
 

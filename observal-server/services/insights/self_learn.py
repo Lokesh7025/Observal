@@ -32,6 +32,7 @@ if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.agent import Agent, AgentStatus, AgentVersion
+from models.agent_component import AgentComponent
 from models.hook import HookListing, HookVersion
 from models.insight_report import InsightReport, InsightReportStatus
 from models.mcp import ListingStatus
@@ -39,7 +40,36 @@ from models.prompt import PromptListing, PromptVersion
 from models.skill import SkillListing, SkillVersion
 from models.user import User
 from services.registry_namespace import slugify
+from services.registry_recommender import (
+    ALL_COMPONENT_TYPES,
+    COMPONENT_MODELS,
+    ResolvedComponent,
+    coerce_uuid,
+    resolve_component_any_type,
+    visibility_clause,
+)
 from services.versioning import bump_version
+
+
+class _NewComponent:
+    """A listing created during this apply run (always version 1.0.0).
+
+    Deliberately a plain class rather than a dataclass: this module combines
+    ``from __future__ import annotations`` with being loaded standalone by
+    tests via ``importlib`` under a synthetic module name. Dataclass field
+    resolution looks that name up in ``sys.modules`` and crashes when it is
+    absent, so the decorator would make the module unloadable in that test.
+    """
+
+    __slots__ = ("component_id", "component_type")
+
+    def __init__(self, component_type: str, component_id: uuid.UUID) -> None:
+        self.component_type = component_type
+        self.component_id = component_id
+
+
+# Action types that mean "attach something the registry already has".
+_REUSE_ACTIONS = frozenset({"reuse_existing_component", "attach_registry_component"})
 
 # Separator appended before auto-generated additions to the system prompt
 _SELF_LEARN_SEPARATOR = "\n\n# ── Auto-learned from Insights ──\n"
@@ -49,7 +79,7 @@ _MAX_NAME_LEN = 48
 
 
 async def apply_insight_suggestions(
-    report_id: str,
+    report_id: str | uuid.UUID,
     db: AsyncSession,
     triggered_by: uuid.UUID,
     selection: dict | None = None,
@@ -66,8 +96,13 @@ async def apply_insight_suggestions(
 
     Returns a summary dict of what was created.
     """
-    # Load report
-    stmt = select(InsightReport).where(InsightReport.id == report_id)
+    # Load report. Accept either a UUID or its string form — callers come
+    # from both HTTP paths (string) and internal code (UUID).
+    report_uuid = coerce_uuid(report_id)
+    if report_uuid is None:
+        raise ValueError("Report not found")
+
+    stmt = select(InsightReport).where(InsightReport.id == report_uuid)
     result = await db.execute(stmt)
     report = result.scalar_one_or_none()
 
@@ -128,8 +163,9 @@ async def apply_insight_suggestions(
     features_to_try = suggestions.get("features_to_try", [])
     created_skill_ids: list[uuid.UUID] = []
     created_hook_ids: list[uuid.UUID] = []
-    existing_skill_ids: list[uuid.UUID] = []
-    existing_hook_ids: list[uuid.UUID] = []
+    # Reused registry components, keyed by type. Values carry the resolved
+    # name and version so the AgentComponent row is written accurately.
+    linked_existing: list[ResolvedComponent] = []
     removed_component_ids: list[uuid.UUID] = []
 
     for idx in feature_indices:
@@ -138,40 +174,33 @@ async def apply_insight_suggestions(
         feature = features_to_try[idx]
         action_type = str(feature.get("action_type") or "").lower()
         existing_id = feature.get("existing_component_id")
-        # Never create MCPs from insights
-        if _is_mcp_suggestion(feature):
+        if action_type in _REUSE_ACTIONS and existing_id:
+            resolved = await _resolve_reusable_component(feature, agent, db)
+            if not resolved:
+                optic.info(
+                    "self_learn_reuse_rejected",
+                    agent=agent.name,
+                    component_id=str(existing_id),
+                    declared_type=feature.get("feature"),
+                )
+                continue
+            linked_existing.append(resolved)
+            applied["linked_existing"].append(
+                {
+                    "type": resolved.component_type,
+                    "id": str(resolved.id),
+                    "name": resolved.name,
+                    "qualified_name": resolved.qualified_name,
+                    "version": resolved.latest_version,
+                    "reason": feature.get("why_for_you"),
+                    "confidence": feature.get("confidence"),
+                    "risk": feature.get("risk"),
+                }
+            )
             continue
-        if action_type in {"reuse_existing_component", "attach_registry_component"} and existing_id:
-            try:
-                cid = uuid.UUID(str(existing_id))
-            except ValueError:
-                cid = None
-            if cid and _is_skill_suggestion(feature):
-                if not await _is_active_skill(cid, db):
-                    continue
-                existing_skill_ids.append(cid)
-                applied["linked_existing"].append(
-                    {
-                        "type": "skill",
-                        "id": str(cid),
-                        "reason": feature.get("why_for_you"),
-                        "confidence": feature.get("confidence"),
-                        "risk": feature.get("risk"),
-                    }
-                )
-            elif cid and _is_hook_suggestion(feature):
-                if not await _is_active_hook(cid, db):
-                    continue
-                existing_hook_ids.append(cid)
-                applied["linked_existing"].append(
-                    {
-                        "type": "hook",
-                        "id": str(cid),
-                        "reason": feature.get("why_for_you"),
-                        "confidence": feature.get("confidence"),
-                        "risk": feature.get("risk"),
-                    }
-                )
+        # Creating brand-new MCPs from an LLM suggestion is never safe: they
+        # carry commands, images and credentials. Reuse above is allowed.
+        if _is_mcp_suggestion(feature):
             continue
         if action_type == "remove_component" and existing_id:
             try:
@@ -191,14 +220,16 @@ async def apply_insight_suggestions(
                 )
             continue
         if _is_skill_suggestion(feature):
-            existing_match = await _find_existing_skill_match(feature, db)
+            existing_match = await _find_existing_skill_match(feature, agent, db)
             if existing_match:
-                existing_skill_ids.append(existing_match.id)
+                linked_existing.append(existing_match)
                 applied["linked_existing"].append(
                     {
                         "type": "skill",
                         "id": str(existing_match.id),
                         "name": existing_match.name,
+                        "qualified_name": existing_match.qualified_name,
+                        "version": existing_match.latest_version,
                         "reason": "matched existing registry skill",
                         "confidence": feature.get("confidence"),
                         "risk": feature.get("risk") or "low",
@@ -265,18 +296,22 @@ async def apply_insight_suggestions(
             for item in selected_additions
         ]
 
-    linked_skill_ids = created_skill_ids + existing_skill_ids
-    linked_hook_ids = created_hook_ids + existing_hook_ids
+    # Components created in this run are always at 1.0.0 by construction;
+    # reused ones carry whatever version the registry resolved.
+    new_components = (
+        [_NewComponent("skill", cid) for cid in created_skill_ids]
+        + [_NewComponent("hook", cid) for cid in created_hook_ids]
+        + [_NewComponent("prompt", cid) for cid in created_prompt_ids]
+    )
 
-    if selected_additions or linked_skill_ids or linked_hook_ids or created_prompt_ids or removed_component_ids:
+    if selected_additions or new_components or linked_existing or removed_component_ids:
         version_info = await _create_agent_version_with_additions(
             agent=agent,
             config_additions=selected_additions,
             submitter_id=submitter_id,
             db=db,
-            linked_skill_ids=linked_skill_ids,
-            linked_hook_ids=linked_hook_ids,
-            linked_prompt_ids=created_prompt_ids,
+            new_components=new_components,
+            linked_existing=linked_existing,
             removed_component_ids=removed_component_ids,
         )
         if version_info:
@@ -402,14 +437,13 @@ async def _create_agent_version_with_additions(
     config_additions: list[dict],
     submitter_id: uuid.UUID,
     db: AsyncSession,
-    linked_skill_ids: list[uuid.UUID] | None = None,
-    linked_hook_ids: list[uuid.UUID] | None = None,
-    linked_prompt_ids: list[uuid.UUID] | None = None,
+    new_components: list[_NewComponent] | None = None,
+    linked_existing: list[ResolvedComponent] | None = None,
     removed_component_ids: list[uuid.UUID] | None = None,
 ) -> dict | None:
     """Create a new pending AgentVersion with config_additions appended to the prompt.
 
-    Links any created skills/hooks/prompts as AgentComponents so the review
+    Links created and reused components as AgentComponents so the review
     queue enforces approval dependency.
     """
     # Get the latest approved version
@@ -439,14 +473,11 @@ async def _create_agent_version_with_additions(
     ]
     additions_text = _build_additions_text(config_additions)
 
-    # Even without text additions, we might be linking new components
-    if (
-        not additions_text.strip()
-        and not linked_skill_ids
-        and not linked_hook_ids
-        and not linked_prompt_ids
-        and not removed_component_ids
-    ):
+    new_components = new_components or []
+    linked_existing = linked_existing or []
+
+    # Even without text additions, we might be linking components
+    if not additions_text.strip() and not new_components and not linked_existing and not removed_component_ids:
         return None
 
     new_prompt = current_prompt
@@ -475,7 +506,7 @@ async def _create_agent_version_with_additions(
             optic.error("self_learn_version_exhaustion", agent=agent.name)
             return None
 
-    total_linked = len(linked_skill_ids or []) + len(linked_hook_ids or []) + len(linked_prompt_ids or [])
+    total_linked = len(new_components) + len(linked_existing)
     desc_parts = []
     if config_additions:
         desc_parts.append(f"{len(config_additions)} prompt additions")
@@ -505,8 +536,6 @@ async def _create_agent_version_with_additions(
     await db.flush()
 
     # Copy components from the latest version
-    from models.agent_component import AgentComponent
-
     order_idx = 0
     removed_set = set(removed_component_ids or [])
     for comp in latest_version.components or []:
@@ -525,47 +554,39 @@ async def _create_agent_version_with_additions(
         )
         order_idx = max(order_idx, (comp.order_index or 0) + 1)
 
-    # Link newly created skills
-    for skill_id in linked_skill_ids or []:
+    # Link components created in this run. These are always born at 1.0.0,
+    # but resolve the name so later reports don't fall back to a UUID stub.
+    created_names = await _component_names(new_components, db)
+    for component in new_components:
         db.add(
             AgentComponent(
                 agent_version_id=new_version.id,
-                component_type="skill",
-                component_id=skill_id,
-                component_name="",
+                component_type=component.component_type,
+                component_id=component.component_id,
+                component_name=created_names.get(component.component_id, ""),
                 resolved_version="1.0.0",
                 order_index=order_idx,
             )
         )
         order_idx += 1
 
-    # Link newly created hooks
-    for hook_id in linked_hook_ids or []:
+    # Link reused registry components at the version the registry actually
+    # has. Pinning a version that does not exist breaks agent pulls.
+    for resolved in linked_existing:
         db.add(
             AgentComponent(
                 agent_version_id=new_version.id,
-                component_type="hook",
-                component_id=hook_id,
-                component_name="",
-                resolved_version="1.0.0",
+                component_type=resolved.component_type,
+                component_id=resolved.id,
+                component_name=resolved.name,
+                resolved_version=resolved.latest_version,
                 order_index=order_idx,
             )
         )
         order_idx += 1
 
-    # Link newly created prompts
-    for prompt_id in linked_prompt_ids or []:
-        db.add(
-            AgentComponent(
-                agent_version_id=new_version.id,
-                component_type="prompt",
-                component_id=prompt_id,
-                component_name="",
-                resolved_version="1.0.0",
-                order_index=order_idx,
-            )
-        )
-        order_idx += 1
+    await db.flush()
+    await _refresh_capability_inference(new_version, db)
 
     return {
         "id": str(new_version.id),
@@ -574,6 +595,57 @@ async def _create_agent_version_with_additions(
         "linked_components": total_linked,
         "removed_components": len(removed_component_ids or []),
     }
+
+
+async def _component_names(components: list[_NewComponent], db: AsyncSession) -> dict[uuid.UUID, str]:
+    """Look up display names for freshly created listings."""
+    names: dict[uuid.UUID, str] = {}
+    by_type: dict[str, list[uuid.UUID]] = {}
+    for component in components:
+        by_type.setdefault(component.component_type, []).append(component.component_id)
+
+    for component_type, ids in by_type.items():
+        models = COMPONENT_MODELS.get(component_type)
+        if not models:
+            continue
+        listing_model = models[0]
+        rows = (await db.execute(select(listing_model.id, listing_model.name).where(listing_model.id.in_(ids)))).all()
+        for row in rows:
+            names[row[0]] = row[1]
+    return names
+
+
+async def _refresh_capability_inference(version: AgentVersion, db: AsyncSession) -> None:
+    """Recompute required capabilities for a version we just built.
+
+    The HTTP publish paths do this after every component change; self-learn
+    previously did not, so insight-generated versions silently lost the
+    harness-compatibility warnings shown at pull time.
+    """
+    from services.harness_capability_inference import compute_supported_harnesses, infer_required_features
+
+    components = (
+        (await db.execute(select(AgentComponent).where(AgentComponent.agent_version_id == version.id))).scalars().all()
+    )
+
+    skill_ids = [c.component_id for c in components if c.component_type == "skill"]
+    skill_listings: dict[uuid.UUID, SkillListing] = {}
+    if skill_ids:
+        rows = (await db.execute(select(SkillListing).where(SkillListing.id.in_(skill_ids)))).scalars().all()
+        skill_listings = {listing.id: listing for listing in rows}
+
+    class _VersionProxy:
+        """Shape `infer_required_features` expects: components + external_mcps."""
+
+        def __init__(self) -> None:
+            self.components = components
+            self.external_mcps = version.external_mcps
+
+    try:
+        version.required_capabilities = infer_required_features(_VersionProxy(), skill_listings=skill_listings)
+        version.inferred_supported_harnesses = compute_supported_harnesses(version.required_capabilities)
+    except Exception as e:  # pragma: no cover - inference must never block the apply
+        optic.warning("self_learn_capability_inference_failed", version=version.version, error=str(e))
 
 
 def _build_additions_text(config_additions: list[dict]) -> str:
@@ -711,50 +783,88 @@ def _slugify(text: str) -> str:
     return slug.strip("-")
 
 
-async def _is_active_skill(component_id: uuid.UUID, db: AsyncSession) -> bool:
-    result = await db.execute(
-        select(SkillListing.id)
-        .join(SkillVersion, SkillListing.latest_version_id == SkillVersion.id, isouter=True)
-        .where(SkillListing.id == component_id, SkillVersion.status == ListingStatus.approved)
+def _declared_component_type(feature: dict) -> str | None:
+    """Best guess at the component type an LLM suggestion refers to.
+
+    Returns None when the wording is ambiguous; the caller then falls back to
+    resolving by id across every type, which is authoritative anyway.
+    """
+    if _is_skill_suggestion(feature):
+        return "skill"
+    if _is_hook_suggestion(feature):
+        return "hook"
+    if _is_mcp_suggestion(feature):
+        return "mcp"
+    label = f"{feature.get('feature') or ''} {feature.get('name') or ''}".lower()
+    if "prompt" in label:
+        return "prompt"
+    if "sandbox" in label:
+        return "sandbox"
+    return None
+
+
+async def _resolve_reusable_component(feature: dict, agent: Agent, db: AsyncSession) -> ResolvedComponent | None:
+    """Validate a reuse suggestion against the registry.
+
+    The declared type is a hint only. The id is resolved across every
+    component type and the *actual* type wins, so a mislabelled suggestion
+    still attaches correctly instead of being silently dropped.
+
+    Scoped to the agent's org so a suggestion can never attach another
+    tenant's private component.
+    """
+    component_id = coerce_uuid(feature.get("existing_component_id"))
+    if component_id is None:
+        return None
+
+    declared = _declared_component_type(feature)
+    ordered_types = (
+        [declared, *[t for t in ALL_COMPONENT_TYPES if t != declared]] if declared else list(ALL_COMPONENT_TYPES)
     )
-    return result.scalar_one_or_none() is not None
-
-
-async def _is_active_hook(component_id: uuid.UUID, db: AsyncSession) -> bool:
-    result = await db.execute(
-        select(HookListing.id)
-        .join(HookVersion, HookListing.latest_version_id == HookVersion.id, isouter=True)
-        .where(HookListing.id == component_id, HookVersion.status == ListingStatus.approved)
+    return await resolve_component_any_type(
+        db,
+        component_id,
+        org_id=agent.owner_org_id,
+        component_types=ordered_types,
     )
-    return result.scalar_one_or_none() is not None
 
 
-async def _find_existing_skill_match(feature: dict, db: AsyncSession) -> SkillListing | None:
-    """Deterministically find an existing approved skill before creating a duplicate."""
+async def _find_existing_skill_match(feature: dict, agent: Agent, db: AsyncSession) -> ResolvedComponent | None:
+    """Deterministically find an existing approved skill before creating a duplicate.
+
+    Scoped to the agent's org: matching must never reach into another
+    tenant's private skills.
+    """
     raw_name = _slugify(str(feature.get("name") or ""))
     one_liner = str(feature.get("one_liner") or feature.get("why_for_you") or "")
-    keywords = set(_extract_keywords(f"{raw_name} {one_liner}", max_words=6).split("-"))
+    keywords = [kw for kw in _extract_keywords(f"{raw_name} {one_liner}", max_words=6).split("-") if kw]
     if not raw_name and not keywords:
         return None
 
-    rows = (
-        (
-            await db.execute(
-                select(SkillListing)
-                .join(SkillVersion, SkillListing.latest_version_id == SkillVersion.id, isouter=True)
-                .where(SkillVersion.status == ListingStatus.approved)
-            )
-        )
-        .scalars()
-        .all()
+    stmt = (
+        select(SkillListing, SkillVersion)
+        .join(SkillVersion, SkillListing.latest_version_id == SkillVersion.id)
+        .where(SkillVersion.status == ListingStatus.approved)
     )
-    for listing in rows:
+    visibility = visibility_clause(SkillListing, agent.owner_org_id)
+    if visibility is not None:
+        stmt = stmt.where(visibility)
+
+    for listing, version in (await db.execute(stmt)).all():
         listing_slug = _slugify(listing.name or "")
-        if raw_name and (listing_slug == raw_name or raw_name in listing_slug or listing_slug in raw_name):
-            return listing
-        haystack = f"{listing.name} {getattr(listing.latest_version, 'description', '')}".lower()
-        if keywords and sum(1 for kw in keywords if kw and kw in haystack) >= min(3, len(keywords)):
-            return listing
+        haystack = f"{listing.name} {version.description or ''}".lower()
+        hit = raw_name and (listing_slug == raw_name or raw_name in listing_slug or listing_slug in raw_name)
+        if not hit and keywords:
+            hit = sum(1 for kw in keywords if kw in haystack) >= min(3, len(keywords))
+        if hit:
+            return ResolvedComponent(
+                component_type="skill",
+                id=listing.id,
+                name=listing.name,
+                namespace=listing.namespace,
+                slug=listing.slug,
+                latest_version=version.version,
+            )
     return None
 
 
@@ -922,7 +1032,11 @@ async def _create_hook_listing(
             event=event,
             execution_mode=execution_mode,
             priority=100,
-            handler_type="script",
+            # "script" is not a valid handler_type — only "command" and
+            # "http" are (schemas/constants.VALID_HOOK_HANDLER_TYPES). Using
+            # it meant every generated hook silently failed validation and
+            # was dropped. Inline scripts are delivered as "command".
+            handler_type="command",
             handler_config={"inline": True},
             scope="agent",
             script_content=script_content,

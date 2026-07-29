@@ -4,7 +4,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 
-import { useParams, useRouter } from "@tanstack/react-router";
+import { Link, useParams, useRouter } from "@tanstack/react-router";
+import { RegistryMark, useRegistryName } from "@/components/registry/registry-mark";
 import React from "react";
 import {
 	ArrowLeft,
@@ -27,6 +28,8 @@ import {
 	Sparkles,
 	ArrowUpRight,
 	ArrowDownRight,
+	ArrowRight,
+	Info,
 	Target,
 	Shield,
 	Download,
@@ -592,7 +595,131 @@ function ProjectAreas({ data }: { data: unknown }) {
 
 // ── Suggestions Section (V4: config_additions + features + patterns) ──
 
-function SuggestionsSection({ data, report }: { data: unknown; report?: InsightReport }) {
+/** A resolved registry reference, attached server-side after validation. */
+interface ComponentRef {
+	type: string;
+	id: string;
+	name: string;
+	qualified_name: string;
+	latest_version: string;
+}
+
+interface FeatureSuggestion {
+	feature: string;
+	action_type?: string;
+	name?: string;
+	one_liner: string;
+	why_for_you: string;
+	example: string;
+	match_reason?: string;
+	/** Present only on validated reuse suggestions. Older reports omit it. */
+	component_ref?: ComponentRef | null;
+	confidence?: string;
+	risk?: string;
+}
+
+const COMPONENT_TYPE_LABELS: Record<string, string> = {
+	skill: "Skill",
+	hook: "Hook",
+	prompt: "Prompt",
+	mcp: "MCP server",
+	sandbox: "Sandbox",
+};
+
+/**
+ * The identity of a component the registry already holds.
+ *
+ * This is the whole point of the feature — "you already own this, don't build
+ * it again" — so it leads with the instance's own mark and reads as a
+ * destination, not a footnote. The link stops propagation because the
+ * surrounding card owns selection for the Apply flow; navigating and
+ * selecting are different intents and must not fight.
+ */
+function ReuseBadge({ componentRef }: { componentRef: ComponentRef }) {
+	const label = COMPONENT_TYPE_LABELS[componentRef.type] ?? componentRef.type;
+	const registryName = useRegistryName();
+	return (
+		<div className="mt-3 rounded-lg border border-primary-accent/35 bg-primary-accent/[0.07] overflow-hidden">
+			<div className="flex items-center gap-2 px-3 py-2 border-b border-primary-accent/20 bg-primary-accent/[0.06]">
+				<RegistryMark size={15} />
+				<span className="text-xs font-semibold tracking-tight text-primary-accent">
+					Already in {registryName}
+				</span>
+				<span className="ml-auto text-[11px] uppercase tracking-wide text-muted-foreground">
+					{label}
+				</span>
+			</div>
+
+			<Link
+				to="/components/$componentId"
+				params={{ componentId: componentRef.id }}
+				search={{ type: `${componentRef.type}s` }}
+				onClick={(event) => event.stopPropagation()}
+				className="group/ref flex items-center gap-2 px-3 py-2.5 transition-colors duration-150 hover:bg-primary-accent/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-accent/60 focus-visible:ring-inset"
+			>
+				<span className="min-w-0 flex-1">
+					<span className="block font-[family-name:var(--font-mono)] text-sm font-medium text-foreground break-all group-hover/ref:text-primary-accent transition-colors duration-150">
+						{componentRef.qualified_name || componentRef.name}
+					</span>
+					<span className="mt-0.5 block text-xs text-muted-foreground">
+						v{componentRef.latest_version} · Open in registry
+					</span>
+				</span>
+				<ArrowRight className="h-4 w-4 shrink-0 text-primary-accent transition-transform duration-150 group-hover/ref:translate-x-0.5 motion-reduce:transition-none motion-reduce:group-hover/ref:translate-x-0" />
+			</Link>
+		</div>
+	);
+}
+
+/** What the reuse search did. Absent on reports generated before this existed. */
+interface RegistryMatchSummary {
+	enabled?: boolean;
+	offered?: number;
+	reused?: number;
+	registry_has_components?: boolean | null;
+}
+
+/**
+ * Explains the outcome of the reuse search when it produced nothing.
+ *
+ * Silence is ambiguous: a reader cannot tell "we searched and nothing fit"
+ * from "we never searched". Both are legitimate outcomes, and each suggests a
+ * different action, so each gets said out loud. Renders nothing when reuse
+ * suggestions were actually made — the cards speak for themselves.
+ */
+function RegistryMatchNote({ summary }: { summary?: RegistryMatchSummary }) {
+	const registryName = useRegistryName();
+	if (!summary) return null;
+	if ((summary.reused ?? 0) > 0) return null;
+
+	let message: string;
+	if (summary.enabled === false) {
+		message = `Reuse suggestions are turned off, so this report only proposes new components.`;
+	} else if (summary.registry_has_components === false) {
+		message = `No components have been published to ${registryName} yet, so there was nothing to reuse. Publish skills, hooks or prompts and future reports will point at them.`;
+	} else if ((summary.offered ?? 0) === 0) {
+		message = `Nothing in ${registryName} looked close enough to this agent's work to recommend. More sessions give the match more to go on.`;
+	} else {
+		message = `Checked ${summary.offered} component${summary.offered === 1 ? "" : "s"} already in ${registryName}; none fit this agent's problems closely enough to recommend.`;
+	}
+
+	return (
+		<div className="flex items-start gap-2 rounded-md border border-border bg-muted/20 px-3 py-2.5">
+			<Info className="h-4 w-4 shrink-0 mt-0.5 text-muted-foreground" />
+			<p className="text-xs text-muted-foreground">{message}</p>
+		</div>
+	);
+}
+
+function SuggestionsSection({
+	data,
+	report,
+	registryMatch,
+}: {
+	data: unknown;
+	report?: InsightReport;
+	registryMatch?: RegistryMatchSummary;
+}) {
 	const applySuggestions = useApplyInsightSuggestions();
 	const [showConfirm, setShowConfirm] = React.useState(false);
 	const [selectedConfigs, setSelectedConfigs] = React.useState<Set<number>>(new Set());
@@ -617,7 +744,7 @@ function SuggestionsSection({ data, report }: { data: unknown; report?: InsightR
 
 	// V4 format
 	const configAdditions = obj.config_additions as { addition: string; why: string; where: string; confidence?: string; risk?: string }[] | undefined;
-	const featuresToTry = obj.features_to_try as { feature: string; action_type?: string; one_liner: string; why_for_you: string; example: string; confidence?: string; risk?: string }[] | undefined;
+	const featuresToTry = obj.features_to_try as FeatureSuggestion[] | undefined;
 	const usagePatterns = obj.usage_patterns as { title: string; suggestion: string; detail: string; copyable_prompt: string }[] | undefined;
 
 	// V3 fallback
@@ -790,8 +917,16 @@ function SuggestionsSection({ data, report }: { data: unknown; report?: InsightR
 				{featuresToTry && featuresToTry.length > 0 && (
 					<div>
 						<h4 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-3">Features to Try</h4>
+						<div className="mb-3">
+							<RegistryMatchNote summary={registryMatch} />
+						</div>
 						<div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-							{featuresToTry.map((f, i) => (
+							{/* Reuse suggestions lead: "you already own this" is a better
+							    answer than "build this", so it should be read first. */}
+							{featuresToTry
+								.map((f, i) => ({ f, i }))
+								.sort((a, b) => Number(Boolean(b.f.component_ref)) - Number(Boolean(a.f.component_ref)))
+								.map(({ f, i }) => (
 								<div
 									key={i}
 									className={`rounded-md border p-3 transition-colors ${!report?.applied_at ? "cursor-pointer" : ""} ${selectedFeatures.has(i) ? "border-primary/40 bg-primary/5" : "border-border bg-muted/10 opacity-60"}`}
@@ -802,12 +937,25 @@ function SuggestionsSection({ data, report }: { data: unknown; report?: InsightR
 											<input type="checkbox" checked={selectedFeatures.has(i)} onClick={(event) => event.stopPropagation()} onChange={() => toggleFeature(i)} className="mt-1 h-4 w-4 rounded border-border" />
 										)}
 										<div className="flex-1">
-											<span className="text-xs px-2 py-0.5 rounded-full bg-muted text-muted-foreground">{f.action_type ?? f.feature}</span>
+											<span
+												className={`text-xs px-2 py-0.5 rounded-full ${
+													f.component_ref
+														? "bg-primary-accent/15 text-primary-accent font-medium"
+														: "bg-muted text-muted-foreground"
+												}`}
+											>
+												{f.component_ref ? "Reuse — don't rebuild" : (f.action_type ?? f.feature)}
+											</span>
 											{f.confidence && <span className="ml-1 text-xs px-2 py-0.5 rounded-full bg-muted text-muted-foreground">{f.confidence} confidence</span>}
 											{f.risk && <span className="ml-1 text-xs px-2 py-0.5 rounded-full bg-muted text-muted-foreground">{f.risk} risk</span>}
 											<div className="font-medium text-sm mt-2">{f.one_liner}</div>
 											<p className="text-xs text-foreground/60 mt-1">{f.why_for_you}</p>
-											{f.example && (
+											{f.component_ref && <ReuseBadge componentRef={f.component_ref} />}
+											{f.match_reason && (
+												<p className="text-xs text-muted-foreground mt-2 italic">Why this fits: {f.match_reason}</p>
+											)}
+											{/* A reuse suggestion has no generated body to copy. */}
+											{f.example && !f.component_ref && (
 												<>
 													<pre className="mt-2 p-2 rounded bg-muted/30 text-xs font-[family-name:var(--font-mono)] text-foreground/70 whitespace-pre-wrap break-all">
 														{f.example}
@@ -1811,7 +1959,11 @@ function ReportContent({ report }: { report: InsightReport }) {
 			<FrictionSection data={narrative?.friction_analysis} />
 
 			{/* Suggestions */}
-			<SuggestionsSection data={narrative?.suggestions} report={report} />
+			<SuggestionsSection
+				data={narrative?.suggestions}
+				report={report}
+				registryMatch={narrative?.registry_match as RegistryMatchSummary | undefined}
+			/>
 
 			{/* On the Horizon */}
 			<OnTheHorizon data={narrative?.on_the_horizon} />

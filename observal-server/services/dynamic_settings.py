@@ -234,6 +234,11 @@ DEFAULTS: dict[str, str] = {
     "insights.min_sessions": "5",
     "insights.facet_max_calls": "100",
     "insights.facet_concurrency": "25",
+    # Insights: reuse-existing-component suggestions. Disabling falls back to
+    # suggestions that only ever propose building something new.
+    "insights.registry_match_enabled": "true",
+    "insights.registry_match_per_type": "6",
+    "insights.registry_match_max_items": "24",
     # Auth
     "auth.self_registration_enabled": "false",
     # OIDC SSO. Changes require an API restart because the Authlib client is built at startup.

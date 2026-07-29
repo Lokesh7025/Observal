@@ -25,6 +25,13 @@ from observal_shared.migration.constants import DEFAULT_PROJECT_ID
 
 from ._deps import get_db_session
 from .facets import aggregate_facets, extract_and_cache_facets, load_cached_facets_batch
+from .registry_match import (
+    RegistryScope,
+    build_catalog,
+    build_signals,
+    count_reused,
+    validate_reuse_suggestions,
+)
 from .sections import generate_sections
 from .session_meta_extractor import aggregate_metas, extract_all_session_metas
 from .transcript import build_session_transcript
@@ -46,7 +53,7 @@ async def generate_report_content(
     period_end: str = "",
     previous_metrics: dict | None = None,
     agent_config: dict | None = None,
-    registry_catalog: dict | None = None,
+    registry_scope: RegistryScope | None = None,
     db=None,
     progress_callback=None,
 ) -> dict:
@@ -71,7 +78,7 @@ async def generate_report_content(
             period_end=period_end,
             previous_metrics=previous_metrics,
             agent_config=agent_config,
-            registry_catalog=registry_catalog,
+            registry_scope=registry_scope,
             db=db,
             progress_callback=progress_callback,
         )
@@ -89,11 +96,12 @@ async def _run_pipeline(
     period_end: str,
     previous_metrics: dict | None,
     agent_config: dict | None,
-    registry_catalog: dict | None,
+    registry_scope: RegistryScope | None,
     db=None,
     progress_callback=None,
 ) -> dict:
     """Core pipeline execution."""
+    registry_scope = registry_scope or RegistryScope()
 
     logger.info(
         "insight_pipeline_started",
@@ -369,13 +377,39 @@ async def _run_pipeline(
     except Exception as e:
         logger.warning("version_impact_analysis_failed", error=str(e))
 
+    # ── Step 4c: Shortlist reusable registry components ───────────────────
+    # Driven by this report's own signals, so the model is offered things
+    # that actually relate to the observed work rather than the whole
+    # registry. Never fatal: an empty offer just omits the catalog block.
+    # build_signals runs before build_catalog's own guard, so it needs its
+    # own: a malformed facet shape must not take down the whole report.
+    try:
+        registry_signals = build_signals(agg=agg, facets_summary=facets_summary, agent_config=agent_config)
+    except Exception as e:
+        logger.warning("insight_signal_build_failed", error=str(e))
+        registry_signals = ""
+    registry_offer = await build_catalog(db, registry_scope, registry_signals)
+
     # ── Step 5: Generate narrative sections (7 parallel + 1 synthesis) ────
     await _emit_progress(progress_callback, "generating_sections", 7, 9, "Generating report sections")
     narrative = await generate_sections(
         data_block=data_block,
         previous_report=previous_metrics,
-        registry_catalog=registry_catalog,
+        registry_offer=registry_offer,
     )
+
+    # Ground every reuse suggestion before anything renders it. An id the
+    # model invented must never reach the UI as a real component link.
+    try:
+        narrative = await validate_reuse_suggestions(narrative, registry_offer, db, registry_scope)
+    except Exception as e:
+        logger.warning("insight_reuse_validation_failed", error=str(e))
+
+    # Record what the reuse search actually did, so the report can say
+    # "nothing matched" rather than leaving the reader to guess whether it
+    # even ran.
+    if isinstance(narrative, dict):
+        narrative["registry_match"] = registry_offer.to_summary(reused=count_reused(narrative))
 
     await _emit_progress(progress_callback, "synthesizing", 8, 9, "Synthesizing report")
 

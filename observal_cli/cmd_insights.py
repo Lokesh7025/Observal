@@ -15,6 +15,25 @@ from observal_cli.render import console, esc, output_json, relative_time, spinne
 
 insights_app = typer.Typer(help="Agent insight reports")
 
+_registry_name_cache: str | None = None
+
+
+def _registry_name() -> str:
+    """White-label name for this registry, for user-facing copy.
+
+    Best effort and cached per process: a cosmetic label must never be the
+    reason a report fails to render, so any error falls back to a neutral
+    phrase rather than hardcoding "Observal" over someone's branding.
+    """
+    global _registry_name_cache
+    if _registry_name_cache is None:
+        try:
+            data = client.get("/api/v1/config/public")
+            _registry_name_cache = str(data.get("branding_app_name") or "").strip() or "Observal"
+        except Exception:
+            _registry_name_cache = "your registry"
+    return _registry_name_cache
+
 
 def _resolve_agent_id(agent_id: str) -> str:
     """Resolve an agent UUID, name, or alias to the canonical UUID."""
@@ -144,12 +163,17 @@ def insights_show(
         return
 
     narrative = data.get("narrative") or {}
+    registry_match = narrative.get("registry_match")
+    if not isinstance(registry_match, dict):
+        registry_match = None
     if section:
         if section not in narrative:
             rprint(f"[red]Section '{section}' not found.[/red]")
             rprint(f"[dim]Available: {', '.join(narrative.keys())}[/dim]")
             raise typer.Exit(1)
         _render_section(section, narrative[section])
+        if section == "suggestions":
+            _render_registry_match_note(registry_match)
         return
 
     # Header
@@ -184,10 +208,16 @@ def insights_show(
         "on_the_horizon",
         "fun_ending",
     ]
+    note_rendered = False
     for key in order:
         section_data = narrative.get(key)
         if section_data:
             _render_section(key, section_data)
+            if key == "suggestions":
+                _render_registry_match_note(registry_match)
+                note_rendered = True
+    if not note_rendered:
+        _render_registry_match_note(registry_match)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -327,6 +357,75 @@ def _render_friction(title: str, data: dict):
         console.print(Panel("\n".join(lines), title=f"[bold]{title}[/bold]", border_style="yellow", expand=False))
 
 
+def _reuse_ref(feature: object) -> dict | None:
+    """The validated registry reference on a suggestion, if it has one.
+
+    The server strips this field from any suggestion whose component could
+    not be resolved, so its presence is the signal that the component is
+    genuinely in the registry and safe to point the user at.
+    """
+    if not isinstance(feature, dict):
+        return None
+    ref = feature.get("component_ref")
+    return ref if isinstance(ref, dict) else None
+
+
+def _render_reuse_feature(feature: dict, ref: dict):
+    """A suggestion to reuse something the registry already has.
+
+    Given prominence over "build this" suggestions, because installing an
+    approved component is cheaper and safer than writing a new one.
+    """
+    component_type = str(ref.get("type") or "skill")
+    name = ref.get("qualified_name") or ref.get("name", "")
+    version = ref.get("latest_version") or ""
+    version_suffix = f" [dim]v{esc(version)}[/dim]" if version else ""
+
+    rprint(f"    [green]✔ ALREADY IN {esc(_registry_name().upper())}[/green]  [dim]({esc(component_type)})[/dim]")
+    rprint(f"      [bold]{esc(name)}[/bold]{version_suffix}")
+    if feature.get("one_liner"):
+        rprint(f"      {esc(feature['one_liner'])}")
+    if feature.get("match_reason"):
+        rprint(f"      [dim]Why this fits: {esc(feature['match_reason'])}[/dim]")
+    elif feature.get("why_for_you"):
+        rprint(f"      [dim]{esc(feature['why_for_you'])}[/dim]")
+    rprint(f"      [cyan]observal registry {esc(component_type)} show {esc(name)} --output json[/cyan]")
+    rprint(f"      [dim]Attach to an agent: observal agent add {esc(component_type)} {esc(ref.get('id', ''))}[/dim]")
+
+
+def _render_registry_match_note(summary: dict | None):
+    """Say why a report suggested nothing to reuse.
+
+    An empty reuse list is ambiguous on its own: "we searched and nothing
+    fit" and "there was nothing to search" look identical but mean opposite
+    things to someone judging whether the feature works. Reports generated
+    before this existed carry no summary, and stay silent.
+    """
+    if not isinstance(summary, dict) or (summary.get("reused") or 0) > 0:
+        return
+
+    offered = summary.get("offered") or 0
+    if summary.get("enabled") is False:
+        message = "Reuse suggestions are turned off, so this report only proposes new components."
+    elif summary.get("registry_has_components") is False:
+        message = (
+            f"No components have been published to {_registry_name()} yet, so there was nothing to "
+            "reuse. Publish skills, hooks or prompts and future reports will point at them."
+        )
+    elif offered == 0:
+        message = (
+            f"Nothing in {_registry_name()} looked close enough to this agent's work to recommend. "
+            "More sessions give the match more to go on."
+        )
+    else:
+        message = (
+            f"Checked {offered} component{'' if offered == 1 else 's'} already in {_registry_name()}; "
+            "none fit this agent's problems closely enough to recommend."
+        )
+    rprint(f"  [dim]ⓘ {esc(message)}[/dim]")
+    rprint()
+
+
 def _render_suggestions(title: str, data: dict):
     # Config additions
     configs = data.get("config_additions", [])
@@ -337,11 +436,18 @@ def _render_suggestions(title: str, data: dict):
             rprint(f"      [dim]Why: {esc(c.get('why', ''))} | Where: {esc(c.get('where', ''))}[/dim]")
 
     # Features to try
-    features = data.get("features_to_try", [])
+    features = [f for f in data.get("features_to_try", []) or [] if isinstance(f, dict)]
     if features:
         rprint(f"\n  [bold]{title} > Features to Try[/bold]")
-        for f in features:
-            rprint(f"    [magenta]{esc(f.get('feature', ''))}:[/magenta] [bold]{esc(f.get('name', ''))}[/bold]")
+        # Reuse suggestions lead: "you already own this" is a better answer
+        # than "go build this", so it should be the first thing read.
+        for f in sorted(features, key=lambda item: not _reuse_ref(item)):
+            ref = _reuse_ref(f)
+            if ref:
+                _render_reuse_feature(f, ref)
+                continue
+            label = f.get("feature", "")
+            rprint(f"    [magenta]{esc(label)}:[/magenta] [bold]{esc(f.get('name', ''))}[/bold]")
             rprint(f"      {esc(f.get('one_liner', ''))}")
             if f.get("why_for_you"):
                 rprint(f"      [dim]{esc(f['why_for_you'])}[/dim]")
