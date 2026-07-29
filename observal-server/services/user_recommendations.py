@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING
 
 from loguru import logger as optic
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 
 from models.agent import Agent, AgentVersion
 from models.agent_component import AgentComponent
@@ -44,6 +45,10 @@ if TYPE_CHECKING:
 
 DEFAULT_LIMIT = 8
 CANDIDATE_POOL = 40
+
+# Feedback actions that stop a component being recommended again. Every action
+# the API accepts is terminal: the user has either rejected it or taken it.
+SUPPRESSING_ACTIONS: frozenset[str] = frozenset({"dismissed", "not_relevant", "installed"})
 
 
 @dataclass
@@ -80,15 +85,22 @@ async def _installed_component_ids(db: AsyncSession, user_id: uuid.UUID) -> set[
         return set()
 
 
-async def _dismissed_component_ids(db: AsyncSession, user_id: uuid.UUID) -> set[uuid.UUID]:
+async def _suppressed_component_ids(db: AsyncSession, user_id: uuid.UUID) -> set[uuid.UUID]:
+    """Components the user has told us to stop recommending.
+
+    "installed" belongs here alongside the rejections: adoption is normally
+    inferred from agent installs, but a user who reports installing something
+    directly has answered the question just as definitively as one who
+    dismissed it. Leaving it out made the action accepted and then ignored.
+    """
     stmt = select(RecommendationFeedback.component_id).where(
         RecommendationFeedback.user_id == user_id,
-        RecommendationFeedback.action.in_(["dismissed", "not_relevant"]),
+        RecommendationFeedback.action.in_(list(SUPPRESSING_ACTIONS)),
     )
     try:
         return {row[0] for row in (await db.execute(stmt)).all()}
     except Exception as e:
-        optic.warning("recommendations: dismissal lookup failed: {}", e)
+        optic.warning("recommendations: feedback lookup failed: {}", e)
         return set()
 
 
@@ -113,7 +125,7 @@ async def recommend_for_user(
 ) -> list[Recommendation]:
     """Rank components for one user. Never raises; returns [] on failure."""
     exclude = await _installed_component_ids(db, user_id)
-    exclude |= await _dismissed_component_ids(db, user_id)
+    exclude |= await _suppressed_component_ids(db, user_id)
 
     signals = profile.search_signals()
 
@@ -171,20 +183,21 @@ async def record_feedback(
     component_id: uuid.UUID,
     action: str,
 ) -> None:
-    """Persist a dismissal (or install) so it is honoured next time."""
-    existing = (
-        await db.execute(
-            select(RecommendationFeedback).where(
-                RecommendationFeedback.user_id == user_id,
-                RecommendationFeedback.component_type == component_type,
-                RecommendationFeedback.component_id == component_id,
-            )
-        )
-    ).scalar_one_or_none()
+    """Persist a dismissal (or install) so it is honoured next time.
 
-    if existing:
-        existing.action = action
-    else:
+    Insert-then-recover rather than a native upsert: the unique key makes the
+    race safe, and this stays portable across the Postgres deployment and the
+    SQLite the tests run on. Two clicks racing would otherwise both see no row
+    and the loser would surface a unique violation as a 500.
+    """
+    lookup = select(RecommendationFeedback).where(
+        RecommendationFeedback.user_id == user_id,
+        RecommendationFeedback.component_type == component_type,
+        RecommendationFeedback.component_id == component_id,
+    )
+    existing = (await db.execute(lookup)).scalar_one_or_none()
+
+    if existing is None:
         db.add(
             RecommendationFeedback(
                 user_id=user_id,
@@ -193,4 +206,16 @@ async def record_feedback(
                 action=action,
             )
         )
+        try:
+            await db.commit()
+            return
+        except IntegrityError:
+            # Someone inserted the same row between our SELECT and INSERT.
+            # Fall through and update whatever is there now.
+            await db.rollback()
+            existing = (await db.execute(lookup)).scalar_one_or_none()
+            if existing is None:
+                raise
+
+    existing.action = action
     await db.commit()

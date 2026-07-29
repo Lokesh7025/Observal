@@ -256,6 +256,26 @@ async def test_dismissed_components_stay_dismissed(db: AsyncSession):
 
 
 @pytest.mark.asyncio
+async def test_installed_components_stop_being_recommended(db: AsyncSession):
+    """ "installed" is terminal feedback, not a no-op.
+
+    Adoption is normally inferred from agent installs, but the API accepts an
+    explicit "installed" action and the CLI exposes it. Accepting it and then
+    ignoring it would make the flag a lie.
+    """
+    user = await _user(db)
+    taken = await _skill(db, name="db-taken", submitter=user, description="database migrations")
+
+    before = await recommend_for_user(db, user.id, None, DB_PROFILE)
+    assert "db-taken" in [r.candidate.name for r in before]
+
+    await record_feedback(db, user.id, "skill", taken.id, "installed")
+    after = await recommend_for_user(db, user.id, None, DB_PROFILE)
+
+    assert "db-taken" not in [r.candidate.name for r in after]
+
+
+@pytest.mark.asyncio
 async def test_feedback_is_idempotent(db: AsyncSession):
     user = await _user(db)
     skill = await _skill(db, name="db-x", submitter=user, description="database")

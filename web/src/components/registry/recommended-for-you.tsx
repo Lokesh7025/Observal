@@ -6,6 +6,8 @@ import { Sparkles, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { CardSkeleton } from "@/components/shared/skeleton-layouts";
 import { RegistryMark } from "@/components/registry/registry-mark";
+// "sandbox" does not pluralise by appending "s"; the route expects "sandboxes".
+import { REVERSE_TYPE_MAP } from "@/components/registry/agent-component-constants";
 import {
 	useDismissRecommendation,
 	useMyRecommendations,
@@ -121,7 +123,7 @@ export function RecommendedForYou({ limit = 6 }: { limit?: number }) {
 						<Link
 							to="/components/$componentId"
 							params={{ componentId: item.id }}
-							search={{ type: `${item.type}s` }}
+							search={{ type: REVERSE_TYPE_MAP[item.type] ?? `${item.type}s` }}
 							className="mt-2 block font-medium text-sm hover:text-primary-accent break-all pr-6"
 						>
 							{item.name}

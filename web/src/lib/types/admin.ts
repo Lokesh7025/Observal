@@ -231,7 +231,43 @@ export interface InsightNarrative {
 	 * to the model and how many survived validation. Absent on reports
 	 * generated before reuse suggestions existed.
 	 */
-	registry_match?: unknown;
+	registry_match?: RegistryMatchSummary;
+}
+
+/** A registry component a suggestion may safely point the reader at.
+ *
+ * The server attaches this only after re-validating the reference, so its
+ * presence — not the suggestion's `action_type` — is what makes a component
+ * link safe to render.
+ */
+export interface ComponentRef {
+	type: string;
+	id: string;
+	name: string;
+	qualified_name: string;
+	latest_version: string;
+}
+
+export interface FeatureSuggestion {
+	feature: string;
+	action_type?: string;
+	name?: string;
+	one_liner: string;
+	why_for_you: string;
+	example: string;
+	match_reason?: string;
+	/** Present only on validated reuse suggestions. Older reports omit it. */
+	component_ref?: ComponentRef | null;
+	confidence?: string;
+	risk?: string;
+}
+
+/** Why a report suggested nothing to reuse. */
+export interface RegistryMatchSummary {
+	enabled?: boolean;
+	offered?: number;
+	reused?: number;
+	registry_has_components?: boolean | null;
 }
 
 export interface InsightRegression {

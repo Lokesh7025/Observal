@@ -375,8 +375,14 @@ async def resolve_components(
     """
     by_type: dict[str, list[uuid.UUID]] = {}
     for component_type, component_id in refs:
-        if component_type in COMPONENT_MODELS and component_id is not None:
-            by_type.setdefault(component_type, []).append(component_id)
+        if component_type not in COMPONENT_MODELS:
+            continue
+        # Callers include paths that hand us LLM-derived ids. A non-UUID
+        # reaching `id.in_(...)` makes the driver raise, and the broad
+        # handler below would then drop every valid id in the same batch.
+        parsed = coerce_uuid(component_id)
+        if parsed is not None:
+            by_type.setdefault(component_type, []).append(parsed)
 
     resolved: dict[tuple[str, uuid.UUID], ResolvedComponent] = {}
     for component_type, ids in by_type.items():

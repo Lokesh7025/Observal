@@ -15,7 +15,7 @@ import uuid
 from datetime import UTC, datetime
 
 import pytest
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
 from models.base import Base
@@ -47,6 +47,22 @@ async def db():
     async with async_session() as session:
         yield session
         await session.rollback()
+    await engine.dispose()
+
+
+@pytest.fixture()
+async def session_factory(tmp_path):
+    """A file-backed engine, so each task can hold its own session.
+
+    An ``AsyncSession`` is stateful and unsafe to share across concurrent
+    tasks. A ``:memory:`` database cannot substitute here either: every
+    connection would get its own empty database, so the seeded rows would be
+    invisible to the tasks under test.
+    """
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'stress.db'}")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    yield async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
     await engine.dispose()
 
 
@@ -176,20 +192,28 @@ async def test_no_org_leak_across_many_orgs(db: AsyncSession):
 
 
 @pytest.mark.asyncio
-async def test_concurrent_shortlists_stay_isolated(db: AsyncSession):
+async def test_concurrent_shortlists_stay_isolated(session_factory):
     """Concurrency must not bleed one org's results into another's."""
-    org_a = Organization(name="A", slug="a")
-    org_b = Organization(name="B", slug="b")
-    db.add_all([org_a, org_b])
-    await db.flush()
-    ua = await _user(db, "a@a.com", org_id=org_a.id)
-    ub = await _user(db, "b@b.com", org_id=org_b.id)
-    await _skill(db, name="a-secret", description="database", submitter=ua, is_private=True, org_id=org_a.id)
-    await _skill(db, name="b-secret", description="database", submitter=ub, is_private=True, org_id=org_b.id)
+    async with session_factory() as seed:
+        org_a = Organization(name="A", slug="a")
+        org_b = Organization(name="B", slug="b")
+        seed.add_all([org_a, org_b])
+        await seed.flush()
+        ua = await _user(seed, "a@a.com", org_id=org_a.id)
+        ub = await _user(seed, "b@b.com", org_id=org_b.id)
+        await _skill(seed, name="a-secret", description="database", submitter=ua, is_private=True, org_id=org_a.id)
+        await _skill(seed, name="b-secret", description="database", submitter=ub, is_private=True, org_id=org_b.id)
+        await seed.commit()
+        org_a_id, org_b_id = org_a.id, org_b.id
+
+    async def run(org_id):
+        # Each task gets its own session; sharing one would be a data race.
+        async with session_factory() as session:
+            return await shortlist(session, signals="database", org_id=org_id)
 
     results = await asyncio.gather(
-        *[shortlist(db, signals="database", org_id=org_a.id) for _ in range(5)],
-        *[shortlist(db, signals="database", org_id=org_b.id) for _ in range(5)],
+        *[run(org_a_id) for _ in range(5)],
+        *[run(org_b_id) for _ in range(5)],
     )
 
     for r in results[:5]:

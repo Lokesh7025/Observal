@@ -44,7 +44,12 @@ import { Button } from "@/components/ui/button";
 import { PageHeader } from "@/components/layouts/page-header";
 import { ErrorState } from "@/components/shared/error-state";
 import { insights } from "@/lib/api";
-import type { InsightReport } from "@/lib/types";
+import type {
+	ComponentRef,
+	FeatureSuggestion,
+	InsightReport,
+	RegistryMatchSummary,
+} from "@/lib/types";
 
 // ── Status Indicator ──────────────────────────────────────────────────────
 
@@ -596,28 +601,6 @@ function ProjectAreas({ data }: { data: unknown }) {
 // ── Suggestions Section (V4: config_additions + features + patterns) ──
 
 /** A resolved registry reference, attached server-side after validation. */
-interface ComponentRef {
-	type: string;
-	id: string;
-	name: string;
-	qualified_name: string;
-	latest_version: string;
-}
-
-interface FeatureSuggestion {
-	feature: string;
-	action_type?: string;
-	name?: string;
-	one_liner: string;
-	why_for_you: string;
-	example: string;
-	match_reason?: string;
-	/** Present only on validated reuse suggestions. Older reports omit it. */
-	component_ref?: ComponentRef | null;
-	confidence?: string;
-	risk?: string;
-}
-
 const COMPONENT_TYPE_LABELS: Record<string, string> = {
 	skill: "Skill",
 	hook: "Hook",
@@ -672,13 +655,6 @@ function ReuseBadge({ componentRef }: { componentRef: ComponentRef }) {
 }
 
 /** What the reuse search did. Absent on reports generated before this existed. */
-interface RegistryMatchSummary {
-	enabled?: boolean;
-	offered?: number;
-	reused?: number;
-	registry_has_components?: boolean | null;
-}
-
 /**
  * Explains the outcome of the reuse search when it produced nothing.
  *

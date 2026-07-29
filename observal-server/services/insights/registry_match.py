@@ -199,10 +199,13 @@ async def build_catalog(
     if not ds.get_sync_bool("insights.registry_match_enabled", True):
         return CatalogOffer(enabled=False)
 
-    per_type = ds.get_sync_int("insights.registry_match_per_type", 6)
-    total = ds.get_sync_int("insights.registry_match_max_items", 24)
-
     try:
+        # Operator-supplied caps. A zero or negative value would become
+        # LIMIT 0 and make the feature look broken rather than disabled —
+        # `registry_match_enabled` is the switch for turning it off.
+        per_type = max(1, ds.get_sync_int("insights.registry_match_per_type", 6))
+        total = max(1, ds.get_sync_int("insights.registry_match_max_items", 24))
+
         candidates = await shortlist(
             db,
             signals=signals,

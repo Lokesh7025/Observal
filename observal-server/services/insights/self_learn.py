@@ -538,9 +538,11 @@ async def _create_agent_version_with_additions(
     # Copy components from the latest version
     order_idx = 0
     removed_set = set(removed_component_ids or [])
+    carried_ids: set[uuid.UUID] = set()
     for comp in latest_version.components or []:
         if comp.component_id in removed_set:
             continue
+        carried_ids.add(comp.component_id)
         db.add(
             AgentComponent(
                 agent_version_id=new_version.id,
@@ -572,7 +574,21 @@ async def _create_agent_version_with_additions(
 
     # Link reused registry components at the version the registry actually
     # has. Pinning a version that does not exist breaks agent pulls.
+    #
+    # Skip anything the agent already carries. The insights shortlist excludes
+    # attached components, but `_find_existing_skill_match` does not, and an
+    # agent can gain a component between report generation and apply. Adding it
+    # twice would write two AgentComponent rows for one component, at differing
+    # resolved_versions.
     for resolved in linked_existing:
+        if resolved.id in carried_ids:
+            optic.info(
+                "self_learn_reuse_already_attached",
+                agent=agent.name,
+                component=resolved.qualified_name,
+            )
+            continue
+        carried_ids.add(resolved.id)
         db.add(
             AgentComponent(
                 agent_version_id=new_version.id,

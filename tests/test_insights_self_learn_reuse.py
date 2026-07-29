@@ -221,6 +221,57 @@ async def test_reused_skill_is_pinned_to_its_actual_version(db: AsyncSession):
 
 
 @pytest.mark.asyncio
+async def test_reusing_an_already_attached_component_does_not_duplicate_it(db: AsyncSession):
+    """A component the agent already carries must not be linked twice.
+
+    The insights shortlist excludes attached components, but the
+    existing-skill fallback does not, and an agent can gain a component
+    between report generation and apply. Two AgentComponent rows for one
+    component -- at differing resolved_versions -- break agent pulls.
+    """
+    owner = await _user(db, "owner@example.com")
+    agent = await _agent(db, owner)
+    skill = await _skill(db, name="pr-review", submitter=owner, version="3.2.0")
+
+    # The agent already carries this component, pinned at an older version.
+    db.add(
+        AgentComponent(
+            agent_version_id=agent.latest_version_id,
+            component_type="skill",
+            component_id=skill.id,
+            component_name="pr-review",
+            resolved_version="2.0.0",
+            order_index=0,
+        )
+    )
+    await db.flush()
+
+    report = await _report(
+        db,
+        agent,
+        [
+            {
+                "action_type": "reuse_existing_component",
+                "feature": "Skill",
+                "name": "pr-review",
+                "existing_component_id": str(skill.id),
+                "one_liner": "Reviews PRs",
+                "why_for_you": "You review PRs often",
+            }
+        ],
+    )
+
+    applied = await apply_insight_suggestions(str(report.id), db, owner.id)
+    assert applied is not None
+
+    version = await _new_version(db, agent)
+    linked = [c for c in await _components_of(db, version.id) if c.component_id == skill.id]
+    assert len(linked) == 1, f"component linked {len(linked)} times"
+    # The carried row wins: it is the pin the agent was already using.
+    assert linked[0].resolved_version == "2.0.0"
+
+
+@pytest.mark.asyncio
 async def test_created_skill_keeps_component_name(db: AsyncSession):
     owner = await _user(db, "owner@example.com")
     agent = await _agent(db, owner)

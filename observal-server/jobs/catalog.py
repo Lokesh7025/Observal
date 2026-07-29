@@ -31,10 +31,17 @@ async def batch_generate_insights(ctx: dict):
 
 
 async def refresh_user_profiles(ctx: dict):
-    """Cron job: rebuild work profiles for users with recent activity.
+    """Cron job: refresh every active user's work profile.
 
-    Profiles are also built lazily on first request; this keeps the common
-    case warm so the registry home page never pays for a ClickHouse scan.
+    Best-effort warm-up only. Correctness never depends on this job: a stale
+    or missing profile is rebuilt lazily on first request. It exists so the
+    registry home page rarely pays for a ClickHouse scan.
+
+    The sweep is sequential and unfiltered because there is no cheap
+    "recently active" signal in Postgres. A user with no sessions costs one
+    indexed ClickHouse lookup that returns nothing, so the floor is low; if
+    the job ever outgrows its timeout it is truncated harmlessly, and the
+    users it missed simply build on demand.
     """
     optic.debug("refresh_user_profiles")
     try:
@@ -53,7 +60,11 @@ async def refresh_user_profiles(ctx: dict):
                     await get_or_build_profile(db, user.id, get_project_id(user), force=True)
                     refreshed += 1
                 except Exception as e:
-                    # One bad user must not stop the sweep.
+                    # One bad user must not stop the sweep. The session is
+                    # shared across the loop, so a database error leaves it in
+                    # an aborted transaction: without this rollback every
+                    # later user fails too, and one fault is misreported as N.
+                    await db.rollback()
                     optic.warning("user_profile_refresh_failed", user_id=str(user.id), error=str(e))
         optic.info("user_profiles_refreshed", count=refreshed)
     except Exception as e:
