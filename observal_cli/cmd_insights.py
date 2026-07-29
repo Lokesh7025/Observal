@@ -11,7 +11,7 @@ from rich.panel import Panel
 from rich.table import Table
 
 from observal_cli import client
-from observal_cli.render import console, output_json, relative_time, spinner, status_badge
+from observal_cli.render import console, esc, output_json, relative_time, spinner, status_badge
 
 insights_app = typer.Typer(help="Agent insight reports")
 
@@ -216,7 +216,9 @@ def _render_section(name: str, data: dict | str | None):
     if not data:
         return
     title = _SECTION_TITLES.get(name, name.replace("_", " ").title())
-    renderer = _RENDERERS.get(name)
+    # Every typed renderer indexes into a mapping. Older reports stored some
+    # sections as a plain string or list, which would crash on `.get`.
+    renderer = _RENDERERS.get(name) if isinstance(data, dict) else None
     if renderer:
         renderer(title, data)
     elif isinstance(data, str):
@@ -228,15 +230,15 @@ def _render_section(name: str, data: dict | str | None):
 def _render_at_a_glance(title: str, data: dict):
     health = data.get("health", "unknown")
     color = _HEALTH_COLORS.get(health, "white")
-    lines = [f"[bold]Health:[/bold] [{color}]{health}[/{color}]", ""]
+    lines = [f"[bold]Health:[/bold] [{color}]{esc(health)}[/{color}]", ""]
     if data.get("whats_working"):
-        lines += [f"[green]What's working:[/green] {data['whats_working']}", ""]
+        lines += [f"[green]What's working:[/green] {esc(data['whats_working'])}", ""]
     if data.get("whats_hindering"):
-        lines += [f"[yellow]What's hindering:[/yellow] {data['whats_hindering']}", ""]
+        lines += [f"[yellow]What's hindering:[/yellow] {esc(data['whats_hindering'])}", ""]
     if data.get("quick_win"):
-        lines += [f"[cyan]Quick win:[/cyan] {data['quick_win']}", ""]
+        lines += [f"[cyan]Quick win:[/cyan] {esc(data['quick_win'])}", ""]
     if data.get("ambitious_workflows"):
-        lines += [f"[magenta]Ambitious workflows:[/magenta] {data['ambitious_workflows']}"]
+        lines += [f"[magenta]Ambitious workflows:[/magenta] {esc(data['ambitious_workflows'])}"]
     console.print(Panel("\n".join(lines), title=f"[bold]{title}[/bold]", border_style="bright_blue", expand=False))
 
 
@@ -249,7 +251,7 @@ def _render_what_they_work_on(title: str, data: dict):
     table.add_column("Sessions", justify="right")
     table.add_column("Description")
     for a in areas:
-        table.add_row(a.get("name", ""), str(a.get("sessions", "")), a.get("description", ""))
+        table.add_row(esc(a.get("name", "")), esc(a.get("sessions", "")), esc(a.get("description", "")))
     console.print(table)
     rprint()
 
@@ -257,9 +259,9 @@ def _render_what_they_work_on(title: str, data: dict):
 def _render_interaction_style(title: str, data: dict):
     lines = []
     if data.get("narrative"):
-        lines.append(data["narrative"])
+        lines.append(esc(data["narrative"]))
     if data.get("key_pattern"):
-        lines += ["", f"[bold]Key pattern:[/bold] [italic]{data['key_pattern']}[/italic]"]
+        lines += ["", f"[bold]Key pattern:[/bold] [italic]{esc(data['key_pattern'])}[/italic]"]
     if lines:
         console.print(Panel("\n".join(lines), title=f"[bold]{title}[/bold]", border_style="blue", expand=False))
 
@@ -267,14 +269,14 @@ def _render_interaction_style(title: str, data: dict):
 def _render_usage_patterns(title: str, data: dict):
     lines = []
     if data.get("narrative"):
-        lines.append(data["narrative"])
+        lines.append(esc(data["narrative"]))
     sp = data.get("session_profile", {})
     if sp:
         lines += [
             "",
-            f"  Avg duration: [bold]{sp.get('avg_duration_minutes', '?')}m[/bold]"
-            f"  Tool calls: [bold]{sp.get('avg_tool_calls', '?')}[/bold]"
-            f"  Prompts: [bold]{sp.get('avg_prompts', '?')}[/bold]",
+            f"  Avg duration: [bold]{esc(sp.get('avg_duration_minutes', '?'))}m[/bold]"
+            f"  Tool calls: [bold]{esc(sp.get('avg_tool_calls', '?'))}[/bold]"
+            f"  Prompts: [bold]{esc(sp.get('avg_prompts', '?'))}[/bold]",
         ]
     if lines:
         console.print(Panel("\n".join(lines), title=f"[bold]{title}[/bold]", border_style="blue", expand=False))
@@ -287,7 +289,7 @@ def _render_usage_patterns(title: str, data: dict):
         for tool in tools[:10]:
             err = tool.get("error_rate", 0)
             err_style = "red" if err > 0.1 else "yellow" if err > 0.01 else "green"
-            t.add_row(tool.get("tool", ""), str(tool.get("calls", "")), f"[{err_style}]{err:.1%}[/{err_style}]")
+            t.add_row(esc(tool.get("tool", "")), esc(tool.get("calls", "")), f"[{err_style}]{err:.1%}[/{err_style}]")
         console.print(t)
         rprint()
 
@@ -295,9 +297,13 @@ def _render_usage_patterns(title: str, data: dict):
 def _render_what_works(title: str, data: dict):
     lines = []
     if data.get("intro"):
-        lines.append(data["intro"])
+        lines.append(esc(data["intro"]))
     for s in data.get("strengths", []):
-        lines += ["", f"  [green]●[/green] [bold]{s.get('title', '')}[/bold]", f"    {s.get('description', '')}"]
+        lines += [
+            "",
+            f"  [green]●[/green] [bold]{esc(s.get('title', ''))}[/bold]",
+            f"    {esc(s.get('description', ''))}",
+        ]
     if lines:
         console.print(Panel("\n".join(lines), title=f"[bold]{title}[/bold]", border_style="green", expand=False))
 
@@ -305,18 +311,18 @@ def _render_what_works(title: str, data: dict):
 def _render_friction(title: str, data: dict):
     lines = []
     if data.get("intro"):
-        lines.append(data["intro"])
+        lines.append(esc(data["intro"]))
     sev_colors = {"high": "red", "medium": "yellow", "low": "dim"}
     for cat in data.get("categories", []):
         sev = cat.get("severity", "medium")
         color = sev_colors.get(sev, "white")
-        lines += ["", f"  [{color}]■ {cat.get('title', '')}[/{color}] [{color}]({sev})[/{color}]"]
+        lines += ["", f"  [{color}]■ {esc(cat.get('title', ''))}[/{color}] [{color}]({esc(sev)})[/{color}]"]
         if cat.get("description"):
-            lines.append(f"    {cat['description']}")
+            lines.append(f"    {esc(cat['description'])}")
         for ex in cat.get("examples", []):
-            lines.append(f"    [dim]• {ex}[/dim]")
+            lines.append(f"    [dim]• {esc(ex)}[/dim]")
         if cat.get("impact"):
-            lines.append(f"    [dim]Impact: {cat['impact']}[/dim]")
+            lines.append(f"    [dim]Impact: {esc(cat['impact'])}[/dim]")
     if lines:
         console.print(Panel("\n".join(lines), title=f"[bold]{title}[/bold]", border_style="yellow", expand=False))
 
@@ -327,36 +333,36 @@ def _render_suggestions(title: str, data: dict):
     if configs:
         rprint(f"\n  [bold]{title} > Config Additions[/bold]")
         for c in configs:
-            rprint(f"    [cyan]→[/cyan] {c.get('addition', '')}")
-            rprint(f"      [dim]Why: {c.get('why', '')} | Where: {c.get('where', '')}[/dim]")
+            rprint(f"    [cyan]→[/cyan] {esc(c.get('addition', ''))}")
+            rprint(f"      [dim]Why: {esc(c.get('why', ''))} | Where: {esc(c.get('where', ''))}[/dim]")
 
     # Features to try
     features = data.get("features_to_try", [])
     if features:
         rprint(f"\n  [bold]{title} > Features to Try[/bold]")
         for f in features:
-            rprint(f"    [magenta]{f.get('feature', '')}:[/magenta] [bold]{f.get('name', '')}[/bold]")
-            rprint(f"      {f.get('one_liner', '')}")
+            rprint(f"    [magenta]{esc(f.get('feature', ''))}:[/magenta] [bold]{esc(f.get('name', ''))}[/bold]")
+            rprint(f"      {esc(f.get('one_liner', ''))}")
             if f.get("why_for_you"):
-                rprint(f"      [dim]{f['why_for_you']}[/dim]")
+                rprint(f"      [dim]{esc(f['why_for_you'])}[/dim]")
 
     # Usage patterns
     patterns = data.get("usage_patterns", [])
     if patterns:
         rprint(f"\n  [bold]{title} > Usage Patterns[/bold]")
         for p in patterns:
-            rprint(f"    [cyan]●[/cyan] [bold]{p.get('title', '')}[/bold]: {p.get('suggestion', '')}")
+            rprint(f"    [cyan]●[/cyan] [bold]{esc(p.get('title', ''))}[/bold]: {esc(p.get('suggestion', ''))}")
             if p.get("detail"):
-                rprint(f"      [dim]{p['detail']}[/dim]")
+                rprint(f"      [dim]{esc(p['detail'])}[/dim]")
             if p.get("copyable_prompt"):
-                rprint(f"      [green]Try:[/green] {p['copyable_prompt']}")
+                rprint(f"      [green]Try:[/green] {esc(p['copyable_prompt'])}")
     rprint()
 
 
 def _render_cost(title: str, data: dict):
     lines = []
     if data.get("summary"):
-        lines.append(data["summary"])
+        lines.append(esc(data["summary"]))
     m = data.get("metrics", {})
     if m:
         parts = []
@@ -370,11 +376,11 @@ def _render_cost(title: str, data: dict):
             lines += ["", "  " + "  │  ".join(parts)]
     opps = data.get("opportunities", [])
     for o in opps:
-        lines += ["", f"  [yellow]●[/yellow] [bold]{o.get('title', '')}[/bold]"]
+        lines += ["", f"  [yellow]●[/yellow] [bold]{esc(o.get('title', ''))}[/bold]"]
         if o.get("description"):
-            lines.append(f"    {o['description']}")
+            lines.append(f"    {esc(o['description'])}")
         if o.get("estimated_savings"):
-            lines.append(f"    [green]Savings: {o['estimated_savings']}[/green]")
+            lines.append(f"    [green]Savings: {esc(o['estimated_savings'])}[/green]")
     if lines:
         console.print(Panel("\n".join(lines), title=f"[bold]{title}[/bold]", border_style="blue", expand=False))
 
@@ -385,17 +391,17 @@ def _render_regression(title: str, data: dict):
         return
     lines = []
     if data.get("summary"):
-        lines.append(data["summary"])
+        lines.append(esc(data["summary"]))
     for c in data.get("changes", []):
         direction = c.get("direction", "stable")
         icon = {"improved": "[green]↑[/green]", "degraded": "[red]↓[/red]", "stable": "[dim]→[/dim]"}.get(
             direction, "→"
         )
         sig = c.get("significance", "")
-        sig_dim = f" [dim]({sig})[/dim]" if sig else ""
+        sig_dim = f" [dim]({esc(sig)})[/dim]" if sig else ""
         lines.append(
-            f"  {icon} [bold]{c.get('metric', '')}[/bold]: "
-            f"{c.get('previous_value', '?')} → {c.get('current_value', '?')}{sig_dim}"
+            f"  {icon} [bold]{esc(c.get('metric', ''))}[/bold]: "
+            f"{esc(c.get('previous_value', '?'))} → {esc(c.get('current_value', '?'))}{sig_dim}"
         )
     if lines:
         console.print(Panel("\n".join(lines), title=f"[bold]{title}[/bold]", border_style="blue", expand=False))
@@ -404,13 +410,13 @@ def _render_regression(title: str, data: dict):
 def _render_horizon(title: str, data: dict):
     lines = []
     if data.get("intro"):
-        lines.append(data["intro"])
+        lines.append(esc(data["intro"]))
     for o in data.get("opportunities", []):
-        lines += ["", f"  [magenta]●[/magenta] [bold]{o.get('title', '')}[/bold]"]
+        lines += ["", f"  [magenta]●[/magenta] [bold]{esc(o.get('title', ''))}[/bold]"]
         if o.get("whats_possible"):
-            lines.append(f"    {o['whats_possible']}")
+            lines.append(f"    {esc(o['whats_possible'])}")
         if o.get("how_to_try"):
-            lines.append(f"    [cyan]Try:[/cyan] {o['how_to_try']}")
+            lines.append(f"    [cyan]Try:[/cyan] {esc(o['how_to_try'])}")
     if lines:
         console.print(Panel("\n".join(lines), title=f"[bold]{title}[/bold]", border_style="magenta", expand=False))
 
@@ -418,18 +424,18 @@ def _render_horizon(title: str, data: dict):
 def _render_version_comparison(title: str, data: dict):
     lines = []
     if data.get("summary"):
-        lines.append(data["summary"])
+        lines.append(esc(data["summary"]))
     if data.get("confidence"):
-        lines.append(f"[dim]Confidence: {data['confidence']}[/dim]")
+        lines.append(f"[dim]Confidence: {esc(data['confidence'])}[/dim]")
     for change in data.get("changes", [])[:6]:
         lines.append(
-            f"\n[bold]{change.get('metric', '')}[/bold]: {change.get('direction', '')} "
-            f"({change.get('prior_value', '?')} → {change.get('current_value', '?')})"
+            f"\n[bold]{esc(change.get('metric', ''))}[/bold]: {esc(change.get('direction', ''))} "
+            f"({esc(change.get('prior_value', '?'))} → {esc(change.get('current_value', '?'))})"
         )
         if change.get("attribution"):
-            lines.append(f"[dim]Attribution: {change['attribution']}[/dim]")
+            lines.append(f"[dim]Attribution: {esc(change['attribution'])}[/dim]")
         if change.get("evidence"):
-            lines.append(f"[dim]{change['evidence']}[/dim]")
+            lines.append(f"[dim]{esc(change['evidence'])}[/dim]")
     if lines:
         console.print(Panel("\n".join(lines), title=f"[bold]{title}[/bold]", border_style="blue", expand=False))
 
@@ -438,9 +444,9 @@ def _render_fun_ending(title: str, data: dict):
     headline = data.get("headline", "")
     detail = data.get("detail", "")
     if headline:
-        content = f"[italic]{headline}[/italic]"
+        content = f"[italic]{esc(headline)}[/italic]"
         if detail:
-            content += f"\n[dim]{detail}[/dim]"
+            content += f"\n[dim]{esc(detail)}[/dim]"
         console.print(Panel(content, title=f"[bold]{title}[/bold]", border_style="bright_yellow", expand=False))
 
 

@@ -13,10 +13,23 @@ from typing import Any
 
 from rich import print as rprint
 from rich.console import Console
+from rich.markup import escape as markup_escape
 from rich.panel import Panel
 from rich.table import Table  # noqa: TC002 - used at runtime
 
 console = Console()
+
+
+def esc(value: Any) -> str:
+    """Render untrusted text as literal characters, not Rich markup.
+
+    Anything the server or an LLM produced can contain square brackets —
+    ``array[0]``, ``[/tmp]``, ``[bold]``. Rich reads those as style tags:
+    a stray closing tag raises ``MarkupError`` and kills the command, and a
+    valid-looking one silently swallows the text. Escape before interpolating.
+    """
+    return markup_escape("" if value is None else str(value))
+
 
 # ── Status badges ────────────────────────────────────────
 
