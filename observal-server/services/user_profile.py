@@ -160,6 +160,39 @@ def _id_array(session_ids: list[str]) -> str:
     return "[" + ",".join(f"'{sid}'" for sid in safe[:MAX_ID_ARRAY]) + "]"
 
 
+async def users_with_recent_activity(days: int = DEFAULT_PROFILE_DAYS) -> set[tuple[str, str]] | None:
+    """``(project_id, user_id)`` pairs that have a session in the window.
+
+    One query for the whole instance, so a caller sweeping every user can
+    skip the inactive ones instead of paying a ClickHouse round trip each to
+    discover they have nothing. ``session_stats_agg`` is the aggregate table,
+    so this reads far less than the per-user profile queries it saves.
+
+    Returns ``None`` — distinct from an empty set — when the lookup fails, so
+    callers can fall back to sweeping everyone rather than silently deciding
+    that nobody is active.
+    """
+    since = (datetime.now(UTC) - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        response = await _query(
+            """
+            SELECT DISTINCT project_id, user_id
+            FROM session_stats_agg FINAL
+            WHERE last_event_time >= {since:String}
+              AND user_id != ''
+            FORMAT JSON
+            """,
+            {"param_since": since},
+        )
+        response.raise_for_status()
+        rows = response.json().get("data", [])
+    except Exception as e:
+        optic.warning("user_profile: active-user lookup failed: {}", e)
+        return None
+
+    return {(str(r.get("project_id") or ""), str(r.get("user_id") or "")) for r in rows}
+
+
 async def build_profile(
     user_id: uuid.UUID,
     project_id: str,

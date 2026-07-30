@@ -31,17 +31,18 @@ async def batch_generate_insights(ctx: dict):
 
 
 async def refresh_user_profiles(ctx: dict):
-    """Cron job: refresh every active user's work profile.
+    """Cron job: rebuild work profiles for users with recent session activity.
 
     Best-effort warm-up only. Correctness never depends on this job: a stale
-    or missing profile is rebuilt lazily on first request. It exists so the
-    registry home page rarely pays for a ClickHouse scan.
+    or missing profile is rebuilt lazily on first request, and a user skipped
+    here keeps an old ``computed_at`` so that lazy path still fires. It exists
+    so the registry home page rarely pays for a ClickHouse scan.
 
-    The sweep is sequential and unfiltered because there is no cheap
-    "recently active" signal in Postgres. A user with no sessions costs one
-    indexed ClickHouse lookup that returns nothing, so the floor is low; if
-    the job ever outgrows its timeout it is truncated harmlessly, and the
-    users it missed simply build on demand.
+    Cost scales with *active* users, not registered ones. One query collects
+    everyone with a session in the window, so an idle account costs nothing
+    instead of a round trip to discover it has no sessions. If that lookup
+    fails the sweep falls back to trying every user — degraded, not silently
+    disabled.
     """
     optic.debug("refresh_user_profiles")
     try:
@@ -50,12 +51,20 @@ async def refresh_user_profiles(ctx: dict):
         from api.deps import get_project_id
         from database import async_session
         from models.user import User
-        from services.user_profile import get_or_build_profile
+        from services.user_profile import get_or_build_profile, users_with_recent_activity
+
+        active = await users_with_recent_activity()
+        if active is None:
+            optic.warning("user_profile_activity_lookup_unavailable_sweeping_all")
 
         refreshed = 0
+        skipped = 0
         async with async_session() as db:
             users = (await db.execute(select(User).where(User.auth_provider != "deactivated"))).scalars().all()
             for user in users:
+                if active is not None and (get_project_id(user), str(user.id)) not in active:
+                    skipped += 1
+                    continue
                 try:
                     await get_or_build_profile(db, user.id, get_project_id(user), force=True)
                     refreshed += 1
@@ -66,6 +75,6 @@ async def refresh_user_profiles(ctx: dict):
                     # later user fails too, and one fault is misreported as N.
                     await db.rollback()
                     optic.warning("user_profile_refresh_failed", user_id=str(user.id), error=str(e))
-        optic.info("user_profiles_refreshed", count=refreshed)
+        optic.info("user_profiles_refreshed", count=refreshed, skipped_inactive=skipped)
     except Exception as e:
         optic.error("user_profile_batch_failed", error=str(e))

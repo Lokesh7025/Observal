@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import pytest
 
-from services.user_profile import _id_array, _mcp_server_name, _topics_for
+from services.user_profile import _id_array, _mcp_server_name, _topics_for, users_with_recent_activity
 
 # Each of these, if admitted, would change how ClickHouse parses the literal.
 HOSTILE_IDS = [
@@ -120,3 +120,66 @@ def test_mcp_server_name_never_raises(tool):
 def test_topics_tolerate_junk():
     topics = _topics_for(["", "\x00", "a" * 5000, "postgres"])
     assert "databases" in topics
+
+
+# ── Active-user lookup (drives the nightly sweep's scope) ──────────────────
+
+
+class _FakeResponse:
+    def __init__(self, payload: dict):
+        self._payload = payload
+
+    def raise_for_status(self) -> None:
+        return None
+
+    def json(self) -> dict:
+        return self._payload
+
+
+@pytest.mark.asyncio
+async def test_active_users_returns_project_user_pairs(monkeypatch):
+    rows = {
+        "data": [
+            {"project_id": "org-a", "user_id": "u1"},
+            {"project_id": "org-a", "user_id": "u2"},
+            {"project_id": "default", "user_id": "u3"},
+        ]
+    }
+
+    async def fake_query(sql: str, params: dict):
+        assert "session_stats_agg" in sql
+        assert "param_since" in params
+        return _FakeResponse(rows)
+
+    monkeypatch.setattr("services.user_profile._query", fake_query)
+
+    active = await users_with_recent_activity()
+
+    assert active == {("org-a", "u1"), ("org-a", "u2"), ("default", "u3")}
+
+
+@pytest.mark.asyncio
+async def test_active_users_returns_none_when_lookup_fails(monkeypatch):
+    """None, not an empty set.
+
+    An empty set means "nobody is active" and would skip every user; None
+    tells the sweep to fall back to trying everyone. A telemetry outage must
+    degrade the job, not silently switch it off.
+    """
+
+    async def boom(sql: str, params: dict):
+        raise RuntimeError("clickhouse unreachable")
+
+    monkeypatch.setattr("services.user_profile._query", boom)
+
+    assert await users_with_recent_activity() is None
+
+
+@pytest.mark.asyncio
+async def test_active_users_empty_result_is_an_empty_set(monkeypatch):
+    async def fake_query(sql: str, params: dict):
+        return _FakeResponse({"data": []})
+
+    monkeypatch.setattr("services.user_profile._query", fake_query)
+
+    assert await users_with_recent_activity() == set()
