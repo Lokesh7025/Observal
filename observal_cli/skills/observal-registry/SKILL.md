@@ -19,7 +19,6 @@ owner: observal
 5. **`--from-file` does NOT exist on `mcp submit`**: that flag is on `mcp edit`.
 
 ---
-
 ## Procedure: Browse Registry
 
 Use natural-language keywords with `--search`; do not require exact whole-query matches.
@@ -49,7 +48,6 @@ After `list`, use row numbers (1, 2, 3...) in subsequent commands. Add `--intera
 **Skill task types:** `code-review`, `code-generation`, `testing`, `documentation`, `debugging`, `refactoring`, `deployment`, `security-audit`, `performance`, `general`
 
 ---
-
 ## Procedure: Recommend Components For This User
 
 Use when the user asks what to install, what is worth trying, or what they are missing. Ranked against the signed-in user's own sessions, so check here before browsing — it beats guessing keywords for `list --search`. `--refresh` recomputes the profile instead of using the 24h cache: slower, so only when recent work changed and results look stale.
@@ -78,7 +76,6 @@ observal registry recommend dismiss hook NAMESPACE/SLUG --action installed
 Dismissals are per-user and permanent until overwritten, so confirm before dismissing. A work profile is visible only to its owner: no flag or server route exposes another user's recommendations, so if asked, say it is unavailable rather than improvising a workaround.
 
 ---
-
 ## Procedure: Submit Component
 
 ### MCP
@@ -150,7 +147,6 @@ observal registry sandbox submit --from-file sandbox.json
 All types support `--example` to print ready-to-edit example payloads, `--draft` to save without review, and `--submit NAME` to submit an existing draft.
 
 ---
-
 ## Procedure: Install Component
 
 ```bash
