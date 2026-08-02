@@ -186,8 +186,8 @@ async def users_with_recent_activity(days: int = DEFAULT_PROFILE_DAYS) -> set[tu
         )
         response.raise_for_status()
         rows = response.json().get("data", [])
-    except Exception as e:
-        optic.warning("user_profile: active-user lookup failed: {}", e)
+    except Exception:
+        optic.warning("user_profile: active-user lookup failed")
         return None
 
     return {(str(r.get("project_id") or ""), str(r.get("user_id") or "")) for r in rows}

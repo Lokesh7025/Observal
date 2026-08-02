@@ -118,7 +118,6 @@ def _explain(candidate: ComponentCandidate, profile: WorkProfile) -> str:
 async def recommend_for_user(
     db: AsyncSession,
     user_id: uuid.UUID,
-    org_id: uuid.UUID | None,
     profile: WorkProfile,
     component_types: Sequence[str] = ALL_COMPONENT_TYPES,
     limit: int = DEFAULT_LIMIT,
@@ -134,7 +133,6 @@ async def recommend_for_user(
             db,
             signals=signals,
             component_types=component_types,
-            org_id=org_id,
             user_id=user_id,
             exclude_ids=exclude,
             per_type_limit=max(limit, 4),
@@ -156,7 +154,6 @@ async def recommend_for_user(
                 db,
                 signals="",
                 component_types=component_types,
-                org_id=org_id,
                 user_id=user_id,
                 exclude_ids=already,
                 per_type_limit=limit,

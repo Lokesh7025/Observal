@@ -19,7 +19,6 @@ from sqlalchemy.orm import sessionmaker
 import services.dynamic_settings as ds
 from models.base import Base
 from models.mcp import ListingStatus
-from models.organization import Organization
 from models.skill import SkillListing, SkillVersion
 from models.user import User
 from services.insights.registry_match import (
@@ -53,8 +52,8 @@ def _reset_settings_cache():
     ds._sync_cache = original
 
 
-async def _user(db: AsyncSession, email: str = "a@example.com", org_id=None) -> User:
-    user = User(email=email, username=email.split("@")[0], name=email, org_id=org_id)
+async def _user(db: AsyncSession, email: str = "a@example.com") -> User:
+    user = User(email=email, username=email.split("@")[0], name=email)
     db.add(user)
     await db.flush()
     return user
@@ -68,7 +67,6 @@ async def _skill(
     description: str = "Database migrations",
     status: ListingStatus = ListingStatus.approved,
     is_private: bool = False,
-    org_id=None,
 ) -> SkillListing:
     listing = SkillListing(
         name=name,
@@ -77,7 +75,6 @@ async def _skill(
         owner="tester",
         submitted_by=submitter.id,
         is_private=is_private,
-        owner_org_id=org_id,
     )
     db.add(listing)
     await db.flush()
@@ -210,15 +207,12 @@ async def test_build_catalog_respects_item_cap(db: AsyncSession):
 
 
 @pytest.mark.asyncio
-async def test_build_catalog_excludes_other_org_private(db: AsyncSession):
-    org_a = Organization(name="A", slug="org-a")
-    org_b = Organization(name="B", slug="org-b")
-    db.add_all([org_a, org_b])
-    await db.flush()
-    outsider = await _user(db, "b@example.com", org_id=org_b.id)
-    await _skill(db, name="their-db-tool", submitter=outsider, is_private=True, org_id=org_b.id)
+async def test_build_catalog_excludes_other_user_private(db: AsyncSession):
+    owner = await _user(db, "owner@example.com")
+    outsider = await _user(db, "outsider@example.com")
+    await _skill(db, name="their-db-tool", submitter=outsider, is_private=True)
 
-    offer = await build_catalog(db, RegistryScope(org_id=org_a.id), "database")
+    offer = await build_catalog(db, RegistryScope(user_id=owner.id), "database")
 
     assert offer.item_count == 0
 
@@ -386,14 +380,11 @@ async def test_offered_but_unresolvable_id_is_stripped(db: AsyncSession):
 
 
 @pytest.mark.asyncio
-async def test_reuse_across_org_boundary_is_stripped(db: AsyncSession):
-    org_a = Organization(name="A", slug="org-a")
-    org_b = Organization(name="B", slug="org-b")
-    db.add_all([org_a, org_b])
-    await db.flush()
-    outsider = await _user(db, "b@example.com", org_id=org_b.id)
-    foreign = await _skill(db, name="theirs", submitter=outsider, is_private=True, org_id=org_b.id)
-    # Even if the id somehow ends up in the offer, resolution is org-scoped.
+async def test_reuse_across_user_boundary_is_stripped(db: AsyncSession):
+    owner = await _user(db, "owner@example.com")
+    outsider = await _user(db, "outsider@example.com")
+    foreign = await _skill(db, name="theirs", submitter=outsider, is_private=True)
+    # Even if the id somehow ends up in the offer, resolution is visibility-scoped.
     offer = CatalogOffer(offered_ids={foreign.id})
     narrative = _narrative(
         [
@@ -405,7 +396,7 @@ async def test_reuse_across_org_boundary_is_stripped(db: AsyncSession):
         ]
     )
 
-    result = await validate_reuse_suggestions(narrative, offer, db, RegistryScope(org_id=org_a.id))
+    result = await validate_reuse_suggestions(narrative, offer, db, RegistryScope(user_id=owner.id))
 
     assert result["suggestions"]["features_to_try"][0]["component_ref"] is None
 

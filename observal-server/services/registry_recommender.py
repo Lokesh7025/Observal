@@ -15,9 +15,9 @@ Everything here is deterministic (lexical match + popularity prior). No LLM
 call happens in this module; callers may re-rank with one afterwards.
 
 Visibility is enforced at the query level via :func:`visibility_clause`,
-which is the worker-safe sibling of ``api.deps.apply_visibility_filter``:
-it takes an ``org_id``/``user_id`` pair instead of a request-scoped ``User``
-so background jobs (which have no authenticated user) can use it too.
+which is the worker-safe sibling of ``api.deps.apply_visibility_filter``.
+It takes a user id instead of a request-scoped ``User`` so background jobs can
+apply the same public, personal, and team-private rules.
 """
 
 from __future__ import annotations
@@ -36,6 +36,7 @@ from models.mcp import ListingStatus, McpListing, McpVersion
 from models.prompt import PromptListing, PromptVersion
 from models.sandbox import SandboxListing, SandboxVersion
 from models.skill import SkillListing, SkillVersion
+from models.team import TeamMembership
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Sequence
@@ -118,39 +119,35 @@ class ComponentCandidate:
         }
 
 
-def visibility_clause(listing_model, org_id: uuid.UUID | None, user_id: uuid.UUID | None = None):
-    """Return a WHERE clause restricting *listing_model* to visible rows.
+def visibility_clause(listing_model, user_id: uuid.UUID | None = None):
+    """Return a worker-safe visibility predicate for a registry listing.
 
-    Mirrors ``api.deps.apply_visibility_filter`` but takes plain ids so it
-    works inside background jobs that have no request user.
-
-    Rules (identical to the request-scoped filter, minus the admin bypass —
-    recommendations must never surface something the *agent owner* could not
-    see, even when an admin triggered the run):
-
-    * public listings are always visible
-    * private listings are visible to the owning org
-    * private listings are visible to their submitter
-
-    ``org_id=None`` means "no org" — such a caller sees public listings plus
-    their own private ones. It must never be allowed to match rows whose
-    ``owner_org_id`` is also NULL, which is why the org branch is skipped
-    entirely rather than compared (``NULL = NULL`` is never true in SQL, but
-    being explicit keeps the intent obvious).
+    This mirrors ``api.deps.apply_visibility_filter`` without requiring a
+    request-scoped ``User``. Public listings are always visible. Personal
+    private listings are visible to their submitter, and team-private listings
+    are visible to team members. ``None`` means public listings only.
     """
     if not hasattr(listing_model, "is_private"):
-        # Agents have no privacy flag; everything in the instance is visible.
         return None
 
     public = listing_model.is_private == False  # noqa: E712
-    clauses = [public]
+    if user_id is None:
+        return public
 
-    if org_id is not None:
-        clauses.append(and_(listing_model.is_private == True, listing_model.owner_org_id == org_id))  # noqa: E712
-    if user_id is not None:
-        clauses.append(and_(listing_model.is_private == True, listing_model.submitted_by == user_id))  # noqa: E712
+    creator = getattr(listing_model, "submitted_by", None) or getattr(listing_model, "created_by", None)
+    private = listing_model.is_private == True  # noqa: E712
+    if not hasattr(listing_model, "team_id"):
+        return or_(public, and_(private, creator == user_id)) if creator is not None else public
 
-    return clauses[0] if len(clauses) == 1 else or_(*clauses)
+    personal = and_(private, listing_model.team_id.is_(None), creator == user_id) if creator is not None else False
+    member = (
+        select(TeamMembership.id)
+        .where(TeamMembership.team_id == listing_model.team_id, TeamMembership.user_id == user_id)
+        .correlate(listing_model)
+        .exists()
+    )
+    team_private = and_(private, listing_model.team_id.is_not(None), member)
+    return or_(public, personal, team_private)
 
 
 def _search_fields(component_type: str, listing_model, version_model) -> list:
@@ -231,7 +228,6 @@ async def shortlist(
     *,
     signals: str,
     component_types: Sequence[str] = ALL_COMPONENT_TYPES,
-    org_id: uuid.UUID | None = None,
     user_id: uuid.UUID | None = None,
     exclude_ids: Iterable[uuid.UUID] = (),
     per_type_limit: int = 6,
@@ -260,7 +256,7 @@ async def shortlist(
         )
         stmt = stmt.where(version_model.status == ListingStatus.approved)
 
-        visibility = visibility_clause(listing_model, org_id, user_id)
+        visibility = visibility_clause(listing_model, user_id)
         if visibility is not None:
             stmt = stmt.where(visibility)
         if excluded:
@@ -364,13 +360,12 @@ async def resolve_components(
     db: AsyncSession,
     refs: Iterable[tuple[str, uuid.UUID]],
     *,
-    org_id: uuid.UUID | None = None,
     user_id: uuid.UUID | None = None,
 ) -> dict[tuple[str, uuid.UUID], ResolvedComponent]:
     """Validate ``(type, id)`` references against the registry.
 
     A reference resolves only when the listing exists, its latest version is
-    approved, and it is visible to the given org/user. Anything else is
+    approved, and it is visible to the given user. Anything else is
     simply absent from the result — callers treat a miss as "drop it".
     """
     by_type: dict[str, list[uuid.UUID]] = {}
@@ -395,7 +390,7 @@ async def resolve_components(
                 version_model.status == ListingStatus.approved,
             )
         )
-        visibility = visibility_clause(listing_model, org_id, user_id)
+        visibility = visibility_clause(listing_model, user_id)
         if visibility is not None:
             stmt = stmt.where(visibility)
 
@@ -422,7 +417,6 @@ async def resolve_component_any_type(
     db: AsyncSession,
     component_id: uuid.UUID,
     *,
-    org_id: uuid.UUID | None = None,
     user_id: uuid.UUID | None = None,
     component_types: Sequence[str] = ALL_COMPONENT_TYPES,
 ) -> ResolvedComponent | None:
@@ -431,7 +425,7 @@ async def resolve_component_any_type(
     Used for LLM output, where the declared type may not match the id.
     """
     refs = [(t, component_id) for t in component_types]
-    resolved = await resolve_components(db, refs, org_id=org_id, user_id=user_id)
+    resolved = await resolve_components(db, refs, user_id=user_id)
     for component_type in component_types:
         hit = resolved.get((component_type, component_id))
         if hit:

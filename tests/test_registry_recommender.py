@@ -20,7 +20,6 @@ from sqlalchemy.orm import sessionmaker
 from models.base import Base
 from models.hook import HookListing, HookVersion
 from models.mcp import ListingStatus, McpListing, McpVersion
-from models.organization import Organization
 from models.prompt import PromptListing, PromptVersion
 from models.skill import SkillListing, SkillVersion
 from models.user import User
@@ -47,18 +46,11 @@ async def db():
     await engine.dispose()
 
 
-async def _user(db: AsyncSession, email: str, org_id: uuid.UUID | None = None) -> User:
-    user = User(email=email, username=email.split("@")[0], name=email, org_id=org_id)
+async def _user(db: AsyncSession, email: str) -> User:
+    user = User(email=email, username=email.split("@")[0], name=email)
     db.add(user)
     await db.flush()
     return user
-
-
-async def _org(db: AsyncSession, slug: str) -> Organization:
-    org = Organization(name=slug.title(), slug=slug)
-    db.add(org)
-    await db.flush()
-    return org
 
 
 async def _skill(
@@ -69,7 +61,6 @@ async def _skill(
     submitter: User,
     status: ListingStatus = ListingStatus.approved,
     is_private: bool = False,
-    org_id: uuid.UUID | None = None,
     downloads: int = 0,
     task_type: str = "general",
 ) -> SkillListing:
@@ -80,7 +71,6 @@ async def _skill(
         owner="tester",
         submitted_by=submitter.id,
         is_private=is_private,
-        owner_org_id=org_id,
     )
     db.add(listing)
     await db.flush()
@@ -200,42 +190,38 @@ async def test_shortlist_returns_public_components(db: AsyncSession):
 
 
 @pytest.mark.asyncio
-async def test_shortlist_hides_private_components_from_other_orgs(db: AsyncSession):
-    org_a = await _org(db, "org-a")
-    org_b = await _org(db, "org-b")
-    owner = await _user(db, "owner@a.com", org_id=org_a.id)
+async def test_shortlist_hides_private_components_from_other_users(db: AsyncSession):
+    owner = await _user(db, "owner@example.com")
+    outsider = await _user(db, "outsider@example.com")
     await _skill(
         db,
         name="secret-db-tool",
         description="Internal database tooling",
         submitter=owner,
         is_private=True,
-        org_id=org_a.id,
     )
 
-    same_org = await shortlist(db, signals="database", component_types=["skill"], org_id=org_a.id)
-    other_org = await shortlist(db, signals="database", component_types=["skill"], org_id=org_b.id)
-    no_org = await shortlist(db, signals="database", component_types=["skill"], org_id=None)
+    owner_results = await shortlist(db, signals="database", component_types=["skill"], user_id=owner.id)
+    outsider_results = await shortlist(db, signals="database", component_types=["skill"], user_id=outsider.id)
+    anonymous_results = await shortlist(db, signals="database", component_types=["skill"])
 
-    assert [c.name for c in same_org] == ["secret-db-tool"]
-    assert other_org == []
-    assert no_org == []
+    assert [c.name for c in owner_results] == ["secret-db-tool"]
+    assert outsider_results == []
+    assert anonymous_results == []
 
 
 @pytest.mark.asyncio
 async def test_shortlist_shows_private_component_to_its_submitter(db: AsyncSession):
-    org = await _org(db, "org-a")
-    owner = await _user(db, "owner@a.com", org_id=org.id)
+    owner = await _user(db, "owner@example.com")
     await _skill(
         db,
         name="my-db-tool",
         description="Personal database helper",
         submitter=owner,
         is_private=True,
-        org_id=org.id,
     )
 
-    results = await shortlist(db, signals="database", component_types=["skill"], org_id=None, user_id=owner.id)
+    results = await shortlist(db, signals="database", component_types=["skill"], user_id=owner.id)
 
     assert [c.name for c in results] == ["my-db-tool"]
 
@@ -415,21 +401,13 @@ async def test_resolve_components_rejects_unapproved(db: AsyncSession):
 
 
 @pytest.mark.asyncio
-async def test_resolve_components_rejects_other_org_private(db: AsyncSession):
-    org_a = await _org(db, "org-a")
-    org_b = await _org(db, "org-b")
-    owner = await _user(db, "owner@a.com", org_id=org_a.id)
-    skill = await _skill(
-        db,
-        name="secret",
-        description="Private",
-        submitter=owner,
-        is_private=True,
-        org_id=org_a.id,
-    )
+async def test_resolve_components_rejects_private_listing_for_other_user(db: AsyncSession):
+    owner = await _user(db, "owner@example.com")
+    outsider = await _user(db, "outsider@example.com")
+    skill = await _skill(db, name="secret", description="Private", submitter=owner, is_private=True)
 
-    assert await resolve_components(db, [("skill", skill.id)], org_id=org_b.id) == {}
-    assert await resolve_components(db, [("skill", skill.id)], org_id=org_a.id) != {}
+    assert await resolve_components(db, [("skill", skill.id)], user_id=outsider.id) == {}
+    assert await resolve_components(db, [("skill", skill.id)], user_id=owner.id) != {}
 
 
 @pytest.mark.asyncio

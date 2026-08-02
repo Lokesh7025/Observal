@@ -4,7 +4,7 @@
 """Tests for per-user registry recommendations.
 
 Covers the deterministic half: profile shaping, exclusion of things the user
-already has or dismissed, org-scoped visibility, and honest cold-start
+already has or dismissed, private-listing visibility, and honest cold-start
 behaviour.
 """
 
@@ -22,7 +22,6 @@ from models.agent_component import AgentComponent
 from models.base import Base
 from models.download import AgentDownloadRecord
 from models.mcp import ListingStatus, McpListing, McpVersion
-from models.organization import Organization
 from models.skill import SkillListing, SkillVersion
 from models.user import User
 from services.user_profile import WorkProfile, _mcp_server_name, _topics_for
@@ -44,8 +43,8 @@ async def db():
     await engine.dispose()
 
 
-async def _user(db: AsyncSession, email: str = "dev@example.com", org_id=None) -> User:
-    user = User(email=email, username=email.split("@")[0], name=email, org_id=org_id)
+async def _user(db: AsyncSession, email: str = "dev@example.com") -> User:
+    user = User(email=email, username=email.split("@")[0], name=email)
     db.add(user)
     await db.flush()
     return user
@@ -59,7 +58,6 @@ async def _skill(
     description: str,
     downloads: int = 0,
     is_private: bool = False,
-    org_id=None,
 ) -> SkillListing:
     listing = SkillListing(
         name=name,
@@ -68,7 +66,6 @@ async def _skill(
         owner="t",
         submitted_by=submitter.id,
         is_private=is_private,
-        owner_org_id=org_id,
     )
     db.add(listing)
     await db.flush()
@@ -209,7 +206,7 @@ async def test_recommendations_match_profile_topics(db: AsyncSession):
     await _skill(db, name="db-migrator", submitter=user, description="Postgres database migrations")
     await _skill(db, name="css-helper", submitter=user, description="Tailwind styling helper")
 
-    results = await recommend_for_user(db, user.id, None, DB_PROFILE)
+    results = await recommend_for_user(db, user.id, DB_PROFILE)
 
     assert results
     assert results[0].candidate.name == "db-migrator"
@@ -222,7 +219,7 @@ async def test_recommendations_span_component_types(db: AsyncSession):
     await _skill(db, name="db-skill", submitter=user, description="database work")
     await _mcp(db, name="db-mcp", submitter=user, description="postgres database server")
 
-    results = await recommend_for_user(db, user.id, None, DB_PROFILE)
+    results = await recommend_for_user(db, user.id, DB_PROFILE)
 
     assert {r.candidate.component_type for r in results} == {"skill", "mcp"}
 
@@ -234,7 +231,7 @@ async def test_already_installed_components_are_excluded(db: AsyncSession):
     await _skill(db, name="db-fresh", submitter=user, description="database migrations")
     await _installed_agent_with(db, user, installed.id)
 
-    results = await recommend_for_user(db, user.id, None, DB_PROFILE)
+    results = await recommend_for_user(db, user.id, DB_PROFILE)
 
     names = [r.candidate.name for r in results]
     assert "db-installed" not in names
@@ -246,11 +243,11 @@ async def test_dismissed_components_stay_dismissed(db: AsyncSession):
     user = await _user(db)
     unwanted = await _skill(db, name="db-unwanted", submitter=user, description="database migrations")
 
-    before = await recommend_for_user(db, user.id, None, DB_PROFILE)
+    before = await recommend_for_user(db, user.id, DB_PROFILE)
     assert "db-unwanted" in [r.candidate.name for r in before]
 
     await record_feedback(db, user.id, "skill", unwanted.id, "dismissed")
-    after = await recommend_for_user(db, user.id, None, DB_PROFILE)
+    after = await recommend_for_user(db, user.id, DB_PROFILE)
 
     assert "db-unwanted" not in [r.candidate.name for r in after]
 
@@ -266,11 +263,11 @@ async def test_installed_components_stop_being_recommended(db: AsyncSession):
     user = await _user(db)
     taken = await _skill(db, name="db-taken", submitter=user, description="database migrations")
 
-    before = await recommend_for_user(db, user.id, None, DB_PROFILE)
+    before = await recommend_for_user(db, user.id, DB_PROFILE)
     assert "db-taken" in [r.candidate.name for r in before]
 
     await record_feedback(db, user.id, "skill", taken.id, "installed")
-    after = await recommend_for_user(db, user.id, None, DB_PROFILE)
+    after = await recommend_for_user(db, user.id, DB_PROFILE)
 
     assert "db-taken" not in [r.candidate.name for r in after]
 
@@ -283,50 +280,41 @@ async def test_feedback_is_idempotent(db: AsyncSession):
     await record_feedback(db, user.id, "skill", skill.id, "dismissed")
     await record_feedback(db, user.id, "skill", skill.id, "not_relevant")
 
-    results = await recommend_for_user(db, user.id, None, DB_PROFILE)
+    results = await recommend_for_user(db, user.id, DB_PROFILE)
     assert "db-x" not in [r.candidate.name for r in results]
 
 
 @pytest.mark.asyncio
-async def test_other_orgs_private_components_are_never_recommended(db: AsyncSession):
-    org_a = Organization(name="A", slug="org-a")
-    org_b = Organization(name="B", slug="org-b")
-    db.add_all([org_a, org_b])
-    await db.flush()
-    me = await _user(db, "me@a.com", org_id=org_a.id)
-    them = await _user(db, "them@b.com", org_id=org_b.id)
+async def test_other_users_private_components_are_never_recommended(db: AsyncSession):
+    me = await _user(db, "me@example.com")
+    them = await _user(db, "them@example.com")
     await _skill(
         db,
         name="their-db-tool",
         submitter=them,
         description="database migrations",
         is_private=True,
-        org_id=org_b.id,
     )
 
-    results = await recommend_for_user(db, me.id, org_a.id, DB_PROFILE)
+    results = await recommend_for_user(db, me.id, DB_PROFILE)
 
     assert results == []
 
 
 @pytest.mark.asyncio
-async def test_own_org_private_components_are_recommended(db: AsyncSession):
-    org = Organization(name="A", slug="org-a")
-    db.add(org)
-    await db.flush()
-    me = await _user(db, "me@a.com", org_id=org.id)
+async def test_personal_private_components_are_recommended(db: AsyncSession):
+    me = await _user(db, "me@example.com")
     await _skill(
         db,
-        name="our-db-tool",
+        name="my-db-tool",
         submitter=me,
         description="database migrations",
         is_private=True,
-        org_id=org.id,
     )
 
-    results = await recommend_for_user(db, me.id, org.id, DB_PROFILE)
+    results = await recommend_for_user(db, me.id, DB_PROFILE)
 
-    assert [r.candidate.name for r in results] == ["our-db-tool"]
+    assert [r.candidate.name for r in results] == ["my-db-tool"]
 
 
 @pytest.mark.asyncio
@@ -335,7 +323,7 @@ async def test_cold_start_falls_back_to_popularity(db: AsyncSession):
     await _skill(db, name="quiet-thing", submitter=user, description="Something", downloads=1)
     await _skill(db, name="popular-thing", submitter=user, description="Something", downloads=900)
 
-    results = await recommend_for_user(db, user.id, None, WorkProfile())
+    results = await recommend_for_user(db, user.id, WorkProfile())
 
     assert results
     assert results[0].candidate.name == "popular-thing"
@@ -351,7 +339,7 @@ async def test_weak_profile_is_topped_up_with_popular_components(db: AsyncSessio
     for i in range(5):
         await _skill(db, name=f"unrelated-{i}", submitter=user, description="Styling helpers", downloads=i * 10)
 
-    results = await recommend_for_user(db, user.id, None, DB_PROFILE, limit=4)
+    results = await recommend_for_user(db, user.id, DB_PROFILE, limit=4)
 
     assert len(results) == 4
     assert results[0].candidate.name == "db-match"
@@ -365,7 +353,7 @@ async def test_top_up_never_duplicates_a_match(db: AsyncSession):
     await _skill(db, name="db-match", submitter=user, description="postgres database migrations")
     await _skill(db, name="other", submitter=user, description="Styling helpers")
 
-    results = await recommend_for_user(db, user.id, None, DB_PROFILE, limit=5)
+    results = await recommend_for_user(db, user.id, DB_PROFILE, limit=5)
 
     ids = [r.candidate.id for r in results]
     assert len(ids) == len(set(ids))
@@ -378,7 +366,7 @@ async def test_top_up_respects_dismissals(db: AsyncSession):
     await _skill(db, name="fine", submitter=user, description="Styling helpers")
     await record_feedback(db, user.id, "skill", unwanted.id, "dismissed")
 
-    results = await recommend_for_user(db, user.id, None, DB_PROFILE, limit=5)
+    results = await recommend_for_user(db, user.id, DB_PROFILE, limit=5)
 
     assert "nope" not in [r.candidate.name for r in results]
 
@@ -389,7 +377,7 @@ async def test_limit_is_respected(db: AsyncSession):
     for i in range(10):
         await _skill(db, name=f"db-{i}", submitter=user, description="database migrations")
 
-    results = await recommend_for_user(db, user.id, None, DB_PROFILE, limit=3)
+    results = await recommend_for_user(db, user.id, DB_PROFILE, limit=3)
 
     assert len(results) == 3
 
@@ -397,7 +385,7 @@ async def test_limit_is_respected(db: AsyncSession):
 @pytest.mark.asyncio
 async def test_empty_registry_returns_nothing(db: AsyncSession):
     user = await _user(db)
-    assert await recommend_for_user(db, user.id, None, DB_PROFILE) == []
+    assert await recommend_for_user(db, user.id, DB_PROFILE) == []
 
 
 @pytest.mark.asyncio
@@ -405,7 +393,7 @@ async def test_recommendation_dict_shape_is_complete(db: AsyncSession):
     user = await _user(db)
     await _skill(db, name="db-migrator", submitter=user, description="database migrations")
 
-    results = await recommend_for_user(db, user.id, None, DB_PROFILE)
+    results = await recommend_for_user(db, user.id, DB_PROFILE)
     data = results[0].to_dict()
 
     for key in ("type", "id", "qualified_name", "description", "latest_version", "reason", "score"):

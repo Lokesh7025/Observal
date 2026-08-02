@@ -28,6 +28,8 @@ import yaml
 from loguru import logger as optic
 from sqlalchemy import select
 
+from api.search import keyword_search
+
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -826,8 +828,8 @@ async def _resolve_reusable_component(feature: dict, agent: Agent, db: AsyncSess
     component type and the *actual* type wins, so a mislabelled suggestion
     still attaches correctly instead of being silently dropped.
 
-    Scoped to the agent's org so a suggestion can never attach another
-    tenant's private component.
+    Scoped to the agent's visibility so a suggestion can never attach another
+    user's private component.
     """
     component_id = coerce_uuid(feature.get("existing_component_id"))
     if component_id is None:
@@ -840,7 +842,7 @@ async def _resolve_reusable_component(feature: dict, agent: Agent, db: AsyncSess
     return await resolve_component_any_type(
         db,
         component_id,
-        org_id=agent.owner_org_id,
+        user_id=agent.created_by,
         component_types=ordered_types,
     )
 
@@ -848,8 +850,8 @@ async def _resolve_reusable_component(feature: dict, agent: Agent, db: AsyncSess
 async def _find_existing_skill_match(feature: dict, agent: Agent, db: AsyncSession) -> ResolvedComponent | None:
     """Deterministically find an existing approved skill before creating a duplicate.
 
-    Scoped to the agent's org: matching must never reach into another
-    tenant's private skills.
+    Scoped to the agent's visibility: matching must never reach into another
+    user's private or team-private skills.
     """
     raw_name = _slugify(str(feature.get("name") or ""))
     one_liner = str(feature.get("one_liner") or feature.get("why_for_you") or "")
@@ -862,9 +864,17 @@ async def _find_existing_skill_match(feature: dict, agent: Agent, db: AsyncSessi
         .join(SkillVersion, SkillListing.latest_version_id == SkillVersion.id)
         .where(SkillVersion.status == ListingStatus.approved)
     )
-    visibility = visibility_clause(SkillListing, agent.owner_org_id)
+    search_filter, search_rank = keyword_search(
+        f"{raw_name} {one_liner}",
+        [SkillListing.name, SkillVersion.description],
+        name_field=SkillListing.name,
+    )
+    visibility = visibility_clause(SkillListing, agent.created_by)
     if visibility is not None:
         stmt = stmt.where(visibility)
+    if search_filter is not None:
+        stmt = stmt.where(search_filter).order_by(search_rank.desc())
+    stmt = stmt.limit(100)
 
     for listing, version in (await db.execute(stmt)).all():
         listing_slug = _slugify(listing.name or "")

@@ -48,9 +48,9 @@ async def refresh_user_profiles(ctx: dict):
     try:
         from sqlalchemy import select
 
-        from api.deps import get_project_id
         from database import async_session
         from models.user import User
+        from observal_shared.migration.constants import DEFAULT_PROJECT_ID
         from services.user_profile import get_or_build_profile, users_with_recent_activity
 
         active = await users_with_recent_activity()
@@ -62,11 +62,11 @@ async def refresh_user_profiles(ctx: dict):
         async with async_session() as db:
             users = (await db.execute(select(User).where(User.auth_provider != "deactivated"))).scalars().all()
             for user in users:
-                if active is not None and (get_project_id(user), str(user.id)) not in active:
+                if active is not None and (DEFAULT_PROJECT_ID, str(user.id)) not in active:
                     skipped += 1
                     continue
                 try:
-                    await get_or_build_profile(db, user.id, get_project_id(user), force=True)
+                    await get_or_build_profile(db, user.id, DEFAULT_PROJECT_ID, force=True)
                     refreshed += 1
                 except Exception as e:
                     # One bad user must not stop the sweep. The session is
@@ -75,6 +75,6 @@ async def refresh_user_profiles(ctx: dict):
                     # later user fails too, and one fault is misreported as N.
                     await db.rollback()
                     optic.warning("user_profile_refresh_failed", user_id=str(user.id), error=str(e))
-        optic.info("user_profiles_refreshed", count=refreshed, skipped_inactive=skipped)
+        optic.info("user_profiles_refreshed: count={}, skipped_inactive={}", refreshed, skipped)
     except Exception as e:
         optic.error("user_profile_batch_failed", error=str(e))

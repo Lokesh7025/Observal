@@ -15,8 +15,9 @@ from loguru import logger as optic
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from api.deps import get_db, get_project_id, require_role
+from api.deps import get_db, require_role
 from models.user import User, UserRole
+from observal_shared.migration.constants import DEFAULT_PROJECT_ID
 from services.registry_recommender import ALL_COMPONENT_TYPES
 from services.user_profile import WorkProfile, get_or_build_profile
 from services.user_recommendations import recommend_for_user, record_feedback
@@ -91,7 +92,7 @@ async def my_recommendations(
         profile = await get_or_build_profile(
             db,
             current_user.id,
-            get_project_id(current_user),
+            DEFAULT_PROJECT_ID,
             force=refresh,
         )
     except Exception as e:
@@ -102,7 +103,6 @@ async def my_recommendations(
     recommendations = await recommend_for_user(
         db,
         user_id=current_user.id,
-        org_id=current_user.org_id,
         profile=profile,
         component_types=component_types,
         limit=limit,

@@ -8,7 +8,7 @@ Three stages, in order:
 1. :func:`build_signals` — distil a report's aggregates and facets into a
    search string describing what this agent actually does.
 2. :func:`build_catalog` — ask the shared recommender for a small, ranked,
-   org-visible shortlist of components the agent is *not* already using.
+   user-visible shortlist of components the agent is *not* already using.
 3. :func:`validate_reuse_suggestions` — after the LLM has written its
    suggestions, drop any reuse that names a component we did not offer or
    that no longer resolves. The model's output is never trusted as a
@@ -49,7 +49,7 @@ REUSE_ACTIONS = frozenset({"reuse_existing_component", "attach_registry_componen
 class RegistryScope:
     """Which components an agent may be offered, and which it already has."""
 
-    org_id: uuid.UUID | None = None
+    user_id: uuid.UUID | None = None
     attached_ids: tuple[uuid.UUID, ...] = ()
 
 
@@ -209,7 +209,7 @@ async def build_catalog(
         candidates = await shortlist(
             db,
             signals=signals,
-            org_id=scope.org_id,
+            user_id=scope.user_id,
             exclude_ids=scope.attached_ids,
             per_type_limit=per_type,
             total_limit=total,
@@ -246,7 +246,7 @@ async def _registry_has_any(db: AsyncSession, scope: RegistryScope) -> bool:
         probe = await shortlist(
             db,
             signals="",
-            org_id=scope.org_id,
+            user_id=scope.user_id,
             exclude_ids=scope.attached_ids,
             per_type_limit=1,
             total_limit=1,
@@ -303,7 +303,7 @@ async def validate_reuse_suggestions(
     resolved = {}
     if eligible:
         refs = [(t, cid) for _, cid in eligible for t in ALL_COMPONENT_TYPES]
-        resolved = await resolve_components(db, refs, org_id=scope.org_id)
+        resolved = await resolve_components(db, refs, user_id=scope.user_id)
 
     resolved_by_id: dict[uuid.UUID, object] = {}
     for (_component_type, component_id), component in resolved.items():

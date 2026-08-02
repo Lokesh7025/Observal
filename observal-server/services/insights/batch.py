@@ -119,7 +119,7 @@ def _build_registry_scope(agent: Agent | None, agent_config: dict | None) -> Reg
     report's signals exist — see :mod:`services.insights.registry_match`.
     """
     if agent is None:
-        return RegistryScope(org_id=None, attached_ids=())
+        return RegistryScope(user_id=None, attached_ids=())
 
     attached: list = []
     for component in (agent_config or {}).get("current_components", []) or []:
@@ -131,7 +131,7 @@ def _build_registry_scope(agent: Agent | None, agent_config: dict | None) -> Reg
         except (ValueError, TypeError):
             continue
 
-    return RegistryScope(org_id=agent.owner_org_id, attached_ids=tuple(attached))
+    return RegistryScope(user_id=agent.created_by, attached_ids=tuple(attached))
 
 
 # Maximum time a report can stay in 'running' before being considered stale.

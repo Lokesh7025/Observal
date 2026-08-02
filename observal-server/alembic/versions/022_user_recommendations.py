@@ -3,8 +3,8 @@
 
 """Add per-user work profiles and recommendation feedback.
 
-Revision ID: 017_user_recommendations
-Revises: 016_registry_publish_loop
+Revision ID: 022_user_recommendations
+Revises: 021_agent_success_criteria
 """
 
 import sqlalchemy as sa
@@ -12,8 +12,8 @@ from sqlalchemy.dialects import postgresql
 
 from alembic import op
 
-revision = "017_user_recommendations"
-down_revision = "016_registry_publish_loop"
+revision = "022_user_recommendations"
+down_revision = "021_agent_success_criteria"
 branch_labels = None
 depends_on = None
 

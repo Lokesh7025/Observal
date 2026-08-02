@@ -5,7 +5,7 @@
 
 Two untrusted inputs reach this code: registry text written by publishers
 (names, descriptions) and the signal string derived from telemetry. Neither
-may crash the caller, leak across tenants, or alter a query.
+may crash the caller, leak across users, or alter a query.
 """
 
 from __future__ import annotations
@@ -20,7 +20,6 @@ from sqlalchemy.orm import sessionmaker
 
 from models.base import Base
 from models.mcp import ListingStatus
-from models.organization import Organization
 from models.skill import SkillListing, SkillVersion
 from models.user import User
 from services.insights.registry_match import (
@@ -66,22 +65,28 @@ async def session_factory(tmp_path):
     await engine.dispose()
 
 
-async def _user(db: AsyncSession, email: str = "a@example.com", org_id=None) -> User:
-    user = User(email=email, username=email.split("@")[0], name=email, org_id=org_id)
+async def _user(db: AsyncSession, email: str = "a@example.com") -> User:
+    user = User(email=email, username=email.split("@")[0], name=email)
     db.add(user)
     await db.flush()
     return user
 
 
-async def _skill(db: AsyncSession, *, name: str, description: str, submitter: User, **kw) -> SkillListing:
+async def _skill(
+    db: AsyncSession,
+    *,
+    name: str,
+    description: str,
+    submitter: User,
+    is_private: bool = False,
+) -> SkillListing:
     listing = SkillListing(
         name=name,
         namespace="test",
         slug=name.lower().replace(" ", "-")[:60],
         owner="t",
         submitted_by=submitter.id,
-        is_private=kw.get("is_private", False),
-        owner_org_id=kw.get("org_id"),
+        is_private=is_private,
     )
     db.add(listing)
     await db.flush()
@@ -164,56 +169,48 @@ async def test_hostile_registry_text_is_returned_verbatim_not_executed(db: Async
     assert await shortlist(db, signals="database", component_types=["skill"])
 
 
-# ── tenant isolation under stress ─────────────────────────────────────────
+# ── private visibility under stress ───────────────────────────────────────
 
 
 @pytest.mark.asyncio
-async def test_no_org_leak_across_many_orgs(db: AsyncSession):
-    orgs = []
+async def test_no_private_leak_across_many_users(db: AsyncSession):
+    users = []
     for i in range(6):
-        org = Organization(name=f"org{i}", slug=f"org-{i}")
-        db.add(org)
-        await db.flush()
-        orgs.append(org)
-        owner = await _user(db, f"o{i}@x.com", org_id=org.id)
+        owner = await _user(db, f"o{i}@x.com")
+        users.append(owner)
         await _skill(
             db,
             name=f"secret-db-{i}",
             description="Database migrations internal",
             submitter=owner,
             is_private=True,
-            org_id=org.id,
         )
 
-    for i, org in enumerate(orgs):
-        results = await shortlist(db, signals="database migrations", org_id=org.id)
+    for i, user in enumerate(users):
+        results = await shortlist(db, signals="database migrations", user_id=user.id)
         names = {c.name for c in results}
-        assert names == {f"secret-db-{i}"}, f"org {i} saw {names}"
+        assert names == {f"secret-db-{i}"}, f"user {i} saw {names}"
 
 
 @pytest.mark.asyncio
 async def test_concurrent_shortlists_stay_isolated(session_factory):
-    """Concurrency must not bleed one org's results into another's."""
+    """Concurrency must not bleed one user's results into another's."""
     async with session_factory() as seed:
-        org_a = Organization(name="A", slug="a")
-        org_b = Organization(name="B", slug="b")
-        seed.add_all([org_a, org_b])
-        await seed.flush()
-        ua = await _user(seed, "a@a.com", org_id=org_a.id)
-        ub = await _user(seed, "b@b.com", org_id=org_b.id)
-        await _skill(seed, name="a-secret", description="database", submitter=ua, is_private=True, org_id=org_a.id)
-        await _skill(seed, name="b-secret", description="database", submitter=ub, is_private=True, org_id=org_b.id)
+        ua = await _user(seed, "a@example.com")
+        ub = await _user(seed, "b@example.com")
+        await _skill(seed, name="a-secret", description="database", submitter=ua, is_private=True)
+        await _skill(seed, name="b-secret", description="database", submitter=ub, is_private=True)
         await seed.commit()
-        org_a_id, org_b_id = org_a.id, org_b.id
+        user_a_id, user_b_id = ua.id, ub.id
 
-    async def run(org_id):
+    async def run(user_id):
         # Each task gets its own session; sharing one would be a data race.
         async with session_factory() as session:
-            return await shortlist(session, signals="database", org_id=org_id)
+            return await shortlist(session, signals="database", user_id=user_id)
 
     results = await asyncio.gather(
-        *[run(org_a_id) for _ in range(5)],
-        *[run(org_b_id) for _ in range(5)],
+        *[run(user_a_id) for _ in range(5)],
+        *[run(user_b_id) for _ in range(5)],
     )
 
     for r in results[:5]:
