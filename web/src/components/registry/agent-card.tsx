@@ -52,7 +52,7 @@ export function AgentCard({
     <Link
       to="/agents/$agentId" params={{ agentId: id }}
       className={[
-        "group block border border-border bg-card p-4 rounded-md",
+        "group flex h-full min-h-60 flex-col rounded-md border border-border bg-card p-4",
         "transition-all duration-200 ease-out",
         "hover:-translate-y-0.5 hover:border-foreground/20 hover:bg-accent/40",
         "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
@@ -85,7 +85,7 @@ export function AgentCard({
         </p>
       )}
 
-      <div className="mt-3 flex items-center gap-4 text-xs text-muted-foreground">
+      <div className="mt-auto flex items-center gap-4 pt-3 text-xs text-muted-foreground">
         {downloads != null && (
           <span className="inline-flex items-center gap-1">
             <ArrowDownToLine className="h-3 w-3" />

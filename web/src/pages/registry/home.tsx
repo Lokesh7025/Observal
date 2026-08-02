@@ -15,8 +15,8 @@ import {
   Gauge,
   Medal,
   Search,
-  Sparkles,
   Star,
+  TrendingUp,
   Terminal,
   Trophy,
   WandSparkles,
@@ -652,7 +652,7 @@ export default function RegistryHome() {
           <div className="space-y-4">
             <div className="flex items-center justify-between gap-3">
               <div className="flex items-center gap-2">
-                <Sparkles className="h-4 w-4 text-muted-foreground" />
+                <TrendingUp className="h-4 w-4 text-muted-foreground" />
                 <h2 className="text-sm font-semibold text-foreground">Trending agents</h2>
               </div>
               <Link to="/leaderboard" className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground">
