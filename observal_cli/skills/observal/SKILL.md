@@ -26,7 +26,6 @@ owner: observal
 11. **Never invent `OTEL_*` or `CLAUDE_CODE_ENABLE_TELEMETRY` environment variables.** Telemetry flows through session push hooks and reconciliation only.
 
 ---
-
 ## Procedure: Natural-Language Registry Search
 
 For requests like "find me an agent for incident resolution" or "what skill helps design good frontends", extract the useful keywords and search JSON first.
@@ -79,7 +78,6 @@ observal scan --harness kiro
 `scan` verifies MCPs, skills, hooks, and agents. Prompts/sandboxes are injected into rules/MCP config; use the pull output/lockfile for membership.
 
 ---
-
 ## Procedure: Outdated
 
 Check for newer versions of installed agents and components.
@@ -92,7 +90,6 @@ observal outdated --harness claude-code --output json
 Reads `~/.observal/lockfile.json` and compares each pinned version against the registry's latest. Reports a table of outdated items with current vs latest version.
 
 ---
-
 ## Procedure: Scan harnesses
 
 Read-only inventory of installed components across all detected harnesses. **Never modifies any file.**
@@ -106,7 +103,6 @@ observal scan --harness claude-code
 Reports: detected harnesses, MCP servers, skills, hooks, agents, and unregistered components.
 
 ---
-
 ## Procedure: Doctor
 
 Diagnose only. Does not fix anything.
