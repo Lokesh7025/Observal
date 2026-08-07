@@ -39,6 +39,13 @@ def _mock_db():
     db.refresh = AsyncMock()
     db.delete = AsyncMock()
     db.flush = AsyncMock()
+    # A publish that stays pending delivers inbox items in the same
+    # transaction, wrapping each insert in a SAVEPOINT. A bare AsyncMock
+    # returns a coroutine from begin_nested(), not an async context manager.
+    nested = MagicMock()
+    nested.__aenter__ = AsyncMock(return_value=None)
+    nested.__aexit__ = AsyncMock(return_value=False)
+    db.begin_nested = MagicMock(return_value=nested)
     return db
 
 

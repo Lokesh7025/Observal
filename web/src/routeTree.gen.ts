@@ -26,6 +26,7 @@ import { Route as AuthedInsightsReportIdRouteImport } from './routes/_authed/ins
 import { Route as AuthedComponentsComponentIdRouteImport } from './routes/_authed/components/$componentId'
 import { Route as AuthedAgentsBuilderRouteImport } from './routes/_authed/agents/builder'
 import { Route as AuthedAgentsAgentIdRouteImport } from './routes/_authed/agents/$agentId'
+import { Route as AuthedUserInboxRouteImport } from './routes/_authed/_user/inbox'
 import { Route as AuthedUserAccountRouteImport } from './routes/_authed/_user/account'
 import { Route as AuthedAdminUsersRouteImport } from './routes/_authed/_admin/users'
 import { Route as AuthedAdminSsoRouteImport } from './routes/_authed/_admin/sso'
@@ -122,6 +123,11 @@ const AuthedAgentsAgentIdRoute = AuthedAgentsAgentIdRouteImport.update({
   path: '/agents/$agentId',
   getParentRoute: () => AuthedRoute,
 } as any)
+const AuthedUserInboxRoute = AuthedUserInboxRouteImport.update({
+  id: '/inbox',
+  path: '/inbox',
+  getParentRoute: () => AuthedUserRoute,
+} as any)
 const AuthedUserAccountRoute = AuthedUserAccountRouteImport.update({
   id: '/account',
   path: '/account',
@@ -201,6 +207,7 @@ export interface FileRoutesByFullPath {
   '/sso': typeof AuthedAdminSsoRoute
   '/users': typeof AuthedAdminUsersRoute
   '/account': typeof AuthedUserAccountRoute
+  '/inbox': typeof AuthedUserInboxRoute
   '/agents/$agentId': typeof AuthedAgentsAgentIdRouteWithChildren
   '/agents/builder': typeof AuthedAgentsBuilderRoute
   '/components/$componentId': typeof AuthedComponentsComponentIdRoute
@@ -229,6 +236,7 @@ export interface FileRoutesByTo {
   '/sso': typeof AuthedAdminSsoRoute
   '/users': typeof AuthedAdminUsersRoute
   '/account': typeof AuthedUserAccountRoute
+  '/inbox': typeof AuthedUserInboxRoute
   '/agents/$agentId': typeof AuthedAgentsAgentIdRouteWithChildren
   '/agents/builder': typeof AuthedAgentsBuilderRoute
   '/components/$componentId': typeof AuthedComponentsComponentIdRoute
@@ -261,6 +269,7 @@ export interface FileRoutesById {
   '/_authed/_admin/sso': typeof AuthedAdminSsoRoute
   '/_authed/_admin/users': typeof AuthedAdminUsersRoute
   '/_authed/_user/account': typeof AuthedUserAccountRoute
+  '/_authed/_user/inbox': typeof AuthedUserInboxRoute
   '/_authed/agents/$agentId': typeof AuthedAgentsAgentIdRouteWithChildren
   '/_authed/agents/builder': typeof AuthedAgentsBuilderRoute
   '/_authed/components/$componentId': typeof AuthedComponentsComponentIdRoute
@@ -291,6 +300,7 @@ export interface FileRouteTypes {
     | '/sso'
     | '/users'
     | '/account'
+    | '/inbox'
     | '/agents/$agentId'
     | '/agents/builder'
     | '/components/$componentId'
@@ -319,6 +329,7 @@ export interface FileRouteTypes {
     | '/sso'
     | '/users'
     | '/account'
+    | '/inbox'
     | '/agents/$agentId'
     | '/agents/builder'
     | '/components/$componentId'
@@ -350,6 +361,7 @@ export interface FileRouteTypes {
     | '/_authed/_admin/sso'
     | '/_authed/_admin/users'
     | '/_authed/_user/account'
+    | '/_authed/_user/inbox'
     | '/_authed/agents/$agentId'
     | '/_authed/agents/builder'
     | '/_authed/components/$componentId'
@@ -491,6 +503,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthedAgentsAgentIdRouteImport
       parentRoute: typeof AuthedRoute
     }
+    '/_authed/_user/inbox': {
+      id: '/_authed/_user/inbox'
+      path: '/inbox'
+      fullPath: '/inbox'
+      preLoaderRoute: typeof AuthedUserInboxRouteImport
+      parentRoute: typeof AuthedUserRoute
+    }
     '/_authed/_user/account': {
       id: '/_authed/_user/account'
       path: '/account'
@@ -606,12 +625,14 @@ const AuthedAdminRouteWithChildren = AuthedAdminRoute._addFileChildren(
 
 interface AuthedUserRouteChildren {
   AuthedUserAccountRoute: typeof AuthedUserAccountRoute
+  AuthedUserInboxRoute: typeof AuthedUserInboxRoute
   AuthedUserTracesTraceIdRoute: typeof AuthedUserTracesTraceIdRoute
   AuthedUserTracesIndexRoute: typeof AuthedUserTracesIndexRoute
 }
 
 const AuthedUserRouteChildren: AuthedUserRouteChildren = {
   AuthedUserAccountRoute: AuthedUserAccountRoute,
+  AuthedUserInboxRoute: AuthedUserInboxRoute,
   AuthedUserTracesTraceIdRoute: AuthedUserTracesTraceIdRoute,
   AuthedUserTracesIndexRoute: AuthedUserTracesIndexRoute,
 }

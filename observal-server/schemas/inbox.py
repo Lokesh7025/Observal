@@ -1,0 +1,89 @@
+# SPDX-FileCopyrightText: 2026 Lokesh Selvam <lokeshselvam7025@gmail.com>
+# SPDX-License-Identifier: Apache-2.0
+
+"""Request and response shapes for the inbox API."""
+
+# No `from __future__ import annotations` here, matching the other schema
+# modules: Pydantic resolves these annotations at runtime to build validators.
+import uuid
+from datetime import datetime
+
+from pydantic import BaseModel, Field
+
+
+class InboxItemResponse(BaseModel):
+    id: uuid.UUID
+    kind: str
+    state: str
+    # Independent of state: an item can be read and still open.
+    read: bool
+    read_at: datetime | None = None
+    action_required: bool
+    title: str
+    body: str | None = None
+    subject_type: str
+    subject_id: uuid.UUID | None = None
+    subject_namespace: str | None = None
+    subject_slug: str | None = None
+    action_url: str | None = None
+    action_command: str | None = None
+    actor_id: uuid.UUID | None = None
+    team_id: uuid.UUID | None = None
+    payload: dict = Field(default_factory=dict)
+    created_at: datetime
+    resolved_at: datetime | None = None
+
+
+class InboxItemEventResponse(BaseModel):
+    id: uuid.UUID
+    event: str
+    actor_id: uuid.UUID | None = None
+    detail: str | None = None
+    created_at: datetime
+
+
+class InboxItemDetailResponse(InboxItemResponse):
+    history: list[InboxItemEventResponse] = Field(default_factory=list)
+
+
+class InboxListResponse(BaseModel):
+    """Matches the pagination shape used elsewhere in the API."""
+
+    items: list[InboxItemResponse]
+    total: int
+    page: int
+    page_size: int
+
+
+class InboxCountResponse(BaseModel):
+    unread: int
+    action_required: int
+    open: int
+
+
+class OutdatedItem(BaseModel):
+    """One outdated finding reported by the CLI."""
+
+    type: str = Field(max_length=32)
+    component_id: uuid.UUID
+    name: str = Field(default="", max_length=255)
+    namespace: str | None = Field(default=None, max_length=64)
+    slug: str | None = Field(default=None, max_length=64)
+    current_version: str = Field(max_length=64)
+    latest_version: str = Field(max_length=64)
+    harness: str | None = Field(default=None, max_length=50)
+
+
+class OutdatedReportRequest(BaseModel):
+    # A lock file with more entries than this is not a realistic install; the
+    # bound keeps one report from writing an unbounded number of rows.
+    items: list[OutdatedItem] = Field(default_factory=list, max_length=200)
+
+
+class OutdatedReportResponse(BaseModel):
+    created: int
+    superseded: int
+
+
+class BulkReadResponse(BaseModel):
+    updated: int

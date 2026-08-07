@@ -30,6 +30,7 @@ from models.mcp import ListingStatus
 from models.user import User, UserRole
 from schemas.component_version import VersionPublishRequest, VersionReviewRequest  # noqa: TC001
 from services.component_version_extras import ALLOWED_FIELDS, validate_and_extract
+from services.inbox import sources as inbox
 
 # Semver pattern: X.Y.Z or X.Y.Z-prerelease
 SEMVER_RE = re.compile(r"^\d+\.\d+\.\d+(-[a-zA-Z0-9.]+)?$")
@@ -227,6 +228,16 @@ async def _publish_version(
                 setattr(ver, field, listing_val)
 
     db.add(ver)
+    await db.flush()
+    # This route always creates a pending version, so a review is always owed.
+    await inbox.on_publish(
+        db,
+        listing,
+        subject_type=component_type,
+        actor_id=current_user.id,
+        auto_approved=False,
+        version=ver.version,
+    )
     await db.commit()
 
     return _version_to_dict(ver, component_type)

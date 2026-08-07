@@ -21,6 +21,7 @@ from api.routes.device_auth import router as device_auth_router
 from api.routes.exec_dashboard import router as exec_dashboard_router
 from api.routes.feedback import router as feedback_router
 from api.routes.hook import router as hook_router
+from api.routes.inbox import router as inbox_router
 from api.routes.ingest import router as ingest_router
 from api.routes.insights import router as insights_router
 from api.routes.jwks import router as jwks_router
@@ -71,6 +72,7 @@ REST_ROUTERS = (
     config_router,
     support_router,
     teams_router,
+    inbox_router,
     layer_snapshot_router,
     logs_stream_router,
     audit_router,

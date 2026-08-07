@@ -31,6 +31,7 @@ from models.user import User
 from schemas.mcp import ReviewActionRequest
 from services.cache import invalidate_namespace
 from services.editing_lock import is_actively_editing
+from services.inbox import sources as inbox
 from services.redis import publish as redis_publish
 from services.security_events import EventType, SecurityEvent, Severity, emit_security_event
 from services.teamspace import ReviewScope, can_review, review_scope
@@ -52,6 +53,15 @@ VERSION_MODELS = {
     "prompt": PromptVersion,
     "sandbox": SandboxVersion,
 }
+
+# The bundle routes iterate LISTING_MODELS by value and lose the type key, but an
+# inbox item has to name what it is about. Invert the map once here rather than
+# threading the key through _bundle_listings.
+_TYPE_BY_MODEL = {model: listing_type for listing_type, model in LISTING_MODELS.items()}
+
+
+def _listing_type_of(listing) -> str:
+    return _TYPE_BY_MODEL.get(type(listing), "mcp")
 
 
 # ---------------------------------------------------------------------------
@@ -673,6 +683,17 @@ async def approve(
         listing.status = ListingStatus.approved
         listing.rejection_reason = None
 
+    # Delivered before the commit, in this same transaction: if the approval
+    # rolls back, the notice rolls back with it.
+    await inbox.on_review_decided(
+        db,
+        listing,
+        subject_type=listing_type,
+        approved=True,
+        actor_id=current_user.id,
+        version=getattr(pending_ver, "version", None),
+    )
+
     await db.commit()
     await db.refresh(listing)
     await invalidate_namespace("dashboard")
@@ -715,6 +736,16 @@ async def reject(
             raise HTTPException(status_code=409, detail="Cannot reject: the owner is currently editing this item")
         listing.status = ListingStatus.rejected
         listing.rejection_reason = req.reason
+
+    await inbox.on_review_decided(
+        db,
+        listing,
+        subject_type=listing_type,
+        approved=False,
+        actor_id=current_user.id,
+        version=getattr(pending_ver, "version", None),
+        reason=req.reason,
+    )
 
     await db.commit()
 
@@ -816,6 +847,18 @@ async def approve_agent(
     if req and req.category:
         agent.category = req.category
 
+    # Addressed to whoever released the version that was approved, which is not
+    # necessarily the agent's creator.
+    await inbox.on_review_decided(
+        db,
+        agent,
+        subject_type="agent",
+        approved=True,
+        actor_id=current_user.id,
+        version=newest_pending.version,
+        submitter_id=newest_pending.released_by,
+    )
+
     await db.commit()
     await invalidate_namespace("dashboard")
     asyncio.create_task(redis_publish("reviews:updated", {"listing_id": str(agent.id), "action": "approved"}))  # noqa: RUF006
@@ -861,6 +904,21 @@ async def reject_agent(
             pv.reviewed_by = current_user.id
             pv.reviewed_at = now
         await db.flush()
+
+        # Every rejected version is somebody's work, and they may not all share
+        # an author, so each release gets its own notice rather than only the
+        # newest one.
+        for pv in pending_versions:
+            await inbox.on_review_decided(
+                db,
+                agent,
+                subject_type="agent",
+                approved=False,
+                actor_id=current_user.id,
+                version=pv.version,
+                reason=req.reason,
+                submitter_id=pv.released_by,
+            )
 
     await db.commit()
     rejected_version = pending_versions[0].version if pending_versions else ""
@@ -915,6 +973,14 @@ async def approve_bundle(
             )
         listing.status = ListingStatus.approved
         listing.rejection_reason = None
+        await inbox.on_review_decided(
+            db,
+            listing,
+            subject_type=_listing_type_of(listing),
+            approved=True,
+            actor_id=current_user.id,
+            version=getattr(listing.latest_version, "version", None),
+        )
         count += 1
 
     await db.commit()
@@ -943,6 +1009,15 @@ async def reject_bundle(
             )
         listing.status = ListingStatus.rejected
         listing.rejection_reason = req.reason
+        await inbox.on_review_decided(
+            db,
+            listing,
+            subject_type=_listing_type_of(listing),
+            approved=False,
+            actor_id=current_user.id,
+            version=getattr(listing.latest_version, "version", None),
+            reason=req.reason,
+        )
         count += 1
 
     await db.commit()
@@ -1044,6 +1119,14 @@ async def approve_mcp_with_skills(
 
     listing.status = ListingStatus.approved
     listing.rejection_reason = None
+    await inbox.on_review_decided(
+        db,
+        listing,
+        subject_type="mcp",
+        approved=True,
+        actor_id=current_user.id,
+        version=getattr(listing.latest_version, "version", None),
+    )
 
     approved_skill_ids: list[str] = []
     for sid in req.skill_ids:
@@ -1057,6 +1140,14 @@ async def approve_mcp_with_skills(
         if skill and skill.status == ListingStatus.pending:
             skill.status = ListingStatus.approved
             skill.rejection_reason = None
+            await inbox.on_review_decided(
+                db,
+                skill,
+                subject_type="skill",
+                approved=True,
+                actor_id=current_user.id,
+                version=getattr(skill.latest_version, "version", None),
+            )
             approved_skill_ids.append(str(skill.id))
 
     await db.commit()

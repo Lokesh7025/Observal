@@ -9,6 +9,23 @@ import uuid
 import pytest
 
 
+def _review_db():
+    """AsyncSession stand-in for the review endpoints.
+
+    A review decision delivers inbox items in the same transaction, wrapping
+    each insert in a SAVEPOINT. A bare AsyncMock returns a coroutine from
+    begin_nested(), which is not an async context manager, so one is supplied.
+    """
+    from unittest.mock import AsyncMock, MagicMock
+
+    db = AsyncMock()
+    nested = MagicMock()
+    nested.__aenter__ = AsyncMock(return_value=None)
+    nested.__aexit__ = AsyncMock(return_value=False)
+    db.begin_nested = MagicMock(return_value=nested)
+    return db
+
+
 class TestComponentSourceModel:
     def test_component_source_tablename(self):
         from models.component_source import ComponentSource
@@ -480,7 +497,7 @@ class TestMcpValidationField:
         listing.status = ListingStatus.pending
         listing.mcp_validated = False
 
-        mock_db = AsyncMock()
+        mock_db = _review_db()
         mock_user = MagicMock()
         mock_user.role = UserRole.admin
 
@@ -511,7 +528,7 @@ class TestMcpValidationField:
         listing.status = ListingStatus.pending
         listing.mcp_validated = True
 
-        mock_db = AsyncMock()
+        mock_db = _review_db()
         mock_user = MagicMock()
         mock_user.role = UserRole.admin
 
@@ -540,7 +557,7 @@ class TestMcpValidationField:
         listing.name = "test-skill"
         listing.status = ListingStatus.pending
 
-        mock_db = AsyncMock()
+        mock_db = _review_db()
         mock_user = MagicMock()
         mock_user.role = UserRole.admin
 

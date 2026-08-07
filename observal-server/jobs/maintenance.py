@@ -49,6 +49,51 @@ async def sync_component_sources(ctx: dict):
             )
 
 
+async def purge_inbox_items(ctx: dict):
+    """Delete resolved inbox items past the retention horizon.
+
+    Only ``done`` and ``dismissed`` items are eligible. An ``open`` item is
+    unactioned work, and deleting work silently is the exact failure the inbox
+    exists to prevent, so it is never purged on age. History rows go with the
+    item through ON DELETE CASCADE.
+    """
+    optic.debug("purge_inbox_items")
+    from datetime import UTC, datetime, timedelta
+
+    from sqlalchemy import delete, select
+
+    import services.dynamic_settings as ds
+    from database import async_session
+    from models.inbox import InboxItem, InboxState
+
+    retention_days = await ds.get_int("inbox.retention_days", 90)
+    if retention_days <= 0:
+        optic.info("inbox retention disabled (inbox.retention_days={})", retention_days)
+        return
+
+    cutoff = datetime.now(UTC) - timedelta(days=retention_days)
+    async with async_session() as db:
+        doomed = (
+            (
+                await db.execute(
+                    select(InboxItem.id).where(
+                        InboxItem.state.in_([InboxState.done, InboxState.dismissed]),
+                        InboxItem.resolved_at.is_not(None),
+                        InboxItem.resolved_at < cutoff,
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        if not doomed:
+            optic.debug("inbox retention: nothing older than {} days", retention_days)
+            return
+        await db.execute(delete(InboxItem).where(InboxItem.id.in_(list(doomed))))
+        await db.commit()
+        optic.info("inbox retention: purged {} resolved item(s) older than {} days", len(doomed), retention_days)
+
+
 async def maintain_clickhouse(ctx: dict):
     """Periodic ClickHouse maintenance: compact parts to prevent OOM on long-running agents.
 

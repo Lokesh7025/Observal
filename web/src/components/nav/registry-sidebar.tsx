@@ -18,10 +18,12 @@ import {
 	SidebarHeader,
 	SidebarMenu,
 	SidebarMenuButton,
+	SidebarMenuBadge,
 	SidebarMenuItem,
 	SidebarRail,
 } from "@/components/ui/sidebar";
 import { NavUser } from "@/components/nav/nav-user";
+import { useInboxCounts } from "@/hooks/use-inbox-api";
 
 import {
 	Home,
@@ -39,6 +41,7 @@ import {
 	Stethoscope,
 	KeyRound,
 	BookOpen,
+	Inbox,
 } from "lucide-react";
 import { useSyncExternalStore } from "react";
 import {
@@ -86,6 +89,7 @@ const reviewNav: NavItem[] = [
 ];
 
 const userNav: NavItem[] = [
+	{ title: "Inbox", href: "/inbox", icon: Inbox, minRole: "user" },
 	{ title: "My Traces", href: "/traces", icon: Activity, minRole: "user" },
 ];
 
@@ -194,6 +198,12 @@ export function RegistrySidebar() {
 		? userNav.filter((item) => !item.minRole || hasMinRole(role, item.minRole))
 		: [];
 
+	// Only unread drives the badge. Action-required is shown inside the page,
+	// because a count that never clears until the work is done would sit on the
+	// nav permanently and stop meaning anything.
+	const { data: inboxCounts } = useInboxCounts(isAuthenticated);
+	const inboxUnread = inboxCounts?.unread ?? 0;
+
 	const visibleAdminNav = isAuthenticated
 		? adminNav.filter((item) => !item.minRole || hasMinRole(role, item.minRole))
 		: [];
@@ -300,6 +310,9 @@ export function RegistrySidebar() {
 											<Link to={item.href}>
 												<item.icon className="h-4 w-4" />
 												<span>{item.title}</span>
+												{item.href === "/inbox" && inboxUnread > 0 && (
+													<SidebarMenuBadge>{inboxUnread}</SidebarMenuBadge>
+												)}
 											</Link>
 										</SidebarMenuButton>
 									</SidebarMenuItem>

@@ -18,6 +18,7 @@ from models.exec_config import ExecDashboardConfig
 from models.exporter_config import ExporterConfig
 from models.feedback import Feedback
 from models.hook import HookDownload, HookListing
+from models.inbox import InboxItem, InboxItemEvent, InboxKind, InboxState
 from models.insight_meta_cache import InsightMetaCache
 from models.insight_report import InsightReport, InsightReportStatus
 from models.insight_session_facets import InsightSessionFacets
@@ -52,6 +53,10 @@ __all__ = [
     "Feedback",
     "HookDownload",
     "HookListing",
+    "InboxItem",
+    "InboxItemEvent",
+    "InboxKind",
+    "InboxState",
     "InsightMetaCache",
     "InsightReport",
     "InsightReportStatus",

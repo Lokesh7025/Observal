@@ -90,6 +90,18 @@ Every command available in the installed CLI. This block is generated from the T
 - `observal doctor cleanup`: Remove ALL Observal hooks, env vars, and legacy telemetry config.
 - `observal doctor patch`: Install Observal session telemetry hooks for selected harnesses.
 
+**`observal inbox`**: Your work and event feed: reviews, decisions, and update notices
+
+- `observal inbox count`: Show unread and needs-action counts.
+- `observal inbox dismiss`: Dismiss an item without acting on it.
+- `observal inbox done`: Resolve an item.
+- `observal inbox list`: List your inbox items.
+- `observal inbox read`: Mark an item read. This does not resolve it — it stays in your open list.
+- `observal inbox read-all`: Mark everything matching the filter as read.
+- `observal inbox reopen`: Reopen an item you resolved or dismissed by mistake.
+- `observal inbox show`: Show one item with its full action history.
+- `observal inbox unread`: Mark an item unread again.
+
 **`observal ops`**: Observability and operational commands (traces, telemetry, dashboard, feedback)
 
 - `observal ops insights`: Agent insight reports

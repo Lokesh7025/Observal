@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import uuid
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi import HTTPException
@@ -16,6 +16,24 @@ from api.routes.co_authors import TransferOwnershipRequest, _get_entity_for_tran
 from models.team import TeamRole
 
 ENTITY_TYPES = ["agents", "mcps", "skills", "hooks", "prompts", "sandboxes"]
+
+
+def _stub_db():
+    """Minimal AsyncSession stand-in for these ownership tests.
+
+    ``execute`` answers empty rather than being absent: moving a listing out of
+    a teamspace republishes it, which re-enters review, and the inbox then
+    resolves reviewer recipients. A registry with no users has no reviewers, so
+    empty is the truthful answer and keeps these tests about ownership.
+    """
+    result = MagicMock()
+    result.scalars.return_value.all.return_value = []
+    result.scalar_one_or_none.return_value = None
+    return SimpleNamespace(
+        commit=AsyncMock(),
+        refresh=AsyncMock(),
+        execute=AsyncMock(return_value=result),
+    )
 
 
 class _Listing(SimpleNamespace):
@@ -71,7 +89,7 @@ async def test_transfer_of_team_listing_needs_a_teamspace_owner(entity_type, is_
     current_user = SimpleNamespace(id=uuid.uuid4())
     team_id = uuid.uuid4()
     listing = _listing(entity_type, current_user.id, team_id=team_id, is_private=is_private)
-    db = SimpleNamespace(commit=AsyncMock(), refresh=AsyncMock())
+    db = _stub_db()
 
     with (
         patch("api.routes.co_authors.resolve_listing", new=AsyncMock(return_value=listing)),
@@ -105,7 +123,7 @@ async def test_teamspace_owner_transfer_detaches_the_listing(entity_type, is_pri
     """
     current_user = SimpleNamespace(id=uuid.uuid4())
     listing = _listing(entity_type, current_user.id, team_id=uuid.uuid4(), is_private=is_private)
-    db = SimpleNamespace(commit=AsyncMock(), refresh=AsyncMock())
+    db = _stub_db()
 
     await _transfer(entity_type, listing, current_user, _target_user(), db)
 
@@ -120,7 +138,7 @@ async def test_transfer_of_personal_listing_still_works(entity_type):
     current_user = SimpleNamespace(id=uuid.uuid4())
     listing = _listing(entity_type, current_user.id)
     target_user = _target_user()
-    db = SimpleNamespace(commit=AsyncMock(), refresh=AsyncMock())
+    db = _stub_db()
 
     response = await _transfer(entity_type, listing, current_user, target_user, db)
 
@@ -138,7 +156,7 @@ async def test_team_check_runs_before_the_target_user_is_resolved():
     current_user = SimpleNamespace(id=uuid.uuid4())
     listing = _listing("mcps", current_user.id, team_id=uuid.uuid4())
     resolve_target = AsyncMock(side_effect=AssertionError("target user resolved before the teamspace check"))
-    db = SimpleNamespace(commit=AsyncMock(), refresh=AsyncMock())
+    db = _stub_db()
 
     with (
         patch(

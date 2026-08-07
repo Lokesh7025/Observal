@@ -41,6 +41,7 @@ from schemas.prompt import (
     PromptUpdateRequest,
 )
 from services.editing_lock import _is_lock_expired, acquire_edit_lock, release_edit_lock
+from services.inbox import sources as inbox
 from services.registry_namespace import identity_exists
 from services.teamspace import publish_auto_approves_for_entity, resolve_publish_target
 
@@ -96,6 +97,14 @@ async def submit_prompt(
     await db.flush()
 
     listing.latest_version_id = version.id
+    await inbox.on_publish(
+        db,
+        listing,
+        subject_type="prompt",
+        actor_id=current_user.id,
+        auto_approved=target.auto_approve,
+        version=version.version,
+    )
     await commit_or_name_conflict(db, "prompt")
     await db.refresh(listing)
     return PromptListingResponse.model_validate(listing)
@@ -420,12 +429,21 @@ async def submit_prompt_draft(
     if not listing.template:
         raise HTTPException(status_code=400, detail="Template is required before submitting")
 
-    if await publish_auto_approves_for_entity(listing, current_user, db):
+    auto_approved = await publish_auto_approves_for_entity(listing, current_user, db)
+    if auto_approved:
         listing.status = ListingStatus.approved
         listing.latest_version.reviewed_by = current_user.id
         listing.latest_version.reviewed_at = datetime.now(UTC)
     else:
         listing.status = ListingStatus.pending
+    await inbox.on_publish(
+        db,
+        listing,
+        subject_type="prompt",
+        actor_id=current_user.id,
+        auto_approved=auto_approved,
+        version=getattr(listing.latest_version, "version", None),
+    )
     await commit_or_name_conflict(db, "prompt")
     await db.refresh(listing)
     return PromptListingResponse.model_validate(listing)

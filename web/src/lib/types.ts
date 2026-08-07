@@ -12,3 +12,4 @@ export * from "./types/sessions";
 export * from "./types/registry";
 export * from "./types/admin";
 export * from "./types/team";
+export * from "./types/inbox";

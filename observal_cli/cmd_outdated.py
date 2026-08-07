@@ -25,16 +25,27 @@ def register_outdated(app: typer.Typer):
     def outdated(
         harness: str | None = typer.Option(None, "--harness", "-i", help="Filter by harness"),
         output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
+        report: bool = typer.Option(
+            True,
+            "--report/--no-report",
+            help="Send findings to your Observal inbox so they persist between runs",
+        ),
     ):
         """Show installed components that have newer versions available.
 
         Reads ~/.observal/lockfile.json and checks the registry for each
         pinned agent/component to see if a newer version exists.
 
+        Findings are also recorded in your Observal inbox. The server cannot
+        compute this on its own — it knows who installed an agent but not which
+        version, and knows component versions but not who has them — so the lock
+        file is the only source with both, and the comparison stays here.
+
         Examples:
           observal outdated
           observal outdated --harness claude-code
           observal outdated --output json
+          observal outdated --no-report
         """
         from observal_cli.lockfile import get_all_entries
 
@@ -98,8 +109,16 @@ def register_outdated(app: typer.Typer):
                         "latest": latest or current_version,
                         "outdated": is_outdated,
                         "error": False,
+                        # Carried for the inbox report, which keys items on the
+                        # component id rather than a display name.
+                        "id": entry_id,
+                        "namespace": data.get("namespace"),
+                        "slug": data.get("slug"),
                     }
                 )
+
+        outdated_items = [r for r in results if r["outdated"]]
+        reported = _report_to_inbox(outdated_items) if report else None
 
         if output == "json":
             import json
@@ -107,7 +126,6 @@ def register_outdated(app: typer.Typer):
             print(json.dumps(results, indent=2))
             return
 
-        outdated_items = [r for r in results if r["outdated"]]
         up_to_date = [r for r in results if not r["outdated"] and not r["error"]]
         errors = [r for r in results if r["error"]]
 
@@ -131,6 +149,8 @@ def register_outdated(app: typer.Typer):
             console.print(table)
             rprint(f"\n[yellow]{len(outdated_items)} item(s) have newer versions available.[/yellow]")
             rprint("[dim]Run `observal agent pull <name> --harness <harness>` to upgrade.[/dim]")
+            if reported:
+                rprint(f"[dim]{reported} added to your inbox — `observal inbox --kind update_available`.[/dim]")
         else:
             rprint("[green]✓ All installed items are up to date.[/green]")
 
@@ -139,6 +159,45 @@ def register_outdated(app: typer.Typer):
 
         if errors:
             rprint(f"[dim]{len(errors)} item(s) could not be checked (registry unreachable or item deleted).[/dim]")
+
+
+def _report_to_inbox(outdated_items: list[dict]) -> int | None:
+    """Record findings in the signed-in user's inbox.
+
+    Best-effort on purpose. `outdated` is a read-only local check and must keep
+    working against an older server, offline, or signed out — so a failure here
+    is swallowed and the table still prints. The user came for the comparison,
+    not for the bookkeeping.
+    """
+    if not outdated_items:
+        return None
+
+    payload = []
+    for item in outdated_items:
+        component_id = item.get("id")
+        if not component_id:
+            continue
+        payload.append(
+            {
+                "type": item["type"],
+                "component_id": component_id,
+                "name": item.get("name") or "",
+                "namespace": item.get("namespace"),
+                "slug": item.get("slug"),
+                "current_version": item["current"],
+                "latest_version": item["latest"],
+                "harness": item.get("harness") or None,
+            }
+        )
+    if not payload:
+        return None
+
+    try:
+        result = client.post("/api/v1/inbox/outdated-report", {"items": payload})
+    except (Exception, SystemExit):
+        return None
+    created = result.get("created", 0)
+    return created or None
 
 
 def _version_newer(latest: str, current: str) -> bool:

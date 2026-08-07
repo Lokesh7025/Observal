@@ -302,6 +302,8 @@ DEFAULTS: dict[str, str] = {
     "resource.clickhouse_timeout": "10.0",
     # Data
     "data.retention_days": "90",
+    # Resolved inbox items are purged after this many days; open items never are.
+    "inbox.retention_days": "90",
     "data.cache_ttl_default": "30",
     "data.cache_ttl_dashboard": "60",
     # Observability
@@ -468,7 +470,7 @@ SECTIONS: list[dict[str, Any]] = [
         "title": "Data & Retention",
         "description": "Deployment-wide retention policies and cache TTLs.",
         "icon": "hard-drive",
-        "keys": [k for k in DEFAULTS if k.startswith("data.") or k.startswith("retention.")],
+        "keys": [k for k in DEFAULTS if k.startswith("data.") or k.startswith("retention.") or k.startswith("inbox.")],
     },
     {
         "id": "registry",

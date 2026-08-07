@@ -41,6 +41,7 @@ from models.agent import Agent, AgentStatus, AgentVersion
 from models.agent_component import AgentComponent
 from models.base import Base
 from models.hook import HookListing, HookVersion
+from models.inbox import InboxItem, InboxItemEvent
 from models.mcp import ListingStatus, McpListing, McpValidationResult, McpVersion
 from models.prompt import PromptListing, PromptVersion
 from models.sandbox import SandboxListing, SandboxVersion
@@ -68,6 +69,10 @@ _TABLES = [
     Agent.__table__,
     AgentVersion.__table__,
     AgentComponent.__table__,
+    # A review decision delivers an inbox item to the submitter in the same
+    # transaction, so these tests need somewhere to put it.
+    InboxItem.__table__,
+    InboxItemEvent.__table__,
 ]
 
 _EPOCH = datetime(2026, 1, 1, tzinfo=UTC)

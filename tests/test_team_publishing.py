@@ -57,7 +57,24 @@ def _mock_db(execute_values=()):
     db.commit = AsyncMock()
     db.refresh = AsyncMock()
     db.flush = AsyncMock()
-    db.execute = AsyncMock(side_effect=[_result(v) for v in execute_values])
+
+    # Scripted results first, then empty ones indefinitely. A publish that stays
+    # pending now also resolves inbox recipients, and a fixed-length script would
+    # turn that extra query into a StopIteration in a test about publish status.
+    # The filler answers empty for scalars() too, which _result does not: a
+    # registry with no users has no reviewers to deliver to.
+    def _empty():
+        r = MagicMock()
+        r.scalar_one_or_none.return_value = None
+        r.scalars.return_value.all.return_value = []
+        return r
+
+    remaining = iter([_result(v) for v in execute_values])
+
+    def _next(*_args, **_kwargs):
+        return next(remaining, _empty())
+
+    db.execute = AsyncMock(side_effect=_next)
     return db
 
 

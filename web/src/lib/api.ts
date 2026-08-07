@@ -76,6 +76,11 @@ import type {
 	TeamRole,
 	TeamUpdateBody,
 	RecommendationsResponse,
+	InboxItem,
+	InboxItemDetail,
+	InboxListResponse,
+	InboxCounts,
+	InboxFilters,
 } from "./types";
 
 const API = "/api/v1";
@@ -1023,6 +1028,34 @@ export const recommendations = {
 			component_id: componentId,
 			action,
 		}),
+};
+
+// ── Inbox ──────────────────────────────────────────────────────────
+function inboxQuery(filters: InboxFilters = {}): string {
+	const params = new URLSearchParams();
+	for (const [key, value] of Object.entries(filters)) {
+		if (value !== undefined && value !== null && value !== "") {
+			params.set(key, String(value));
+		}
+	}
+	const qs = params.toString();
+	return qs ? `?${qs}` : "";
+}
+
+export const inbox = {
+	list: (filters: InboxFilters = {}) =>
+		get<InboxListResponse>(`/inbox${inboxQuery(filters)}`),
+	counts: () => get<InboxCounts>("/inbox/count"),
+	detail: (id: string) => get<InboxItemDetail>(`/inbox/${id}`),
+	read: (id: string) => post<InboxItem>(`/inbox/${id}/read`),
+	unread: (id: string) => post<InboxItem>(`/inbox/${id}/unread`),
+	done: (id: string) => post<InboxItem>(`/inbox/${id}/done`),
+	dismiss: (id: string) => post<InboxItem>(`/inbox/${id}/dismiss`),
+	reopen: (id: string) => post<InboxItem>(`/inbox/${id}/reopen`),
+	// Filter-scoped on purpose: a blanket read-all over an actionable feed
+	// clears the unread signal on work nobody has looked at.
+	readAll: (filters: InboxFilters = {}) =>
+		post<{ updated: number }>(`/inbox/read-all${inboxQuery(filters)}`),
 };
 
 export const insights = {

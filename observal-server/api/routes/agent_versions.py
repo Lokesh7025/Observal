@@ -43,6 +43,7 @@ from schemas.agent import (  # noqa: TC001
 from services.agent_resolver import resolve_component_versions, validate_component_ids
 from services.harness import generate_agent_config
 from services.harness_capability_inference import compute_supported_harnesses, infer_required_features
+from services.inbox import sources as inbox
 from services.versioning import parse_semver, validate_semver
 
 agent_version_router = APIRouter()
@@ -353,6 +354,16 @@ async def _create_agent_version(
             )
             failed_harnesses.append(harness)
     ver.harness_configs = harness_configs or {}
+
+    # A draft is not in anyone's queue; only a pending release is.
+    await inbox.on_publish(
+        db,
+        agent,
+        subject_type="agent",
+        actor_id=current_user.id,
+        auto_approved=initial_status != AgentStatus.pending,
+        version=ver.version,
+    )
 
     # Do NOT update latest_version_id - that happens on approval
     await db.commit()

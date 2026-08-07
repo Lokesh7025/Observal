@@ -150,6 +150,7 @@ from observal_cli.cmd_co_authors import make_co_authors_typer
 from observal_cli.cmd_component import version_app
 from observal_cli.cmd_doctor import doctor_app
 from observal_cli.cmd_hook import hook_app
+from observal_cli.cmd_inbox import inbox_app
 from observal_cli.cmd_insights import insights_app
 from observal_cli.cmd_logs import logs_app
 from observal_cli.cmd_mcp import mcp_app
@@ -224,6 +225,7 @@ register_pull(agent_app)
 
 # ── Subgroups ─────────────────────────────────────────────
 app.add_typer(registry_app, name="registry")
+app.add_typer(inbox_app, name="inbox")
 app.add_typer(agent_app, name="agent")
 app.add_typer(team_app, name="team")
 app.add_typer(ops_app, name="ops")

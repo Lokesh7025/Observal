@@ -46,9 +46,10 @@ from api.routes.registry import router as registry_router
 from models.agent import Agent, AgentStatus, AgentVersion
 from models.agent_component import AgentComponent
 from models.base import Base
+from models.inbox import InboxItem, InboxItemEvent
 from models.mcp import ListingStatus, McpListing, McpValidationResult, McpVersion
 from models.team import Team, TeamMembership, TeamRole
-from models.user import UserRole
+from models.user import User, UserRole
 
 # resolve_visible_listing calls the module-global resolve_listing inside
 # api.deps, so that is the only seam a patch can intercept.
@@ -265,6 +266,11 @@ _TABLES = [
     McpValidationResult.__table__,
     Team.__table__,
     TeamMembership.__table__,
+    # Making a team listing public re-enters review, which delivers inbox items
+    # to the reviewers in the same transaction.
+    InboxItem.__table__,
+    InboxItemEvent.__table__,
+    User.__table__,
 ]
 
 

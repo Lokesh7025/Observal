@@ -39,6 +39,14 @@ def _mock_db():
     db.commit = AsyncMock()
     db.refresh = AsyncMock()
     db.delete = AsyncMock()
+    # Inbox delivery wraps each insert in a SAVEPOINT so a duplicate cannot roll
+    # back the review action it belongs to. A bare AsyncMock returns a coroutine
+    # from begin_nested(), which is not an async context manager, so it is given
+    # one here.
+    nested = MagicMock()
+    nested.__aenter__ = AsyncMock(return_value=None)
+    nested.__aexit__ = AsyncMock(return_value=False)
+    db.begin_nested = MagicMock(return_value=nested)
     return db
 
 
@@ -102,6 +110,23 @@ def _result_with(*listings):
     else:
         r.scalar_one_or_none.return_value = None
     return r
+
+
+def _script(*values):
+    """Scripted execute() results, then empty results indefinitely.
+
+    A fixed-length ``side_effect`` list makes every test here brittle to the
+    endpoint acquiring a new query: inbox delivery resolves its recipients after
+    the review action, and a hard-ended script turns that into a StopIteration
+    in a test that is not about the inbox at all. Script what the test asserts
+    on; let anything after it read empty.
+    """
+    remaining = iter(values)
+
+    def _next(*_args, **_kwargs):
+        return next(remaining, _empty_result())
+
+    return _next
 
 
 # ═══════════════════════════════════════════════════════════
@@ -344,7 +369,7 @@ class TestGetReview:
         app, db, _ = _app_with()
         listing = _listing_mock(name="my-mcp")
         listing.validation_results = []
-        db.execute = AsyncMock(side_effect=[_result_with(listing)] + [_empty_result() for _ in range(5)])
+        db.execute = AsyncMock(side_effect=_script(_result_with(listing)))
 
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
             r = await ac.get(f"/api/v1/review/{listing.id}")
@@ -387,7 +412,7 @@ class TestApprove:
     async def test_sets_status_to_approved(self):
         app, db, _ = _app_with()
         listing = _listing_mock(status=ListingStatus.pending)
-        db.execute = AsyncMock(side_effect=[_result_with(listing)] + [_empty_result() for _ in range(4)])
+        db.execute = AsyncMock(side_effect=_script(_result_with(listing)))
         db.refresh = AsyncMock(side_effect=lambda obj: None)
 
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
@@ -402,7 +427,7 @@ class TestApprove:
     async def test_response_includes_type_and_name(self):
         app, db, _ = _app_with()
         listing = _listing_mock(name="cool-server")
-        db.execute = AsyncMock(side_effect=[_result_with(listing)] + [_empty_result() for _ in range(4)])
+        db.execute = AsyncMock(side_effect=_script(_result_with(listing)))
         db.refresh = AsyncMock(side_effect=lambda obj: None)
 
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
@@ -422,7 +447,7 @@ class TestApprove:
         pending_ver = _version_mock(listing.id, status=ListingStatus.pending, version="2.0.0")
         listing.versions = [pending_ver]
         listing.latest_version_id = uuid.uuid4()  # points to old approved version
-        db.execute = AsyncMock(side_effect=[_result_with(listing)] + [_empty_result() for _ in range(5)])
+        db.execute = AsyncMock(side_effect=_script(_result_with(listing)))
         db.refresh = AsyncMock(side_effect=lambda obj: None)
         db.flush = AsyncMock()
 
@@ -434,10 +459,12 @@ class TestApprove:
         assert pending_ver.rejection_reason is None
         assert pending_ver.reviewed_by == user.id
         # latest_version_id is updated via raw UPDATE (not ORM assignment)
-        # so we verify flush + execute were called (execute includes the UPDATE)
-        db.flush.assert_awaited_once()
+        # so we verify flush + execute were called (execute includes the UPDATE).
+        # Counts are lower bounds, not exact: the approval also delivers inbox
+        # items in this same transaction, which flushes inside its savepoint.
+        db.flush.assert_awaited()
         assert db.execute.await_count >= 2  # initial query + UPDATE
-        db.commit.assert_awaited_once()
+        db.commit.assert_awaited()
 
     @pytest.mark.asyncio
     async def test_not_found(self):
@@ -470,7 +497,7 @@ class TestReject:
     async def test_sets_status_and_reason(self):
         app, db, _ = _app_with()
         listing = _listing_mock(status=ListingStatus.pending)
-        db.execute = AsyncMock(side_effect=[_result_with(listing)] + [_empty_result() for _ in range(4)])
+        db.execute = AsyncMock(side_effect=_script(_result_with(listing)))
         db.refresh = AsyncMock(side_effect=lambda obj: None)
 
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
@@ -483,13 +510,15 @@ class TestReject:
         assert listing.status == ListingStatus.rejected
         assert listing.rejection_reason == "missing docs"
         assert r.json()["status"] == "rejected"
-        db.commit.assert_awaited_once()
+        # At least once, not exactly once: reject commits the decision and then
+        # commits again after the self-learn cascade.
+        db.commit.assert_awaited()
 
     @pytest.mark.asyncio
     async def test_reject_with_no_reason(self):
         app, db, _ = _app_with()
         listing = _listing_mock(status=ListingStatus.pending)
-        db.execute = AsyncMock(side_effect=[_result_with(listing)] + [_empty_result() for _ in range(4)])
+        db.execute = AsyncMock(side_effect=_script(_result_with(listing)))
         db.refresh = AsyncMock(side_effect=lambda obj: None)
 
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
