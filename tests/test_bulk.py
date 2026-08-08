@@ -40,6 +40,13 @@ def _mock_db():
     db.refresh = AsyncMock()
     db.delete = MagicMock()
     db.flush = AsyncMock()
+    # begin_nested() hands back a transaction used as an async context manager,
+    # not something awaited. Left to AsyncMock the call would return a coroutine
+    # and `async with` would reject it, so the savepoint is modelled explicitly.
+    nested = MagicMock()
+    nested.__aenter__ = AsyncMock(return_value=nested)
+    nested.__aexit__ = AsyncMock(return_value=False)
+    db.begin_nested = MagicMock(return_value=nested)
     return db
 
 
@@ -118,6 +125,58 @@ class TestBulkCreate:
         assert data["dry_run"] is False
         assert len(data["results"]) == 3
         db.commit.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_failing_item_is_isolated_from_the_rest_of_the_batch(self):
+        """A failed item must not take its neighbours or its own rows with it.
+
+        Every item shares one transaction and _create_single_agent flushes as it
+        goes, so without a per-item SAVEPOINT the rows a failed item already
+        wrote stay in the transaction and the final commit persists a half-built
+        agent the response reported as an error.
+        """
+        app, db, _ = _app_with()
+        db.execute = AsyncMock(return_value=_empty_result())
+
+        # Two flushes per item (agent, then version); no reviewers exist here, so
+        # delivery adds none. Failing the third fails the SECOND item, leaving a
+        # neighbour on each side to prove the batch carried on.
+        flushes = {"n": 0}
+
+        async def flaky_flush(*_a, **_k):
+            flushes["n"] += 1
+            if flushes["n"] == 3:
+                raise RuntimeError("simulated database failure")
+
+        db.flush = AsyncMock(side_effect=flaky_flush)
+
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+            r = await ac.post(
+                "/api/v1/bulk/agents",
+                json={
+                    "agents": [
+                        _agent_item("agent-one"),
+                        _agent_item("agent-two"),
+                        _agent_item("agent-three"),
+                    ]
+                },
+            )
+
+        assert r.status_code == 200
+        data = r.json()
+        assert data["created"] == 2
+        assert data["errors"] == 1
+
+        by_name = {item["name"]: item for item in data["results"]}
+        assert by_name["agent-one"]["status"] == "created"
+        assert by_name["agent-two"]["status"] == "error"
+        # The item after the failure still ran, which is the part a poisoned
+        # transaction would have taken away.
+        assert by_name["agent-three"]["status"] == "created"
+
+        # One savepoint per attempted item, so the failure had somewhere to roll
+        # back to instead of leaving its rows in the shared transaction.
+        assert db.begin_nested.call_count == 3
 
     @pytest.mark.asyncio
     async def test_response_results_have_correct_status(self):

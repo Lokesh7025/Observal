@@ -134,7 +134,24 @@ async def bulk_create_agents(
             continue
 
         try:
-            agent = await _create_single_agent(item, current_user, db)
+            # One SAVEPOINT per item, so "this item failed" and "this item was
+            # not written" mean the same thing.
+            #
+            # Every item shares one transaction, and _create_single_agent
+            # flushes as it goes: the Agent, then its version, then its
+            # component rows, then the review notifications for whoever owns
+            # that queue. Without a savepoint a failure partway through leaves
+            # the rows it already flushed sitting in the transaction, and the
+            # commit below persists a half-built agent that this loop just
+            # reported to the caller as an error.
+            #
+            # On Postgres it is worse than partial data. A database-level error
+            # aborts the whole transaction, so every later item fails on its
+            # first statement and the final commit fails too — one bad row
+            # turns into a wholly failed batch. Rolling back to the savepoint
+            # clears that state and lets the remaining items proceed.
+            async with db.begin_nested():
+                agent = await _create_single_agent(item, current_user, db)
             results.append(BulkResultItem(name=item.name, status="created", agent_id=agent.id))
             created += 1
         except Exception as exc:

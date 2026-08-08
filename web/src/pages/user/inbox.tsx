@@ -41,6 +41,7 @@ import {
 	RotateCcw,
 	Search,
 	Sparkles,
+	TriangleAlert,
 	UserPlus,
 	Users,
 	X,
@@ -140,18 +141,45 @@ const GROUP_LABELS: Record<GroupMode, string> = {
  * Split a server-built `action_url` into what Link needs, or refuse it.
  *
  * Two jobs. First, safety: the column is a free string and the API contract
- * does not constrain it, so `//evil.example` or `javascript:...` reaching Link
- * would be an open redirect out of a trusted surface. Only a single leading
- * slash is accepted, which is why the second character is checked.
+ * does not constrain it, so a hostile value reaching Link would be an open
+ * redirect out of a trusted surface. Rejected in order: anything not starting
+ * with a single slash, protocol-relative `//host`, backslashes (browsers treat
+ * them as separators, so `/\host` escapes too), control characters and spaces,
+ * any first path segment outside the allowlist below, and `..` segments. The
+ * allowlist is the decisive one — the set of routes the server links to is
+ * small and known, so anything else is a bug or an injection.
  *
  * Second, correctness: these paths carry query strings that decide what the
  * destination renders — `?type=` picks the component type, `?tab=` picks the
  * review queue tab. Link takes those as a `search` object, not baked into
  * `to`, so a raw string would navigate to the path with the params dropped.
  */
+const INTERNAL_ROOTS = new Set(["agents", "components", "review", "insights", "teamspaces"]);
+
 function internalTarget(url: string | null): { to: string; search: Record<string, string> } | null {
-	if (!url || !url.startsWith("/") || url.startsWith("//")) return null;
+	if (!url || !url.startsWith("/")) return null;
+
+	// Reject anything that could leave this origin before the path is read.
+	// `//evil.example` is protocol-relative, and a backslash is treated as a
+	// separator by browsers, so `/\evil.example` escapes too. Control characters
+	// and whitespace are rejected because they can be used to hide the real
+	// target from anyone eyeballing the link.
+	if (url.startsWith("//") || url.includes("\\")) return null;
+	// Control characters and spaces are checked by code point rather than with
+	// a regex literal, so this source file never has to contain one.
+	if ([...url].some((ch) => ch.charCodeAt(0) <= 0x20 || ch.charCodeAt(0) === 0x7f)) return null;
+
 	const [path, query] = url.split("?");
+
+	// An allowlist rather than a denylist. The column is free text, and the set
+	// of routes the server links to is small and known, so anything outside it
+	// is a bug or an injection — either way not somewhere to navigate.
+	const root = path.split("/")[1] ?? "";
+	if (!INTERNAL_ROOTS.has(root)) return null;
+	// `..` cannot climb out of the SPA, but it can address a route the server
+	// never meant to name, so it is refused rather than normalised.
+	if (path.split("/").includes("..")) return null;
+
 	const search: Record<string, string> = {};
 	if (query) {
 		for (const [key, value] of new URLSearchParams(query)) search[key] = value;
@@ -761,7 +789,7 @@ export default function InboxPage() {
 		[bucket, unreadOnly, actionOnly, kind, subjectType, query, sort],
 	);
 
-	const { data, isLoading, isFetching } = useInbox({ ...listFilters, page });
+	const { data, isLoading, isFetching, isError, refetch } = useInbox({ ...listFilters, page });
 	const { data: counts } = useInboxCounts(true, { facets: true, facetState: bucket });
 	const readAll = useReadAll();
 	const bulk = useBulkAction();
@@ -1006,6 +1034,21 @@ export default function InboxPage() {
 								{isLoading ? (
 									<div className="flex items-center justify-center p-10">
 										<Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+									</div>
+								) : isError ? (
+									/* The query does not retry, so a failure leaves isLoading false
+									   and items empty. Without this branch the empty state claims
+									   the user is all caught up, which is the opposite of true. */
+									<div className="flex flex-col items-center gap-2 p-10 text-center">
+										<TriangleAlert className="h-6 w-6 text-destructive" />
+										<p className="text-sm font-medium">Could not load your inbox</p>
+										<p className="max-w-sm text-xs text-muted-foreground">
+											The request failed, so this list is not showing anything - not
+											even items you may have waiting.
+										</p>
+										<Button size="sm" variant="outline" onClick={() => refetch()}>
+											Try again
+										</Button>
 									</div>
 								) : items.length === 0 ? (
 									<div className="flex flex-col items-center gap-2 p-10 text-center">

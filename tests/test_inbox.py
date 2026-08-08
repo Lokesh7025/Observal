@@ -17,23 +17,40 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import event, select
+from sqlalchemy import event, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from models.agent import Agent
 from models.base import Base
+from models.hook import HookListing
 from models.inbox import InboxItem, InboxItemEvent, InboxKind, InboxState
+from models.mcp import McpListing
+from models.prompt import PromptListing
+from models.sandbox import SandboxListing
+from models.skill import SkillListing
 from models.team import Team, TeamMembership, TeamRole
 from models.user import User, UserRole
 from services.inbox import delivery, recipients, visibility
 from services.inbox.registry import Subject, spec_for
 
+# The listing tables are here because visibility is resolved against the CURRENT
+# subject, not the row's write-time snapshot. `visible_filter` emits one
+# correlated EXISTS per subject type, so every one of these tables has to exist
+# for the predicate to run at all — and an item whose subject_id matches no row
+# is correctly invisible, which is why these tests create real listings.
 _TABLES = [
     User.__table__,
     Team.__table__,
     TeamMembership.__table__,
     InboxItem.__table__,
     InboxItemEvent.__table__,
+    Agent.__table__,
+    McpListing.__table__,
+    SkillListing.__table__,
+    HookListing.__table__,
+    PromptListing.__table__,
+    SandboxListing.__table__,
 ]
 
 
@@ -90,6 +107,36 @@ def _subject(**kw) -> Subject:
     base = {"type": "mcp", "id": uuid.uuid4(), "name": "demo-server", "version": "1.0.0"}
     base.update(kw)
     return Subject(**base)
+
+
+async def _listed_subject(db, owner, *, is_private=False, team_id=None, **kw) -> Subject:
+    """Insert a real mcp listing and return a Subject pointing at it.
+
+    Use this wherever a test asserts on visibility. ``_subject()`` alone invents
+    an id with no listing behind it, and since visibility now reads the listing
+    rather than the row's snapshot, such an item is invisible by design.
+    """
+    listing = McpListing(
+        id=uuid.uuid4(),
+        name=kw.get("name", "demo-server"),
+        namespace=kw.get("namespace") or "ns",
+        slug=kw.get("slug") or uuid.uuid4().hex[:12],
+        category="tools",
+        owner=owner.email,
+        is_private=is_private,
+        team_id=team_id,
+        submitted_by=owner.id,
+    )
+    db.add(listing)
+    await db.flush()
+    return _subject(
+        id=listing.id,
+        is_private=is_private,
+        team_id=team_id,
+        namespace=listing.namespace,
+        slug=listing.slug,
+        **{k: v for k, v in kw.items() if k not in ("namespace", "slug")},
+    )
 
 
 # ── Idempotency ────────────────────────────────────────────────────
@@ -659,7 +706,7 @@ async def test_removed_member_stops_seeing_a_private_subject(sessions):
             db,
             kind=InboxKind.review_requested,
             user_id=member.id,
-            subject=_subject(team_id=team.id, is_private=True),
+            subject=await _listed_subject(db, owner, team_id=team.id, is_private=True),
         )
         await db.commit()
 
@@ -676,7 +723,12 @@ async def test_removed_member_stops_seeing_a_private_subject(sessions):
 async def test_public_subjects_stay_visible(sessions):
     async with sessions() as db:
         user = await _user(db)
-        item = await delivery.deliver_one(db, kind=InboxKind.review_requested, user_id=user.id, subject=_subject())
+        item = await delivery.deliver_one(
+            db,
+            kind=InboxKind.review_requested,
+            user_id=user.id,
+            subject=await _listed_subject(db, user),
+        )
         await db.commit()
         assert await visibility.visible_to(db, item, user) is True
 
@@ -739,9 +791,14 @@ async def test_filter_visible_omits_rather_than_redacts(sessions):
             db,
             kind=InboxKind.review_requested,
             user_id=member.id,
-            subject=_subject(team_id=team.id, is_private=True),
+            subject=await _listed_subject(db, owner, team_id=team.id, is_private=True),
         )
-        shown = await delivery.deliver_one(db, kind=InboxKind.review_requested, user_id=member.id, subject=_subject())
+        shown = await delivery.deliver_one(
+            db,
+            kind=InboxKind.review_requested,
+            user_id=member.id,
+            subject=await _listed_subject(db, owner),
+        )
         await db.commit()
 
         kept = await visibility.filter_visible(db, [hidden, shown], member)
@@ -977,12 +1034,10 @@ async def _counts(db, user, *, facets=False, facet_state=InboxState.open):
 
 
 async def _deliver_named(db, user, *, namespace, slug, kind=InboxKind.review_requested, subject_type="mcp"):
-    return await delivery.deliver_one(
-        db,
-        kind=kind,
-        user_id=user.id,
-        subject=_subject(type=subject_type, name=slug, namespace=namespace, slug=slug),
-    )
+    subject = await _listed_subject(db, user, name=slug, namespace=namespace, slug=slug)
+    if subject_type != "mcp":
+        subject = _subject(type=subject_type, id=subject.id, name=slug, namespace=namespace, slug=slug)
+    return await delivery.deliver_one(db, kind=kind, user_id=user.id, subject=subject)
 
 
 @pytest.mark.asyncio
@@ -1077,3 +1132,80 @@ async def test_facets_describe_the_bucket_they_are_scoped_to(sessions):
         # Lifecycle totals are unscoped: they are what the bucket rows count.
         assert (opened.open, opened.done, opened.dismissed) == (1, 1, 0)
         assert still_open.state is InboxState.open
+
+
+@pytest.mark.asyncio
+async def test_subject_turning_private_hides_an_already_delivered_item(sessions):
+    """The leak that reading the listing instead of the snapshot closes.
+
+    The item is written while the listing is public, so its
+    ``is_private_subject`` snapshot says False forever. Trusting that snapshot
+    would keep the item readable by a non-member after the listing was made
+    private, disclosing its name and version.
+    """
+    async with sessions() as db:
+        owner = await _user(db)
+        outsider = await _user(db)
+        team = Team(id=uuid.uuid4(), name="T", handle="t", created_by=owner.id)
+        db.add(team)
+        await db.flush()
+
+        subject = await _listed_subject(db, owner)
+        item = await delivery.deliver_one(db, kind=InboxKind.review_requested, user_id=outsider.id, subject=subject)
+        await db.commit()
+
+        assert item.is_private_subject is False
+        assert await visibility.visible_to(db, item, outsider) is True
+
+        # The listing is made team-private after the fact. Updated by statement
+        # rather than by loading the entity: McpListing has selectin
+        # relationships to version tables this fixture does not create.
+        await db.execute(update(McpListing).where(McpListing.id == subject.id).values(is_private=True, team_id=team.id))
+        await db.commit()
+
+        # The row still claims a public subject; the listing is what decides.
+        assert item.is_private_subject is False
+        assert await visibility.visible_to(db, item, outsider) is False
+
+        # And the SQL predicate has to agree, or the count would still show it.
+        visible_ids = (
+            (
+                await db.execute(
+                    select(InboxItem.id).where(InboxItem.user_id == outsider.id, visibility.visible_filter(outsider))
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert item.id not in visible_ids
+
+
+@pytest.mark.asyncio
+async def test_a_member_still_sees_a_subject_that_turned_private(sessions):
+    """Turning private must not hide it from people who belong to the team."""
+    async with sessions() as db:
+        owner = await _user(db)
+        member = await _user(db)
+        team = Team(id=uuid.uuid4(), name="T", handle="t", created_by=owner.id)
+        db.add(team)
+        await db.flush()
+        db.add(TeamMembership(team_id=team.id, user_id=member.id, role=TeamRole.reviewer))
+
+        subject = await _listed_subject(db, owner)
+        item = await delivery.deliver_one(db, kind=InboxKind.review_requested, user_id=member.id, subject=subject)
+        await db.commit()
+
+        await db.execute(update(McpListing).where(McpListing.id == subject.id).values(is_private=True, team_id=team.id))
+        await db.commit()
+
+        assert await visibility.visible_to(db, item, member) is True
+        visible_ids = (
+            (
+                await db.execute(
+                    select(InboxItem.id).where(InboxItem.user_id == member.id, visibility.visible_filter(member))
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert item.id in visible_ids

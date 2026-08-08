@@ -154,6 +154,13 @@ class KindSpec:
     # arrives on every ``observal outdated`` run, and reopening a dismissed
     # notice each time would make dismissal meaningless.
     reopen_on_redelivery: bool = True
+    # Reserved kinds are declared but have no producer: nothing in the codebase
+    # delivers them yet. They exist so the enum and its migration stay stable
+    # when the initiative they belong to lands, and are labelled here so
+    # "declared" is never mistaken for "working". Each needs its own issue
+    # settling recipients, trigger points, dedupe semantics, authorization,
+    # action links and the tests that close it.
+    reserved: bool = False
     subject_label: Callable[[Subject], str] = field(default=lambda s: s.name or s.type)
 
 
@@ -190,12 +197,16 @@ SPECS: dict[InboxKind, KindSpec] = {
     ),
     InboxKind.review_comment: KindSpec(
         kind=InboxKind.review_comment,
+        # RESERVED - waits on review conversations; no comment model exists yet.
+        reserved=True,
         action_required=False,
         title=lambda s, c: f"New comment on {_label(s)}",
         dedupe=lambda s, c: f"review_comment:{s.type}:{s.id}:{c.get('comment_id', '-')}",
     ),
     InboxKind.change_requested: KindSpec(
         kind=InboxKind.change_requested,
+        # RESERVED - waits on review conversations; distinct from review_rejected.
+        reserved=True,
         action_required=True,
         title=lambda s, c: f"Changes requested on {_label(s)}",
         dedupe=lambda s, c: f"change_requested:{s.type}:{s.id}:{c.get('request_id', '-')}",
@@ -203,12 +214,16 @@ SPECS: dict[InboxKind, KindSpec] = {
     ),
     InboxKind.team_join_requested: KindSpec(
         kind=InboxKind.team_join_requested,
+        # RESERVED - waits on the teamspace join-request flow.
+        reserved=True,
         action_required=True,
         title=lambda s, c: f"Join request for {_label(s)}",
         dedupe=lambda s, c: f"team_join_requested:{s.id}:{c.get('requester_id', '-')}",
     ),
     InboxKind.team_join_decided: KindSpec(
         kind=InboxKind.team_join_decided,
+        # RESERVED - waits on the teamspace join-request flow.
+        reserved=True,
         action_required=False,
         title=lambda s, c: f"Join request {c.get('decision', 'decided')}: {_label(s)}",
         dedupe=lambda s, c: f"team_join_decided:{s.id}:{c.get('request_id', '-')}",
@@ -216,12 +231,16 @@ SPECS: dict[InboxKind, KindSpec] = {
     ),
     InboxKind.team_created_pending: KindSpec(
         kind=InboxKind.team_created_pending,
+        # RESERVED - waits on teamspace creation requiring approval.
+        reserved=True,
         action_required=True,
         title=lambda s, c: f"Teamspace awaiting approval: {_label(s)}",
         dedupe=lambda s, c: f"team_created_pending:{s.id}",
     ),
     InboxKind.ownership_transfer: KindSpec(
         kind=InboxKind.ownership_transfer,
+        # RESERVED - waits on the listing ownership-transfer flow.
+        reserved=True,
         action_required=True,
         title=lambda s, c: f"Ownership transfer offered: {_label(s)}",
         dedupe=lambda s, c: f"ownership_transfer:{s.type}:{s.id}:{c.get('transfer_id', '-')}",
@@ -250,6 +269,8 @@ SPECS: dict[InboxKind, KindSpec] = {
     ),
     InboxKind.system_notice: KindSpec(
         kind=InboxKind.system_notice,
+        # RESERVED - helper exists in sources.on_system_notice but has no caller; operational events currently page through services/alert_evaluator.py instead.
+        reserved=True,
         action_required=False,
         title=lambda s, c: str(c.get("title") or "System notice"),
         dedupe=lambda s, c: f"system_notice:{c.get('notice_id', '-')}",
