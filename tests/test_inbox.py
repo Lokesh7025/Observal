@@ -943,7 +943,6 @@ async def test_deleting_an_item_cascades_its_history(fk_sessions):
         assert left == []
 
 
-
 # ── List query surface: search, sort, facets ───────────────────────
 #
 # These call the route coroutines directly, which means FastAPI's dependency
