@@ -48,6 +48,9 @@ def subject_from_entity(entity, subject_type: str, *, version: str | None = None
         version=version,
         team_id=getattr(entity, "team_id", None),
         is_private=bool(getattr(entity, "is_private", False)),
+        # Teamspaces are addressed by handle, not id, so the URL builder needs
+        # it. Listings have no handle and pass None here.
+        handle=getattr(entity, "handle", None),
     )
 
 

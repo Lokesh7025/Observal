@@ -42,18 +42,26 @@ const RAIL: { key: RailKey; label: string; filters: InboxFilters }[] = [
 ];
 
 /**
- * Accept only a same-origin absolute path for routing.
+ * Split a server-built `action_url` into what Link needs, or refuse it.
  *
- * `action_url` is built server-side and today only ever holds an internal path,
- * but the column is a free string and the API contract does not constrain it.
- * A value like `//evil.example` or `javascript:...` reaching `Link` would be an
- * open redirect out of a trusted surface, so anything that is not a single
- * leading slash followed by a normal path is refused. A protocol-relative URL
- * starts with two slashes, which is why the second character is checked.
+ * Two jobs. First, safety: the column is a free string and the API contract
+ * does not constrain it, so `//evil.example` or `javascript:...` reaching Link
+ * would be an open redirect out of a trusted surface. Only a single leading
+ * slash is accepted, which is why the second character is checked.
+ *
+ * Second, correctness: these paths carry query strings that decide what the
+ * destination renders — `?type=` picks the component type, `?tab=` picks the
+ * review queue tab. Link takes those as a `search` object, not baked into
+ * `to`, so a raw string would navigate to the path with the params dropped.
  */
-function internalPath(url: string | null): string | null {
+function internalTarget(url: string | null): { to: string; search: Record<string, string> } | null {
 	if (!url || !url.startsWith("/") || url.startsWith("//")) return null;
-	return url;
+	const [path, query] = url.split("?");
+	const search: Record<string, string> = {};
+	if (query) {
+		for (const [key, value] of new URLSearchParams(query)) search[key] = value;
+	}
+	return { to: path, search };
 }
 
 function relativeTime(iso: string): string {
@@ -161,6 +169,8 @@ function DetailPane({ itemId }: { itemId: string | null }) {
 		);
 	}
 
+	const openTarget = internalTarget(item.action_url);
+
 	const copyCommand = async () => {
 		if (!item.action_command) return;
 		try {
@@ -189,9 +199,11 @@ function DetailPane({ itemId }: { itemId: string | null }) {
 			)}
 
 			<div className="mb-4 flex flex-wrap gap-2">
-				{internalPath(item.action_url) && (
+				{openTarget && (
 					<Button asChild size="sm">
-						<Link to={internalPath(item.action_url) as string}>Open</Link>
+						<Link to={openTarget.to} search={openTarget.search}>
+							Open
+						</Link>
 					</Button>
 				)}
 				{item.state === "open" ? (

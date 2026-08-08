@@ -625,6 +625,80 @@ async def test_titles_and_keys_are_bounded(sessions):
 
 
 @pytest.mark.asyncio
+async def test_component_links_name_their_type(sessions):
+    """/components/$componentId defaults ?type= to "mcps".
+
+    Omitting it made a skill, hook, prompt or sandbox open as an MCP, so the
+    page loaded the wrong record. Every component link names its own type.
+    """
+    expected = {
+        "mcp": "mcps",
+        "skill": "skills",
+        "hook": "hooks",
+        "prompt": "prompts",
+        "sandbox": "sandboxes",
+    }
+    async with sessions() as db:
+        user = await _user(db)
+        for singular, plural in expected.items():
+            item = await delivery.deliver_one(
+                db,
+                kind=InboxKind.review_approved,
+                user_id=user.id,
+                subject=_subject(type=singular, id=uuid.uuid4()),
+            )
+            assert item.action_url.endswith(f"?type={plural}"), f"{singular} -> {item.action_url}"
+        await db.commit()
+
+
+@pytest.mark.asyncio
+async def test_review_links_open_the_tab_holding_the_item(sessions):
+    """The review queue opens on the agents tab by default.
+
+    A component review that linked to a bare /review dropped the reviewer on a
+    tab that does not contain the submission they were sent to look at.
+    """
+    async with sessions() as db:
+        user = await _user(db)
+        agent_item = await delivery.deliver_one(
+            db,
+            kind=InboxKind.review_requested,
+            user_id=user.id,
+            subject=_subject(type="agent", id=uuid.uuid4()),
+        )
+        mcp_item = await delivery.deliver_one(
+            db,
+            kind=InboxKind.review_requested,
+            user_id=user.id,
+            subject=_subject(type="mcp", id=uuid.uuid4()),
+        )
+        await db.commit()
+        assert agent_item.action_url == "/review?tab=agents"
+        assert mcp_item.action_url == "/review?tab=components"
+
+
+@pytest.mark.asyncio
+async def test_every_action_url_is_a_same_origin_path(sessions):
+    """No kind may emit something the web app would treat as external."""
+    async with sessions() as db:
+        user = await _user(db)
+        for kind in InboxKind:
+            item = await delivery.deliver_one(
+                db,
+                kind=kind,
+                user_id=user.id,
+                subject=_subject(id=uuid.uuid4(), handle="platform"),
+                context={"notice_id": uuid.uuid4().hex, "title": "n"},
+            )
+            url = item.action_url
+            if url is None:
+                continue
+            assert url.startswith("/"), f"{kind.value} -> {url}"
+            assert not url.startswith("//"), f"{kind.value} is protocol-relative -> {url}"
+        await db.commit()
+
+
+@pytest.mark.asyncio
 async def test_update_available_carries_an_upgrade_command(sessions):
     async with sessions() as db:
         user = await _user(db)

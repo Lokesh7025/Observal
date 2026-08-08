@@ -42,8 +42,16 @@ class Subject:
     handle: str | None = None  # teamspaces are addressed by handle, not id
 
 
-# Registry listing types, as the web router spells them.
-_COMPONENT_TYPES = frozenset({"mcp", "skill", "hook", "prompt", "sandbox"})
+# Singular subject type to the plural the web router expects in `?type=`.
+# /components/$componentId defaults that search param to "mcps", so omitting it
+# silently loads a skill or hook as an MCP and the page comes back wrong.
+_COMPONENT_TYPE_PARAM = {
+    "mcp": "mcps",
+    "skill": "skills",
+    "hook": "hooks",
+    "prompt": "prompts",
+    "sandbox": "sandboxes",
+}
 
 
 def _registry_url(subject: Subject) -> str | None:
@@ -64,14 +72,20 @@ def _registry_url(subject: Subject) -> str | None:
         return f"/agents/{subject.id}"
     if subject.type == "insight_report":
         return f"/insights/{subject.id}"
-    if subject.type in _COMPONENT_TYPES:
-        return f"/components/{subject.id}"
+    if plural := _COMPONENT_TYPE_PARAM.get(subject.type):
+        return f"/components/{subject.id}?type={plural}"
     return None
 
 
 def _review_url(subject: Subject) -> str:
-    """Reviewers act in the queue, not on the public listing page."""
-    return "/review"
+    """Reviewers act in the queue, not on the public listing page.
+
+    The tab is named explicitly. The review page opens on "agents" by default,
+    so a link that omitted it dropped a reviewer on a tab that does not contain
+    the component they were sent to look at.
+    """
+    tab = "agents" if subject.type == "agent" else "components"
+    return f"/review?tab={tab}"
 
 
 def _no_command(subject: Subject, ctx: dict[str, Any]) -> str | None:

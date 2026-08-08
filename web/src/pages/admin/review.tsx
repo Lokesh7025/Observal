@@ -9,6 +9,7 @@
 import { useState, useCallback, useMemo } from "react";
 import { CheckCircle2, LayoutGrid, TableProperties, Eye } from "lucide-react";
 import { useQueryClient } from "@tanstack/react-query";
+import { useSearch } from "@tanstack/react-router";
 import { useReviewAgents, useReviewComponents, useReviewAction, useReviewSubscription } from "@/hooks/use-api";
 import { useAuthGuard } from "@/hooks/use-auth";
 import type { ReviewItem } from "@/lib/types";
@@ -248,7 +249,10 @@ export default function ReviewPage() {
   const { data: components, isLoading: componentsLoading, isError: componentsError, error: componentsErr, refetch: refetchComponents } = useReviewComponents();
   const reviewAction = useReviewAction();
   const [view, setView] = useState<ViewMode>("grid");
-  const [activeTab, setActiveTab] = useState("agents");
+  // ?tab= lets an inbox item open the tab that actually holds the submission it
+  // names. Absent, the queue opens on agents as before.
+  const { tab: tabFromUrl } = useSearch({ from: "/_authed/_admin/review" });
+  const [activeTab, setActiveTab] = useState<string>(tabFromUrl ?? "agents");
   const [selectedItem, setSelectedItem] = useState<ReviewItem | null>(null);
   const [diffItem, setDiffItem] = useState<ReviewItem | null>(null);
   const [nestedDiffItem, setNestedDiffItem] = useState<ReviewItem | null>(null);
