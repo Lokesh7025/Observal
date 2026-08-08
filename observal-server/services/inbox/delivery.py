@@ -17,6 +17,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from loguru import logger as optic
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
 from models.inbox import InboxItem, InboxItemEvent, InboxKind, InboxState
@@ -96,14 +97,69 @@ async def deliver_one(
         async with db.begin_nested():  # SAVEPOINT: portable across SQLite and Postgres
             db.add(item)
             await db.flush()
-    except IntegrityError:
-        # Already delivered. Not an error, and not a reason to disturb either
-        # the enclosing transaction or the rest of the batch.
-        optic.trace("inbox item already delivered for user {} kind {}", user_id, kind.value)
-        return None
+    except IntegrityError as exc:
+        # ONLY a dedupe collision means "already delivered". This table also has
+        # foreign keys to users (twice) and teams, and a recipient deleted
+        # between resolution and flush raises IntegrityError too. Swallowing
+        # that would lose an item silently, which is the one outcome this
+        # module exists to prevent, so anything else is re-raised.
+        if not _is_dedupe_collision(exc):
+            optic.error("inbox delivery failed for user {} kind {}: {}", user_id, kind.value, exc)
+            raise
+        return await _reopen_if_resolved(db, user_id=user_id, dedupe_key=item.dedupe_key, actor_id=actor_id)
 
     record_event(db, item, "created", actor_id=actor_id)
     return item
+
+
+def _is_dedupe_collision(exc: IntegrityError) -> bool:
+    """Whether this error is the idempotency constraint and nothing else.
+
+    Matched on the constraint name, which both Postgres and SQLite put in the
+    message, rather than on the exception type. A foreign key violation is the
+    same type and must not be read as a duplicate.
+    """
+    text = str(getattr(exc, "orig", exc)).lower()
+    if "uq_inbox_items_user_dedupe" in text:
+        return True
+    # SQLite words it as the column list instead of the constraint name.
+    return "unique constraint failed" in text and "dedupe_key" in text
+
+
+async def _reopen_if_resolved(
+    db: AsyncSession,
+    *,
+    user_id: uuid.UUID,
+    dedupe_key: str,
+    actor_id: uuid.UUID | None,
+) -> InboxItem | None:
+    """Handle a redelivery of a fact whose item the recipient already closed.
+
+    Redelivering an OPEN item is a genuine no-op. But the same key can arrive
+    again after the recipient resolved it, and that is not a duplicate — it is
+    the fact becoming true a second time. Resubmitting the same version after a
+    rejection is the case that matters: the key is identical, the reviewer has
+    already marked their copy done, and without this nobody would be told the
+    work is back. Reopening preserves the audit trail that a redelivery
+    happened, which creating a second row could not.
+    """
+    existing = (
+        await db.execute(select(InboxItem).where(InboxItem.user_id == user_id, InboxItem.dedupe_key == dedupe_key))
+    ).scalar_one_or_none()
+    if existing is None:
+        # The colliding row is gone (purged, or another transaction removed it).
+        # Nothing to reopen and nothing to report.
+        return None
+    if existing.state == InboxState.open:
+        optic.trace("inbox item already delivered for user {} key {}", user_id, dedupe_key)
+        return None
+
+    existing.state = InboxState.open
+    existing.resolved_at = None
+    existing.read_at = None  # a fact that came back is unread again
+    record_event(db, existing, "reopened", actor_id=actor_id, detail="Redelivered after resolution")
+    optic.debug("inbox item reopened on redelivery for user {} key {}", user_id, dedupe_key)
+    return existing
 
 
 async def deliver(
@@ -156,10 +212,23 @@ async def supersede(
     previous one is not a duplicate to be swallowed but a fact that is no longer
     true. It is closed with its own history entry rather than deleted, because
     the point of this feature is that work does not silently disappear.
+
+    ``user_id`` is enforced, not decorative. This closes rows and writes history
+    against them, so a caller that assembled ``others`` from a query missing its
+    own user filter would silently resolve somebody else's inbox. Rows that do
+    not belong to ``user_id`` are skipped and logged rather than touched.
     """
     now = datetime.now(UTC)
     count = 0
     for stale in others:
+        if stale.user_id != user_id:
+            optic.warning(
+                "inbox supersede skipped item {} owned by {} while scoped to {}",
+                stale.id,
+                stale.user_id,
+                user_id,
+            )
+            continue
         if stale.id == keep.id or stale.state != InboxState.open:
             continue
         stale.state = InboxState.done

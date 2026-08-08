@@ -17,7 +17,8 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import select
+from sqlalchemy import event, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from models.base import Base
@@ -39,6 +40,30 @@ _TABLES = [
 @pytest_asyncio.fixture()
 async def sessions():
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    try:
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all, tables=_TABLES)
+        yield async_sessionmaker(engine, expire_on_commit=False)
+    finally:
+        await engine.dispose()
+
+
+@pytest_asyncio.fixture()
+async def fk_sessions():
+    """Sessions with SQLite foreign keys enforced.
+
+    SQLite ignores foreign keys unless the pragma is set per connection, so the
+    default fixture above cannot observe ON DELETE CASCADE. Only the cascade
+    test needs this; the rest would just pay for the extra event listener.
+    """
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+
+    @event.listens_for(engine.sync_engine, "connect")
+    def _enable_fk(dbapi_conn, _record):
+        cursor = dbapi_conn.cursor()
+        cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.close()
+
     try:
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all, tables=_TABLES)
@@ -174,6 +199,95 @@ async def test_a_newer_version_is_a_new_item_not_a_duplicate(sessions):
         assert new.state == InboxState.open
         events = (await db.execute(select(InboxItemEvent).where(InboxItemEvent.item_id == old.id))).scalars().all()
         assert "superseded" in {e.event for e in events}
+
+
+@pytest.mark.asyncio
+async def test_a_non_dedupe_integrity_error_is_not_swallowed(fk_sessions):
+    """Only the dedupe constraint means "already delivered".
+
+    A recipient deleted between resolution and flush trips a foreign key, which
+    is the same exception type. Reading that as a duplicate would drop the item
+    with no error, which is the one outcome this module must not produce.
+    """
+    async with fk_sessions() as db:
+        ghost = uuid.uuid4()  # never inserted into users
+        with pytest.raises(IntegrityError):
+            await delivery.deliver_one(db, kind=InboxKind.review_requested, user_id=ghost, subject=_subject())
+
+
+@pytest.mark.asyncio
+async def test_redelivery_reopens_a_resolved_item(sessions):
+    """Resubmitting the same version after a rejection must reach the reviewer.
+
+    The dedupe key has no attempt counter, so the second submission collides
+    with the first. If the reviewer already resolved their copy, that collision
+    is a new fact, not a duplicate.
+    """
+    async with sessions() as db:
+        user = await _user(db)
+        subject = _subject()
+
+        first = await delivery.deliver_one(db, kind=InboxKind.review_requested, user_id=user.id, subject=subject)
+        delivery.mark_read(db, first)
+        delivery.resolve(db, first, state=InboxState.done, actor_id=user.id)
+        await db.commit()
+        assert first.state == InboxState.done
+
+        again = await delivery.deliver_one(db, kind=InboxKind.review_requested, user_id=user.id, subject=subject)
+        await db.commit()
+
+        assert again is not None
+        assert again.id == first.id, "reopened in place rather than duplicated"
+        assert again.state == InboxState.open
+        assert again.read_at is None, "a fact that came back is unread again"
+        events = (await db.execute(select(InboxItemEvent).where(InboxItemEvent.item_id == first.id))).scalars().all()
+        assert "reopened" in {e.event for e in events}
+
+
+@pytest.mark.asyncio
+async def test_redelivering_an_open_item_stays_a_no_op(sessions):
+    async with sessions() as db:
+        user = await _user(db)
+        subject = _subject()
+        await delivery.deliver_one(db, kind=InboxKind.review_requested, user_id=user.id, subject=subject)
+        await db.commit()
+
+        again = await delivery.deliver_one(db, kind=InboxKind.review_requested, user_id=user.id, subject=subject)
+        await db.commit()
+        assert again is None
+        rows = (await db.execute(select(InboxItem).where(InboxItem.user_id == user.id))).scalars().all()
+        assert len(rows) == 1
+
+
+@pytest.mark.asyncio
+async def test_supersede_refuses_items_owned_by_another_user(sessions):
+    """The user_id argument is a scope, not documentation."""
+    async with sessions() as db:
+        mine = await _user(db)
+        theirs = await _user(db)
+        component = uuid.uuid4()
+
+        keep = await delivery.deliver_one(
+            db,
+            kind=InboxKind.update_available,
+            user_id=mine.id,
+            subject=_subject(id=component, version="2.0.0"),
+            context={"current_version": "1.0.0"},
+        )
+        other = await delivery.deliver_one(
+            db,
+            kind=InboxKind.update_available,
+            user_id=theirs.id,
+            subject=_subject(id=component, version="1.5.0"),
+            context={"current_version": "1.0.0"},
+        )
+        await db.commit()
+
+        count = await delivery.supersede(db, user_id=mine.id, keep=keep, others=[other])
+        await db.commit()
+
+        assert count == 0
+        assert other.state == InboxState.open, "another user's row must be untouched"
 
 
 # ── Read is not resolved ───────────────────────────────────────────
@@ -576,19 +690,26 @@ async def test_open_items_are_never_purged_but_resolved_ones_age_out(sessions):
 
 
 @pytest.mark.asyncio
-async def test_deleting_an_item_cascades_its_history(sessions):
+async def test_deleting_an_item_cascades_its_history(fk_sessions):
+    """Deleting an item takes its history with it, via ON DELETE CASCADE.
+
+    Uses the foreign-key-enforcing fixture and deletes ONLY the parent row. An
+    earlier version of this test deleted the event rows itself first, which made
+    the assertion pass regardless of whether the cascade existed.
+    """
     from sqlalchemy import delete
 
-    async with sessions() as db:
+    async with fk_sessions() as db:
         user = await _user(db)
         item = await delivery.deliver_one(db, kind=InboxKind.review_requested, user_id=user.id, subject=_subject())
         delivery.mark_read(db, item)
         await db.commit()
         item_id = item.id
 
-        # SQLite needs the pragma for FK cascades; production is Postgres, where
-        # the ON DELETE CASCADE in the schema does this natively.
-        await db.execute(delete(InboxItemEvent).where(InboxItemEvent.item_id == item_id))
+        assert (await db.execute(select(InboxItemEvent).where(InboxItemEvent.item_id == item_id))).scalars().all(), (
+            "history should exist before the delete"
+        )
+
         await db.execute(delete(InboxItem).where(InboxItem.id == item_id))
         await db.commit()
 

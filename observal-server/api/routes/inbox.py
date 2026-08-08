@@ -120,13 +120,16 @@ async def list_inbox(
 ):
     """List this caller's items, newest first.
 
-    ``total`` counts rows before the read-time visibility check, so it can
-    overcount when a teamspace membership has just been revoked. Filtering in
-    SQL instead would mean encoding membership into the query for a case that is
-    rare and self-correcting; the alternative of a wrong page size is worse.
+    Visibility is applied in SQL, so ``total``, the page size, and the rows all
+    describe the same set. Counting first and filtering afterwards would leak:
+    the total would still include items whose subject the caller can no longer
+    see, and a page could come back short with no explanation.
     """
     optic.trace("inbox list for user {}", current_user.id)
-    base = select(InboxItem).where(InboxItem.user_id == current_user.id)
+    base = select(InboxItem).where(
+        InboxItem.user_id == current_user.id,
+        visibility.visible_filter(current_user),
+    )
     base = _apply_filters(
         base,
         state=state,
@@ -149,10 +152,9 @@ async def list_inbox(
         .scalars()
         .all()
     )
-    visible = await visibility.filter_visible(db, list(rows), current_user)
 
     return InboxListResponse(
-        items=[_to_response(item) for item in visible],
+        items=[_to_response(item) for item in rows],
         total=total,
         page=page,
         page_size=page_size,
@@ -170,20 +172,26 @@ async def inbox_count(
     was resolved without ever being opened is still something the user has not
     seen. Action-required counts only OPEN items: work already done is not
     outstanding.
+
+    All three counts carry the visibility filter. A badge that ticks up for an
+    item the caller cannot open would disclose the item just as surely as
+    listing it.
     """
-    mine = InboxItem.user_id == current_user.id
-    unread = (await db.execute(select(func.count(InboxItem.id)).where(mine, InboxItem.read_at.is_(None)))).scalar() or 0
+    mine = (InboxItem.user_id == current_user.id, visibility.visible_filter(current_user))
+    unread = (
+        await db.execute(select(func.count(InboxItem.id)).where(*mine, InboxItem.read_at.is_(None)))
+    ).scalar() or 0
     action = (
         await db.execute(
             select(func.count(InboxItem.id)).where(
-                mine,
+                *mine,
                 InboxItem.action_required == True,  # noqa: E712
                 InboxItem.state == InboxState.open,
             )
         )
     ).scalar() or 0
     open_total = (
-        await db.execute(select(func.count(InboxItem.id)).where(mine, InboxItem.state == InboxState.open))
+        await db.execute(select(func.count(InboxItem.id)).where(*mine, InboxItem.state == InboxState.open))
     ).scalar() or 0
     return InboxCountResponse(unread=unread, action_required=action, open=open_total)
 
@@ -305,7 +313,13 @@ async def read_all(
     Passing no filters still means "everything currently unread", which is the
     caller's explicit choice rather than a hidden default.
     """
-    stmt = select(InboxItem).where(InboxItem.user_id == current_user.id, InboxItem.read_at.is_(None))
+    # Items whose subject the caller can no longer see are excluded in SQL, so
+    # they are never silently marked read on the caller's behalf.
+    stmt = select(InboxItem).where(
+        InboxItem.user_id == current_user.id,
+        InboxItem.read_at.is_(None),
+        visibility.visible_filter(current_user),
+    )
     stmt = _apply_filters(
         stmt,
         state=state,
@@ -318,10 +332,6 @@ async def read_all(
 
     updated = 0
     for item in rows:
-        # An item whose subject the caller can no longer see is left alone
-        # rather than silently marked read on their behalf.
-        if not await visibility.visible_to(db, item, current_user):
-            continue
         if delivery.mark_read(db, item, actor_id=current_user.id):
             updated += 1
     await db.commit()

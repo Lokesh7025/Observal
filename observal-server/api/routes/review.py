@@ -692,6 +692,7 @@ async def approve(
         approved=True,
         actor_id=current_user.id,
         version=getattr(pending_ver, "version", None),
+        submitter_id=getattr(pending_ver, "released_by", None),
     )
 
     await db.commit()
@@ -745,6 +746,7 @@ async def reject(
         actor_id=current_user.id,
         version=getattr(pending_ver, "version", None),
         reason=req.reason,
+        submitter_id=getattr(pending_ver, "released_by", None),
     )
 
     await db.commit()
@@ -858,6 +860,21 @@ async def approve_agent(
         version=newest_pending.version,
         submitter_id=newest_pending.released_by,
     )
+    # The loop above rejected every older pending version. Those are somebody's
+    # submissions too, and they may not share an author with the approved one,
+    # so each gets its own notice. Without this a contributor's work is rejected
+    # with no inbox record of it ever happening.
+    for pv in pending_versions[1:]:
+        await inbox.on_review_decided(
+            db,
+            agent,
+            subject_type="agent",
+            approved=False,
+            actor_id=current_user.id,
+            version=pv.version,
+            reason="Superseded by newer version",
+            submitter_id=pv.released_by,
+        )
 
     await db.commit()
     await invalidate_namespace("dashboard")
@@ -980,6 +997,7 @@ async def approve_bundle(
             approved=True,
             actor_id=current_user.id,
             version=getattr(listing.latest_version, "version", None),
+            submitter_id=getattr(listing.latest_version, "released_by", None),
         )
         count += 1
 
@@ -1126,6 +1144,7 @@ async def approve_mcp_with_skills(
         approved=True,
         actor_id=current_user.id,
         version=getattr(listing.latest_version, "version", None),
+        submitter_id=getattr(listing.latest_version, "released_by", None),
     )
 
     approved_skill_ids: list[str] = []
@@ -1147,6 +1166,7 @@ async def approve_mcp_with_skills(
                 approved=True,
                 actor_id=current_user.id,
                 version=getattr(skill.latest_version, "version", None),
+                submitter_id=getattr(skill.latest_version, "released_by", None),
             )
             approved_skill_ids.append(str(skill.id))
 

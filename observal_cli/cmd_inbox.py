@@ -63,8 +63,10 @@ def _filter_params(
     kind: str | None,
     action_required: bool,
     unread: bool,
+    page: int = 1,
+    page_size: int = 25,
 ) -> dict[str, object]:
-    params: dict[str, object] = {}
+    params: dict[str, object] = {"page": page, "page_size": page_size}
     if state:
         params["state"] = _validate(state, _STATES, "state")
     if kind:
@@ -115,6 +117,18 @@ def _emit_list(params: dict[str, object], output: str) -> None:
         )
     console.print(table)
 
+    # Say where this page sits in the result set. Without it a capped list is
+    # indistinguishable from the whole inbox, and older items look deleted.
+    total = int(data.get("total") or len(items))
+    page = int(data.get("page") or 1)
+    page_size = int(data.get("page_size") or len(items) or 1)
+    first_row = (page - 1) * page_size + 1
+    last_row = (page - 1) * page_size + len(items)
+    if total > len(items):
+        rprint(f"\n[dim]Showing {first_row}-{last_row} of {total}.[/dim]")
+        if last_row < total:
+            rprint(f"[dim]Next page: [cyan]observal inbox list --page {page + 1}[/cyan][/dim]")
+
     first_id = items[0].get("id", "")
     rprint(f"\n[dim]Detail: [cyan]observal inbox show {esc(first_id)}[/cyan][/dim]")
 
@@ -126,6 +140,8 @@ def inbox(
     kind: str | None = typer.Option(None, "--kind", "-k", help="Filter by kind"),
     action_required: bool = typer.Option(False, "--action-required", help="Only items needing you to act"),
     unread: bool = typer.Option(False, "--unread", help="Only unread items"),
+    page: int = typer.Option(1, "--page", "-p", min=1, help="Page number"),
+    page_size: int = typer.Option(25, "--page-size", min=1, max=100, help="Items per page"),
     output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
 ):
     """Show your inbox.
@@ -139,7 +155,7 @@ def inbox(
         observal inbox --kind review_requested --output json
     """
     if ctx.invoked_subcommand is None:
-        _emit_list(_filter_params(state, kind, action_required, unread), output)
+        _emit_list(_filter_params(state, kind, action_required, unread, page, page_size), output)
 
 
 @inbox_app.command(name="list")
@@ -148,6 +164,8 @@ def inbox_list(
     kind: str | None = typer.Option(None, "--kind", "-k", help="Filter by kind"),
     action_required: bool = typer.Option(False, "--action-required", help="Only items needing you to act"),
     unread: bool = typer.Option(False, "--unread", help="Only unread items"),
+    page: int = typer.Option(1, "--page", "-p", min=1, help="Page number"),
+    page_size: int = typer.Option(25, "--page-size", min=1, max=100, help="Items per page"),
     output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
 ):
     """List your inbox items.
@@ -156,7 +174,7 @@ def inbox_list(
 
         observal inbox list --state open --output json
     """
-    _emit_list(_filter_params(state, kind, action_required, unread), output)
+    _emit_list(_filter_params(state, kind, action_required, unread, page, page_size), output)
 
 
 @inbox_app.command(name="count")

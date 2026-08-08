@@ -11,6 +11,7 @@ kind; they never build a title or a URL themselves.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -84,17 +85,36 @@ def _review_show_command(subject: Subject, ctx: dict[str, Any]) -> str | None:
     return f"observal admin review show {subject.id}{suffix}"
 
 
+# A pull target is a namespace/slug pair or a UUID; a harness is a registry key.
+# Neither ever contains a space, a quote, or a shell metacharacter.
+_SAFE_TARGET = re.compile(r"^[a-zA-Z0-9._/-]{1,128}$")
+_SAFE_HARNESS = re.compile(r"^[a-zA-Z0-9._-]{1,50}$")
+
+
 def _pull_command(subject: Subject, ctx: dict[str, Any]) -> str | None:
     """The upgrade command for an installed item.
 
-    Inbox never runs this. It shows the exact command and the user decides.
+    Inbox never runs this. It renders the exact command for the user to copy,
+    which is precisely why the parts are validated here: the values arrive from
+    a CLI-supplied report, and the product of this function is a string the web
+    UI and the terminal both present as "run this". A name carrying a quote or a
+    semicolon would render as a command that does something other than it reads.
+    Anything that does not match is dropped rather than escaped, because a
+    mangled command is worse than no command.
+
+    ``subject.name`` is deliberately not a fallback target. It is a display
+    name, and `observal pull` does not accept one.
     """
-    name = subject.namespace and subject.slug and f"{subject.namespace}/{subject.slug}"
-    target = name or (str(subject.id) if subject.id else subject.name)
-    if not target:
+    target = f"{subject.namespace}/{subject.slug}" if subject.namespace and subject.slug else None
+    if target is None and subject.id is not None:
+        target = str(subject.id)
+    if not target or not _SAFE_TARGET.match(target):
         return None
+
     harness = ctx.get("harness")
-    harness_flag = f" --harness {harness}" if harness else ""
+    harness_flag = ""
+    if harness and _SAFE_HARNESS.match(str(harness)):
+        harness_flag = f" --harness {harness}"
     return f"observal pull {target}{harness_flag}"
 
 

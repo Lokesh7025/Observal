@@ -19,6 +19,10 @@ def _review_db():
     from unittest.mock import AsyncMock, MagicMock
 
     db = AsyncMock()
+    # add() is synchronous. Leaving it as an AsyncMock attribute makes the
+    # un-awaited call in deliver_one emit a RuntimeWarning, which fails under
+    # -W error.
+    db.add = MagicMock()
     nested = MagicMock()
     nested.__aenter__ = AsyncMock(return_value=None)
     nested.__aexit__ = AsyncMock(return_value=False)

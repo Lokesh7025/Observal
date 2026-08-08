@@ -300,7 +300,7 @@ export function RegistrySidebar() {
 				{visibleUserNav.length > 0 && (
 					<SidebarGroup>
 						<SidebarGroupLabel className="text-xs font-medium uppercase tracking-widest text-muted-foreground">
-							Traces
+							My Work
 						</SidebarGroupLabel>
 						<SidebarGroupContent>
 							<SidebarMenu>
@@ -310,11 +310,17 @@ export function RegistrySidebar() {
 											<Link to={item.href}>
 												<item.icon className="h-4 w-4" />
 												<span>{item.title}</span>
-												{item.href === "/inbox" && inboxUnread > 0 && (
-													<SidebarMenuBadge>{inboxUnread}</SidebarMenuBadge>
-												)}
 											</Link>
 										</SidebarMenuButton>
+										{/* Sibling of the button, not a child: SidebarMenuBadge
+										    positions itself off peer/menu-button, so nesting it
+										    inside the Link kills the active and hover styles. */}
+										{item.href === "/inbox" && inboxUnread > 0 && (
+											<SidebarMenuBadge>
+												{inboxUnread}
+												<span className="sr-only"> unread inbox items</span>
+											</SidebarMenuBadge>
+										)}
 									</SidebarMenuItem>
 								))}
 							</SidebarMenu>

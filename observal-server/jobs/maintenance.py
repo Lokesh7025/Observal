@@ -60,7 +60,7 @@ async def purge_inbox_items(ctx: dict):
     optic.debug("purge_inbox_items")
     from datetime import UTC, datetime, timedelta
 
-    from sqlalchemy import delete, select
+    from sqlalchemy import delete, func, select
 
     import services.dynamic_settings as ds
     from database import async_session
@@ -72,26 +72,29 @@ async def purge_inbox_items(ctx: dict):
         return
 
     cutoff = datetime.now(UTC) - timedelta(days=retention_days)
+    # Eligibility is re-stated in the DELETE, not just used to gather ids. A user
+    # can reopen an item between the two statements, and deleting by id alone
+    # would destroy work they just pulled back into their queue along with its
+    # history. The predicates make the delete self-guarding.
+    eligible = (
+        InboxItem.state.in_([InboxState.done, InboxState.dismissed]),
+        InboxItem.resolved_at.is_not(None),
+        InboxItem.resolved_at < cutoff,
+    )
     async with async_session() as db:
-        doomed = (
-            (
-                await db.execute(
-                    select(InboxItem.id).where(
-                        InboxItem.state.in_([InboxState.done, InboxState.dismissed]),
-                        InboxItem.resolved_at.is_not(None),
-                        InboxItem.resolved_at < cutoff,
-                    )
-                )
-            )
-            .scalars()
-            .all()
-        )
-        if not doomed:
+        pending = (await db.execute(select(func.count(InboxItem.id)).where(*eligible))).scalar() or 0
+        if not pending:
             optic.debug("inbox retention: nothing older than {} days", retention_days)
             return
-        await db.execute(delete(InboxItem).where(InboxItem.id.in_(list(doomed))))
+        result = await db.execute(delete(InboxItem).where(*eligible))
         await db.commit()
-        optic.info("inbox retention: purged {} resolved item(s) older than {} days", len(doomed), retention_days)
+        # Report what the delete actually removed, which can be fewer than the
+        # count above if someone reopened an item in between.
+        optic.info(
+            "inbox retention: purged {} resolved item(s) older than {} days",
+            result.rowcount,
+            retention_days,
+        )
 
 
 async def maintain_clickhouse(ctx: dict):

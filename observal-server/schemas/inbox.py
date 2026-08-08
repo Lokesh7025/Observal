@@ -62,16 +62,24 @@ class InboxCountResponse(BaseModel):
 
 
 class OutdatedItem(BaseModel):
-    """One outdated finding reported by the CLI."""
+    """One outdated finding reported by the CLI.
 
-    type: str = Field(max_length=32)
+    The character-set patterns are not cosmetic. ``namespace``, ``slug`` and
+    ``harness`` are interpolated into the ``observal pull ...`` string that the
+    web UI and CLI present as a command to run, so they are constrained to what
+    a real registry identifier can contain. The versions carry ``min_length=1``
+    because an empty version would truncate the ``update_available`` dedupe key
+    and collide with a different fact.
+    """
+
+    type: str = Field(max_length=32, pattern=r"^[a-z_]+$")
     component_id: uuid.UUID
     name: str = Field(default="", max_length=255)
-    namespace: str | None = Field(default=None, max_length=64)
-    slug: str | None = Field(default=None, max_length=64)
-    current_version: str = Field(max_length=64)
-    latest_version: str = Field(max_length=64)
-    harness: str | None = Field(default=None, max_length=50)
+    namespace: str | None = Field(default=None, max_length=64, pattern=r"^[a-zA-Z0-9._-]+$")
+    slug: str | None = Field(default=None, max_length=64, pattern=r"^[a-zA-Z0-9._-]+$")
+    current_version: str = Field(min_length=1, max_length=64, pattern=r"^[a-zA-Z0-9.+_-]+$")
+    latest_version: str = Field(min_length=1, max_length=64, pattern=r"^[a-zA-Z0-9.+_-]+$")
+    harness: str | None = Field(default=None, max_length=50, pattern=r"^[a-zA-Z0-9._-]+$")
 
 
 class OutdatedReportRequest(BaseModel):

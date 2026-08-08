@@ -98,6 +98,23 @@ async def on_publish(
     return await on_review_requested(db, entity, subject_type=subject_type, actor_id=actor_id, version=version)
 
 
+def _version_author(entity, version: str | None) -> uuid.UUID | None:
+    """Find who released ``version`` of this listing or agent.
+
+    Walks the already-loaded ``versions`` relationship rather than querying, so
+    this adds no round trip to a decision that has the rows in session already.
+    Falls back to the latest version when the caller named no version, and to
+    None when nothing matches, which leaves the listing-level fallback in place.
+    """
+    versions = getattr(entity, "versions", None) or []
+    if version is not None:
+        for candidate in versions:
+            if getattr(candidate, "version", None) == version:
+                return getattr(candidate, "released_by", None)
+    latest = getattr(entity, "latest_version", None)
+    return getattr(latest, "released_by", None) if latest is not None else None
+
+
 async def on_review_decided(
     db: AsyncSession,
     entity,
@@ -109,13 +126,22 @@ async def on_review_decided(
     reason: str | None = None,
     submitter_id: uuid.UUID | None = None,
 ) -> int:
-    """A reviewer acted: tell whoever submitted it.
+    """A reviewer acted: tell whoever released the version that was decided.
 
-    ``submitter_id`` overrides the entity lookup for cases where the version
-    that was decided has a different author than the listing row — an agent
-    version carries ``released_by`` while the agent carries ``created_by``.
+    The recipient is the VERSION's author, not the listing's. Those differ more
+    often than they look: a listing created by one person accumulates releases
+    from co-authors, and ownership transfer rewrites the listing's owner without
+    touching any version. Sending a rejection reason to the listing owner would
+    hand one contributor's review feedback to another.
+
+    ``submitter_id`` lets a caller that already holds the decided version pass
+    its ``released_by`` directly. When it is absent this resolves the version
+    itself and only falls back to the listing's own submitter when no version
+    can be found.
     """
     subject = subject_from_entity(entity, subject_type, version=version)
+    if submitter_id is None:
+        submitter_id = _version_author(entity, version)
     users = [submitter_id] if submitter_id is not None else recipients.submitter_of(entity)
     items = await deliver(
         db,

@@ -13,17 +13,53 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from sqlalchemy import select
+from sqlalchemy import or_, select, true
 
 from api.deps import can_see_private_listings
+from models.inbox import InboxItem, InboxKind
 from models.team import TeamMembership
-from services.inbox.registry import spec_for
+from services.inbox.registry import SPECS, spec_for
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 
-    from models.inbox import InboxItem
     from models.user import User
+
+# Kinds that opt out of the membership re-check, resolved once from the registry
+# so the SQL predicate and the row-level check cannot name different sets.
+_NO_RECHECK_KINDS: tuple[InboxKind, ...] = tuple(kind for kind, spec in SPECS.items() if not spec.recheck_visibility)
+
+
+def visible_filter(user: User):
+    """SQL predicate matching :func:`visible_to`, for counts and pagination.
+
+    This is the set-level twin of ``visible_to`` and must stay identical to it,
+    the same way ``apply_visibility_filter`` and
+    ``check_listing_visibility_async`` mirror each other in ``api.deps``.
+
+    It exists because post-filtering rows is not enough on its own: a ``total``
+    or a badge count computed over unfiltered rows still discloses that hidden
+    items exist. Someone removed from a teamspace could watch the count move and
+    infer activity on a private component they can no longer read. Filtering in
+    SQL keeps the aggregates, the page size, and the rows telling one story.
+    """
+    if can_see_private_listings(user):
+        return true()
+    member = (
+        select(TeamMembership.id)
+        .where(
+            TeamMembership.team_id == InboxItem.team_id,
+            TeamMembership.user_id == user.id,
+        )
+        .correlate(InboxItem)
+        .exists()
+    )
+    return or_(
+        InboxItem.is_private_subject == False,  # noqa: E712
+        InboxItem.kind.in_(_NO_RECHECK_KINDS),
+        InboxItem.team_id.is_(None),
+        member,
+    )
 
 
 async def visible_to(db: AsyncSession, item: InboxItem, user: User) -> bool:

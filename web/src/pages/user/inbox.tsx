@@ -41,6 +41,21 @@ const RAIL: { key: RailKey; label: string; filters: InboxFilters }[] = [
 	{ key: "done", label: "Resolved", filters: { state: "done" } },
 ];
 
+/**
+ * Accept only a same-origin absolute path for routing.
+ *
+ * `action_url` is built server-side and today only ever holds an internal path,
+ * but the column is a free string and the API contract does not constrain it.
+ * A value like `//evil.example` or `javascript:...` reaching `Link` would be an
+ * open redirect out of a trusted surface, so anything that is not a single
+ * leading slash followed by a normal path is refused. A protocol-relative URL
+ * starts with two slashes, which is why the second character is checked.
+ */
+function internalPath(url: string | null): string | null {
+	if (!url || !url.startsWith("/") || url.startsWith("//")) return null;
+	return url;
+}
+
 function relativeTime(iso: string): string {
 	const then = new Date(iso).getTime();
 	const mins = Math.round((Date.now() - then) / 60000);
@@ -108,7 +123,7 @@ function ItemRow({
 }
 
 function DetailPane({ itemId }: { itemId: string | null }) {
-	const { data: item, isLoading } = useInboxItem(itemId);
+	const { data: item, isLoading, isError, refetch } = useInboxItem(itemId);
 	const markRead = useMarkRead();
 	const markUnread = useMarkUnread();
 	const markDone = useMarkDone();
@@ -122,10 +137,26 @@ function DetailPane({ itemId }: { itemId: string | null }) {
 			</div>
 		);
 	}
-	if (isLoading || !item) {
+	if (isLoading) {
 		return (
 			<div className="flex h-full items-center justify-center p-6">
 				<Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+			</div>
+		);
+	}
+	// The query does not retry, so a failure leaves isLoading false and item
+	// undefined. Falling back to the spinner here would leave it turning forever
+	// with nothing on the way.
+	if (isError || !item) {
+		return (
+			<div className="flex h-full flex-col items-center justify-center gap-3 p-6 text-center">
+				<p className="text-sm font-medium">Could not load this item</p>
+				<p className="text-xs text-muted-foreground">
+					It may have been removed, or the request failed.
+				</p>
+				<Button size="sm" variant="outline" onClick={() => refetch()}>
+					Try again
+				</Button>
 			</div>
 		);
 	}
@@ -158,9 +189,9 @@ function DetailPane({ itemId }: { itemId: string | null }) {
 			)}
 
 			<div className="mb-4 flex flex-wrap gap-2">
-				{item.action_url && (
+				{internalPath(item.action_url) && (
 					<Button asChild size="sm">
-						<Link to={item.action_url}>Open</Link>
+						<Link to={internalPath(item.action_url) as string}>Open</Link>
 					</Button>
 				)}
 				{item.state === "open" ? (
