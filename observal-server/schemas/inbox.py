@@ -56,9 +56,21 @@ class InboxListResponse(BaseModel):
 
 
 class InboxCountResponse(BaseModel):
+    """Badge numbers, plus the per-facet breakdown the sidebar needs.
+
+    ``by_kind`` and ``by_subject_type`` are only populated when the caller asks
+    for them. The nav badge polls this endpoint on a timer and needs one number;
+    making it pay for two extra grouped scans every minute to fill a sidebar it
+    never renders would be a cost with no reader.
+    """
+
     unread: int
     action_required: int
     open: int
+    done: int = 0
+    dismissed: int = 0
+    by_kind: dict[str, int] = Field(default_factory=dict)
+    by_subject_type: dict[str, int] = Field(default_factory=dict)
 
 
 class OutdatedItem(BaseModel):

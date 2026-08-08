@@ -81,6 +81,7 @@ import type {
 	InboxListResponse,
 	InboxCounts,
 	InboxFilters,
+	InboxState,
 } from "./types";
 
 const API = "/api/v1";
@@ -1045,7 +1046,16 @@ function inboxQuery(filters: InboxFilters = {}): string {
 export const inbox = {
 	list: (filters: InboxFilters = {}) =>
 		get<InboxListResponse>(`/inbox${inboxQuery(filters)}`),
-	counts: () => get<InboxCounts>("/inbox/count"),
+	// Facets are opt-in: the nav badge polls this every minute for one number
+	// and should not pay for the sidebar's per-kind breakdown.
+	counts: (opts: { facets?: boolean; facetState?: InboxState } = {}) =>
+		get<InboxCounts>(
+			`/inbox/count${
+				opts.facets
+					? `?facets=true${opts.facetState ? `&facet_state=${opts.facetState}` : ""}`
+					: ""
+			}`,
+		),
 	detail: (id: string) => get<InboxItemDetail>(`/inbox/${id}`),
 	read: (id: string) => post<InboxItem>(`/inbox/${id}/read`),
 	unread: (id: string) => post<InboxItem>(`/inbox/${id}/unread`),

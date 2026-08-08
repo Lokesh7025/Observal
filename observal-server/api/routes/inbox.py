@@ -14,11 +14,12 @@ import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from loguru import logger as optic
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.deps import get_db, require_role
 from api.ratelimit import limiter
+from api.sanitize import escape_like
 from models.inbox import InboxItem, InboxItemEvent, InboxKind, InboxState
 from models.user import User, UserRole
 from schemas.inbox import (
@@ -74,6 +75,7 @@ def _apply_filters(
     action_required: bool | None,
     unread: bool | None,
     subject_type: str | None,
+    q: str | None = None,
 ):
     if state is not None:
         stmt = stmt.where(InboxItem.state == state)
@@ -85,6 +87,23 @@ def _apply_filters(
         stmt = stmt.where(InboxItem.read_at.is_(None) if unread else InboxItem.read_at.is_not(None))
     if subject_type is not None:
         stmt = stmt.where(InboxItem.subject_type == subject_type)
+    if q:
+        # Searched server-side rather than by filtering the page in the browser.
+        # A client-side filter can only see the 25 rows it already has, so it
+        # answers "no results" for a match sitting on page two.
+        #
+        # The columns are the ones an item actually shows: its title, the
+        # namespace/slug it names, and the body carrying a reviewer's reason.
+        # `escape_like` is what stops a literal % from matching everything.
+        needle = f"%{escape_like(q.strip())}%"
+        stmt = stmt.where(
+            or_(
+                InboxItem.title.ilike(needle, escape="\\"),
+                InboxItem.body.ilike(needle, escape="\\"),
+                InboxItem.subject_namespace.ilike(needle, escape="\\"),
+                InboxItem.subject_slug.ilike(needle, escape="\\"),
+            )
+        )
     return stmt
 
 
@@ -114,12 +133,14 @@ async def list_inbox(
     action_required: bool | None = Query(None),
     unread: bool | None = Query(None),
     subject_type: str | None = Query(None, max_length=32),
+    q: str | None = Query(None, max_length=200),
+    sort: str = Query("newest", pattern="^(newest|oldest)$"),
     page: int = Query(1, ge=1),
     page_size: int = Query(25, ge=1, le=_MAX_PAGE_SIZE),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_role(UserRole.user)),
 ):
-    """List this caller's items, newest first.
+    """List this caller's items, newest first by default.
 
     Visibility is applied in SQL, so ``total``, the page size, and the rows all
     describe the same set. Counting first and filtering afterwards would leak:
@@ -138,21 +159,22 @@ async def list_inbox(
         action_required=action_required,
         unread=unread,
         subject_type=subject_type,
+        q=q,
     )
 
     count_stmt = select(func.count()).select_from(base.subquery())
     total = (await db.execute(count_stmt)).scalar() or 0
 
-    offset = (page - 1) * page_size
-    rows = (
-        (
-            await db.execute(
-                base.order_by(InboxItem.created_at.desc(), InboxItem.id.desc()).offset(offset).limit(page_size)
-            )
-        )
-        .scalars()
-        .all()
+    # `id` breaks ties in the same direction as the timestamp. Two items
+    # delivered in one fan-out share a `created_at` to the microsecond, and an
+    # unstable tiebreak lets the same row appear on two consecutive pages.
+    order = (
+        (InboxItem.created_at.asc(), InboxItem.id.asc())
+        if sort == "oldest"
+        else (InboxItem.created_at.desc(), InboxItem.id.desc())
     )
+    offset = (page - 1) * page_size
+    rows = (await db.execute(base.order_by(*order).offset(offset).limit(page_size))).scalars().all()
 
     return InboxListResponse(
         items=[_to_response(item) for item in rows],
@@ -164,21 +186,29 @@ async def list_inbox(
 
 @router.get("/count", response_model=InboxCountResponse)
 async def inbox_count(
+    facets: bool = Query(False),
+    facet_state: InboxState | None = Query(InboxState.open),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_role(UserRole.user)),
 ):
-    """Badge counts.
+    """Badge counts, and optionally the per-facet breakdown behind them.
 
     Unread counts every unread item regardless of state, because an item that
     was resolved without ever being opened is still something the user has not
     seen. Action-required counts only OPEN items: work already done is not
     outstanding.
 
-    All three counts carry the visibility filter. A badge that ticks up for an
-    item the caller cannot open would disclose the item just as surely as
-    listing it.
+    Every count carries the visibility filter. A badge that ticks up for an item
+    the caller cannot open would disclose the item just as surely as listing it.
+
+    ``facets`` is opt-in because the two callers want different things. The nav
+    badge polls this on a timer for one number; the inbox sidebar loads it once
+    per view and needs the breakdown. ``facet_state`` scopes that breakdown to
+    the bucket the sidebar is showing, so its per-kind numbers add up to the
+    list beside them instead of describing a different set of rows.
     """
     mine = (InboxItem.user_id == current_user.id, visibility.visible_filter(current_user))
+
     unread = (
         await db.execute(select(func.count(InboxItem.id)).where(*mine, InboxItem.read_at.is_(None)))
     ).scalar() or 0
@@ -191,10 +221,36 @@ async def inbox_count(
             )
         )
     ).scalar() or 0
-    open_total = (
-        await db.execute(select(func.count(InboxItem.id)).where(*mine, InboxItem.state == InboxState.open))
-    ).scalar() or 0
-    return InboxCountResponse(unread=unread, action_required=action, open=open_total)
+
+    # One grouped scan for all three lifecycle totals rather than three counts.
+    by_state = dict(
+        (
+            await db.execute(select(InboxItem.state, func.count(InboxItem.id)).where(*mine).group_by(InboxItem.state))
+        ).all()
+    )
+
+    response = InboxCountResponse(
+        unread=unread,
+        action_required=action,
+        open=by_state.get(InboxState.open, 0),
+        done=by_state.get(InboxState.done, 0),
+        dismissed=by_state.get(InboxState.dismissed, 0),
+    )
+    if not facets:
+        return response
+
+    scoped = (*mine, InboxItem.state == facet_state) if facet_state is not None else mine
+    kinds = (
+        await db.execute(select(InboxItem.kind, func.count(InboxItem.id)).where(*scoped).group_by(InboxItem.kind))
+    ).all()
+    subjects = (
+        await db.execute(
+            select(InboxItem.subject_type, func.count(InboxItem.id)).where(*scoped).group_by(InboxItem.subject_type)
+        )
+    ).all()
+    response.by_kind = {kind.value: count for kind, count in kinds}
+    response.by_subject_type = {subject_type: count for subject_type, count in subjects}
+    return response
 
 
 @router.get("/{item_id}", response_model=InboxItemDetailResponse)
@@ -304,6 +360,7 @@ async def read_all(
     kind: InboxKind | None = Query(None),
     action_required: bool | None = Query(None),
     subject_type: str | None = Query(None, max_length=32),
+    q: str | None = Query(None, max_length=200),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_role(UserRole.user)),
 ):
@@ -313,6 +370,9 @@ async def read_all(
     footgun: it clears the unread signal on work the user has never looked at.
     Passing no filters still means "everything currently unread", which is the
     caller's explicit choice rather than a hidden default.
+
+    ``q`` is accepted for the same reason: the button sits above a searched
+    list, so it has to mean the rows the user is looking at.
     """
     # Items whose subject the caller can no longer see are excluded in SQL, so
     # they are never silently marked read on the caller's behalf.
@@ -328,6 +388,7 @@ async def read_all(
         action_required=action_required,
         unread=None,
         subject_type=subject_type,
+        q=q,
     )
     rows = (await db.execute(stmt)).scalars().all()
 

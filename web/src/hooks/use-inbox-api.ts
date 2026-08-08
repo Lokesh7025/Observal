@@ -4,7 +4,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { inbox } from "@/lib/api";
-import type { InboxFilters } from "@/lib/types";
+import type { InboxFilters, InboxState } from "@/lib/types";
 
 const INBOX_KEY = ["inbox"] as const;
 
@@ -16,10 +16,20 @@ export function useInbox(filters: InboxFilters = {}) {
 	});
 }
 
-export function useInboxCounts(enabled = true) {
+/**
+ * Badge counts, and optionally the sidebar's per-facet breakdown.
+ *
+ * `facetState` is part of the key, not just the request. The sidebar's per-kind
+ * numbers describe one bucket, so a cached Inbox response must not be handed to
+ * a view showing Done.
+ */
+export function useInboxCounts(
+	enabled = true,
+	opts: { facets?: boolean; facetState?: InboxState } = {},
+) {
 	return useQuery({
-		queryKey: [...INBOX_KEY, "count"],
-		queryFn: () => inbox.counts(),
+		queryKey: [...INBOX_KEY, "count", opts.facets ?? false, opts.facetState ?? null],
+		queryFn: () => inbox.counts(opts),
 		// The badge should feel live without hammering the API. A minute is
 		// short enough that a review assignment does not sit unseen for long.
 		// Polling was chosen over SSE deliberately: server-sent events would
@@ -104,4 +114,44 @@ export function useReadAll() {
 		(filters: InboxFilters) => inbox.readAll(filters),
 		"Could not mark those as read. Please try again.",
 	);
+}
+
+export type BulkAction = "read" | "unread" | "done" | "dismiss" | "reopen";
+
+const BULK_FNS: Record<BulkAction, (id: string) => Promise<unknown>> = {
+	read: inbox.read,
+	unread: inbox.unread,
+	done: inbox.done,
+	dismiss: inbox.dismiss,
+	reopen: inbox.reopen,
+};
+
+/**
+ * Apply one action to a checkbox selection.
+ *
+ * The API is per-item by design — every transition appends its own history row
+ * — so a selection of N is N requests. `allSettled` rather than `all`: one
+ * failure must not discard the transitions that did land, and the count of
+ * failures is surfaced instead of a success toast over a partial result.
+ */
+export function useBulkAction() {
+	const qc = useQueryClient();
+	return useMutation({
+		mutationFn: async ({ ids, action }: { ids: string[]; action: BulkAction }) => {
+			const results = await Promise.allSettled(ids.map((id) => BULK_FNS[action](id)));
+			return {
+				total: ids.length,
+				failed: results.filter((r) => r.status === "rejected").length,
+			};
+		},
+		onSuccess: ({ total, failed }) => {
+			qc.invalidateQueries({ queryKey: INBOX_KEY });
+			if (failed > 0) {
+				toast.error(`${failed} of ${total} could not be updated.`);
+			}
+		},
+		onError: () => {
+			toast.error("Could not update the selection. Please try again.");
+		},
+	});
 }

@@ -63,7 +63,14 @@ export interface InboxCounts {
 	unread: number;
 	action_required: number;
 	open: number;
+	done: number;
+	dismissed: number;
+	/** Both are empty unless the request asked for facets. */
+	by_kind: Partial<Record<InboxKind, number>>;
+	by_subject_type: Record<string, number>;
 }
+
+export type InboxSort = "newest" | "oldest";
 
 export interface InboxFilters {
 	state?: InboxState;
@@ -71,9 +78,52 @@ export interface InboxFilters {
 	action_required?: boolean;
 	unread?: boolean;
 	subject_type?: string;
+	/** Free text, matched server-side against title, body, namespace and slug. */
+	q?: string;
+	sort?: InboxSort;
 	page?: number;
 	page_size?: number;
 }
+
+/**
+ * The short "why you got this" tag on the right of a row.
+ *
+ * Written out rather than lower-casing {@link INBOX_KIND_LABELS}, because the
+ * two answer different questions. A label names the thing ("Changes needed");
+ * a reason explains the delivery ("a reviewer asked for changes"), and for
+ * several kinds the natural phrasing is not the label in lower case.
+ */
+export const INBOX_KIND_REASONS: Record<InboxKind, string> = {
+	review_requested: "review requested",
+	review_approved: "approved",
+	review_rejected: "changes needed",
+	review_comment: "commented",
+	change_requested: "changes requested",
+	team_join_requested: "join request",
+	team_join_decided: "join decided",
+	team_created_pending: "awaiting approval",
+	ownership_transfer: "transfer offered",
+	update_available: "new version",
+	insight_ready: "insight ready",
+	system_notice: "system",
+};
+
+/**
+ * Plural display names for `subject_type`, which is an open string column
+ * rather than an enum. Anything unmapped falls back to the raw value, so a
+ * subject type added server-side degrades to readable instead of blank.
+ */
+export const INBOX_SUBJECT_LABELS: Record<string, string> = {
+	agent: "Agents",
+	mcp: "MCPs",
+	skill: "Skills",
+	hook: "Hooks",
+	prompt: "Prompts",
+	sandbox: "Sandboxes",
+	team: "Teamspaces",
+	insight_report: "Insight reports",
+	system: "System",
+};
 
 export const INBOX_KIND_LABELS: Record<InboxKind, string> = {
 	review_requested: "Review requested",

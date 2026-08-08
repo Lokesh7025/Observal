@@ -941,3 +941,140 @@ async def test_deleting_an_item_cascades_its_history(fk_sessions):
 
         left = (await db.execute(select(InboxItemEvent).where(InboxItemEvent.item_id == item_id))).scalars().all()
         assert left == []
+
+
+
+# ── List query surface: search, sort, facets ───────────────────────
+#
+# These call the route coroutines directly, which means FastAPI's dependency
+# resolution never runs and every parameter whose default is a ``Query(...)``
+# marker arrives as the marker object rather than its value. An unresolved
+# marker reaches SQLAlchemy as a bind parameter and fails there, so the two
+# helpers below supply the full argument set the way a real request would.
+
+
+async def _list(db, user, **overrides):
+    from api.routes.inbox import list_inbox
+
+    params: dict = {
+        "state": None,
+        "kind": None,
+        "action_required": None,
+        "unread": None,
+        "subject_type": None,
+        "q": None,
+        "sort": "newest",
+        "page": 1,
+        "page_size": 25,
+    }
+    params.update(overrides)
+    return await list_inbox(**params, db=db, current_user=user)
+
+
+async def _counts(db, user, *, facets=False, facet_state=InboxState.open):
+    from api.routes.inbox import inbox_count
+
+    return await inbox_count(facets=facets, facet_state=facet_state, db=db, current_user=user)
+
+
+async def _deliver_named(db, user, *, namespace, slug, kind=InboxKind.review_requested, subject_type="mcp"):
+    return await delivery.deliver_one(
+        db,
+        kind=kind,
+        user_id=user.id,
+        subject=_subject(type=subject_type, name=slug, namespace=namespace, slug=slug),
+    )
+
+
+@pytest.mark.asyncio
+async def test_search_matches_title_namespace_and_slug(sessions):
+    """Search is server-side so it can see past the page the browser holds."""
+    async with sessions() as db:
+        user = await _user(db)
+        await _deliver_named(db, user, namespace="super", slug="slack-notifier")
+        await _deliver_named(db, user, namespace="kaushikkkkk", slug="test-generator")
+        await db.commit()
+
+        by_slug = await _list(db, user, q="slack")
+        assert [i.subject_slug for i in by_slug.items] == ["slack-notifier"]
+        # `total` has to describe the filtered set, not the unfiltered one, or
+        # the pager below the list counts rows the list does not contain.
+        assert by_slug.total == 1
+
+        by_namespace = await _list(db, user, q="kaushik")
+        assert [i.subject_slug for i in by_namespace.items] == ["test-generator"]
+
+        # The title is built by the kind spec and carries the subject name.
+        assert (await _list(db, user, q="Review requested")).total == 2
+
+
+@pytest.mark.asyncio
+async def test_search_treats_like_wildcards_as_literals(sessions):
+    """An unescaped % or _ in the box would silently match everything."""
+    async with sessions() as db:
+        user = await _user(db)
+        await _deliver_named(db, user, namespace="super", slug="slack-notifier")
+        percent = await _deliver_named(db, user, namespace="super", slug="coverage")
+        percent.title = "100% coverage"
+        await db.commit()
+
+        assert [i.title for i in (await _list(db, user, q="%")).items] == ["100% coverage"]
+        # `_` is the single-character wildcard, and neither subject contains a
+        # literal underscore, so a leaked wildcard would match both rows here.
+        assert (await _list(db, user, q="_")).total == 0
+
+
+@pytest.mark.asyncio
+async def test_sort_reverses_the_page(sessions):
+    async with sessions() as db:
+        user = await _user(db)
+        old = await _deliver_named(db, user, namespace="super", slug="first")
+        new = await _deliver_named(db, user, namespace="super", slug="second")
+        old.created_at = datetime.now(UTC) - timedelta(days=2)
+        new.created_at = datetime.now(UTC)
+        await db.commit()
+
+        assert [i.subject_slug for i in (await _list(db, user)).items] == ["second", "first"]
+        assert [i.subject_slug for i in (await _list(db, user, sort="oldest")).items] == ["first", "second"]
+
+
+@pytest.mark.asyncio
+async def test_counts_omit_facets_unless_asked(sessions):
+    """The nav badge polls this on a timer; it must not pay for the breakdown."""
+    async with sessions() as db:
+        user = await _user(db)
+        await _deliver_named(db, user, namespace="super", slug="slack-notifier")
+        await db.commit()
+
+        plain = await _counts(db, user)
+        assert plain.open == 1
+        assert plain.by_kind == {} and plain.by_subject_type == {}
+
+        detailed = await _counts(db, user, facets=True)
+        assert detailed.by_kind == {"review_requested": 1}
+        assert detailed.by_subject_type == {"mcp": 1}
+
+
+@pytest.mark.asyncio
+async def test_facets_describe_the_bucket_they_are_scoped_to(sessions):
+    """Sidebar numbers must add up to the list beside them, not a different set."""
+    async with sessions() as db:
+        user = await _user(db)
+        still_open = await _deliver_named(db, user, namespace="super", slug="open-one")
+        finished = await _deliver_named(
+            db, user, namespace="super", slug="done-one", kind=InboxKind.update_available, subject_type="skill"
+        )
+        delivery.resolve(db, finished, state=InboxState.done)
+        await db.commit()
+
+        opened = await _counts(db, user, facets=True, facet_state=InboxState.open)
+        assert opened.by_kind == {"review_requested": 1}
+        assert opened.by_subject_type == {"mcp": 1}
+
+        done = await _counts(db, user, facets=True, facet_state=InboxState.done)
+        assert done.by_kind == {"update_available": 1}
+        assert done.by_subject_type == {"skill": 1}
+
+        # Lifecycle totals are unscoped: they are what the bucket rows count.
+        assert (opened.open, opened.done, opened.dismissed) == (1, 1, 0)
+        assert still_open.state is InboxState.open
