@@ -40,8 +40,9 @@ async def reviewers_for(db: AsyncSession, entity) -> list[uuid.UUID]:
     "may this caller review this item", and delivery needs "who are those
     callers". The two must agree exactly, which is why the arms below are
     written to mirror it line for line rather than approximating it —
-    ``test_inbox_recipients.py`` asserts the agreement over a user matrix and
-    fails the build if either side drifts.
+    ``test_reviewers_for_matches_can_review_exactly`` in ``tests/test_inbox.py``
+    asserts the agreement over a user matrix and fails the build if either side
+    drifts.
 
     can_review: admins review everything; a private item belongs to its
     teamspace's owners and reviewers; a private item with no teamspace is a

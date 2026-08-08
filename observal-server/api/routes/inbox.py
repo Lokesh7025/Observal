@@ -12,12 +12,13 @@ made; adding it here by accident would be the wrong way to make it.
 # modules: FastAPI resolves path and query parameter annotations at runtime.
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from loguru import logger as optic
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.deps import get_db, require_role
+from api.ratelimit import limiter
 from models.inbox import InboxItem, InboxItemEvent, InboxKind, InboxState
 from models.user import User, UserRole
 from schemas.inbox import (
@@ -35,9 +36,9 @@ from services.inbox.registry import Subject
 
 router = APIRouter(prefix="/api/v1/inbox", tags=["inbox"])
 
-# The list endpoint re-checks visibility per row after the query, so it reads a
-# window wider than the requested page to refill what the check drops. Anything
-# beyond this and the caller should be paginating rather than scrolling.
+# Visibility is applied inside the SQL query, so a page is exactly the rows the
+# caller may see. The cap only bounds how much one request can pull; anything
+# beyond it and the caller should be paginating rather than scrolling.
 _MAX_PAGE_SIZE = 100
 
 
@@ -339,7 +340,9 @@ async def read_all(
 
 
 @router.post("/outdated-report", response_model=OutdatedReportResponse)
+@limiter.limit("10/minute")
 async def outdated_report(
+    request: Request,
     req: OutdatedReportRequest,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_role(UserRole.user)),
@@ -356,11 +359,24 @@ async def outdated_report(
     the reporting user's own inbox, so a fabricated report harms nobody else.
     That stops being true the moment these rows feed anything shared — an
     aggregate, an admin view — and the trade must be revisited then.
+
+    Rate-limited because open items are never purged on age: without a cap, an
+    authenticated caller scripting fabricated reports could grow their own inbox
+    without bound, and table growth is shared even when the rows are not.
     """
     created = 0
     superseded = 0
 
+    # One notice per component, whichever harness reported it first. The same
+    # component installed in two harnesses arrives as two entries sharing one
+    # dedupe key; letting the second run through would rewrite the first's
+    # content every request and make the item look freshly updated forever.
+    seen_components: set[uuid.UUID] = set()
+
     for entry in req.items:
+        if entry.component_id in seen_components:
+            continue
+        seen_components.add(entry.component_id)
         subject = Subject(
             type=entry.type,
             id=entry.component_id,

@@ -54,9 +54,15 @@ def _app_with(user=None, db=None):
 
 
 def _empty_result():
-    """DB result that returns None for scalar_one_or_none (name not found)."""
+    """DB result that returns None for scalar_one_or_none (name not found).
+
+    scalars().all() answers empty too: creating an agent now notifies the
+    reviewers who own the pending queue, and a registry with no users has no
+    reviewers to notify.
+    """
     r = MagicMock()
     r.scalar_one_or_none.return_value = None
+    r.scalars.return_value.all.return_value = []
     return r
 
 
@@ -194,7 +200,10 @@ class TestBulkDedup:
         app, db, _ = _app_with()
 
         # First agent name exists, second does not
-        db.execute = AsyncMock(side_effect=[_exists_result(), _empty_result()])
+        # First name check hits, second misses; every later query (component
+        # resolution, inbox recipients) answers empty rather than exhausting.
+        script = iter([_exists_result(), _empty_result()])
+        db.execute = AsyncMock(side_effect=lambda *a, **k: next(script, _empty_result()))
 
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
             r = await ac.post(

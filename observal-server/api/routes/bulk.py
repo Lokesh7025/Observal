@@ -12,6 +12,7 @@ from models.agent import Agent, AgentStatus, AgentVersion
 from models.agent_component import AgentComponent
 from models.user import User, UserRole
 from schemas.bulk import BulkAgentItem, BulkAgentRequest, BulkResult, BulkResultItem
+from services.inbox import sources as inbox
 from services.registry_telemetry import emit_registry_event
 
 router = APIRouter(prefix="/api/v1/bulk", tags=["bulk"])
@@ -85,6 +86,17 @@ async def _create_single_agent(
                 config_override=comp.get("config_override"),
             )
         )
+
+    # Every bulk-created version lands in the review queue as pending, so the
+    # reviewers who own that queue are told — same as a one-at-a-time submit.
+    await inbox.on_publish(
+        db,
+        agent,
+        subject_type="agent",
+        actor_id=user.id,
+        auto_approved=False,
+        version=item.version,
+    )
 
     return agent
 

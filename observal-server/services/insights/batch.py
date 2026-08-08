@@ -20,6 +20,7 @@ from database import async_session
 from models.agent import Agent, AgentStatus, AgentVersion
 from models.insight_report import InsightReport, InsightReportStatus
 from services.clickhouse import _query
+from services.inbox import sources as inbox
 from services.insight_version_filters import agent_version_filter
 from services.redis import _get_arq_pool
 from services.secrets_redactor import redact_secrets
@@ -266,6 +267,13 @@ async def run_single_report(report_id: str) -> None:
             report.progress_percent = 100
             report.progress_message = "Report completed"
             report.progress_updated_at = report.completed_at
+
+            # Tell whoever asked for this report that it is ready, in the same
+            # transaction that marks it completed. Cron-triggered reports carry
+            # no requester (triggered_by is None) and deliver nothing — a weekly
+            # batch nobody asked for must not fill inboxes.
+            await inbox.on_insight_ready(db, report, agent_name=agent_name, requester_id=report.triggered_by)
+
             await db.commit()
 
             logger.info(

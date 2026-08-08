@@ -21,7 +21,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
 from models.inbox import InboxItem, InboxItemEvent, InboxKind, InboxState
-from services.inbox.registry import Subject, spec_for
+from services.inbox.registry import KindSpec, Subject, spec_for
 
 if TYPE_CHECKING:
     import uuid
@@ -106,7 +106,7 @@ async def deliver_one(
         if not _is_dedupe_collision(exc):
             optic.error("inbox delivery failed for user {} kind {}: {}", user_id, kind.value, exc)
             raise
-        return await _reopen_if_resolved(db, user_id=user_id, dedupe_key=item.dedupe_key, actor_id=actor_id)
+        return await _on_duplicate(db, fresh=item, spec=spec, actor_id=actor_id)
 
     record_event(db, item, "created", actor_id=actor_id)
     return item
@@ -126,23 +126,49 @@ def _is_dedupe_collision(exc: IntegrityError) -> bool:
     return "unique constraint failed" in text and "dedupe_key" in text
 
 
-async def _reopen_if_resolved(
+def _refresh_content(existing: InboxItem, fresh: InboxItem) -> bool:
+    """Bring a colliding item's presentation up to date with the redelivery.
+
+    The dedupe key names the fact, not its wording. A second rejection of the
+    same version carries a new reason, and a still-outdated install reports a
+    new current version; leaving the old text in place would show the recipient
+    a decision that is no longer the one on record.
+    """
+    changed = False
+    for attr in ("title", "body", "action_url", "action_command", "payload"):
+        new_value = getattr(fresh, attr)
+        if getattr(existing, attr) != new_value:
+            setattr(existing, attr, new_value)
+            changed = True
+    return changed
+
+
+async def _on_duplicate(
     db: AsyncSession,
     *,
-    user_id: uuid.UUID,
-    dedupe_key: str,
+    fresh: InboxItem,
+    spec: KindSpec,
     actor_id: uuid.UUID | None,
 ) -> InboxItem | None:
-    """Handle a redelivery of a fact whose item the recipient already closed.
+    """Handle a redelivery colliding with an item the recipient already holds.
 
-    Redelivering an OPEN item is a genuine no-op. But the same key can arrive
-    again after the recipient resolved it, and that is not a duplicate — it is
-    the fact becoming true a second time. Resubmitting the same version after a
-    rejection is the case that matters: the key is identical, the reviewer has
+    Redelivering an OPEN item is a no-op for delivery counts, but its content is
+    refreshed (and it goes unread again) when the redelivery says something new.
+
+    A key arriving again after the recipient RESOLVED their copy is not a
+    duplicate — it is the fact becoming true a second time. Resubmitting the
+    same version after a rejection is the case that matters: the reviewer has
     already marked their copy done, and without this nobody would be told the
     work is back. Reopening preserves the audit trail that a redelivery
     happened, which creating a second row could not.
+
+    Kinds with ``reopen_on_redelivery=False`` opt out of the resurrection:
+    ``update_available`` is re-reported by every ``observal outdated`` run for
+    as long as the user stays outdated, so the same still-true fact would
+    otherwise reopen a dismissed notice forever. A NEWER version is a new
+    dedupe key and a new item regardless of this flag.
     """
+    user_id, dedupe_key = fresh.user_id, fresh.dedupe_key
     existing = (
         await db.execute(select(InboxItem).where(InboxItem.user_id == user_id, InboxItem.dedupe_key == dedupe_key))
     ).scalar_one_or_none()
@@ -150,8 +176,19 @@ async def _reopen_if_resolved(
         # The colliding row is gone (purged, or another transaction removed it).
         # Nothing to reopen and nothing to report.
         return None
+
+    changed = _refresh_content(existing, fresh)
+
     if existing.state == InboxState.open:
+        if changed:
+            existing.read_at = None  # the new content has not been seen
+            record_event(db, existing, "updated", actor_id=actor_id, detail="Redelivered with updated details")
         optic.trace("inbox item already delivered for user {} key {}", user_id, dedupe_key)
+        return None
+
+    if not spec.reopen_on_redelivery:
+        # Content stays current so a manual reopen shows today's facts, but a
+        # resolved item resolved stays: no event, no unread, no resurrection.
         return None
 
     existing.state = InboxState.open
@@ -236,6 +273,47 @@ async def supersede(
         record_event(db, stale, "superseded", detail=f"Superseded by {keep.dedupe_key}")
         count += 1
     return count
+
+
+async def resolve_matching(
+    db: AsyncSession,
+    *,
+    kind: InboxKind,
+    dedupe_key: str,
+    detail: str,
+    actor_id: uuid.UUID | None = None,
+) -> int:
+    """Close EVERY recipient's open copy of one fact that stopped being true.
+
+    A review decision empties the queue for all of the reviewers it fanned out
+    to, not only the one who clicked. Leaving the other copies open would keep
+    ``action_required`` counting work that no longer exists and send a reviewer
+    into a queue that does not contain the thing their inbox promised.
+
+    This is the one deliberate exception to per-user scoping: the rows belong to
+    different users, but the state change is the system recording that the
+    underlying fact is gone, not one user acting on another's inbox. Items are
+    resolved with their own history entry, never deleted.
+    """
+    rows = (
+        (
+            await db.execute(
+                select(InboxItem).where(
+                    InboxItem.kind == kind,
+                    InboxItem.dedupe_key == dedupe_key,
+                    InboxItem.state == InboxState.open,
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    now = datetime.now(UTC)
+    for item in rows:
+        item.state = InboxState.done
+        item.resolved_at = now
+        record_event(db, item, "done", actor_id=actor_id, detail=detail)
+    return len(rows)
 
 
 def mark_read(db: AsyncSession, item: InboxItem, *, actor_id: uuid.UUID | None = None) -> bool:

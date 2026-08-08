@@ -108,6 +108,22 @@ def _result_with(obj):
     return r
 
 
+def _script(*values):
+    """Scripted execute() results, then empty results indefinitely.
+
+    Same rationale as in test_review_queue.py: a fixed-length ``side_effect``
+    list turns every new query an endpoint acquires — inbox delivery resolving
+    recipients, a decision clearing other reviewers' request items — into a
+    StopIteration in a test that is not about the inbox at all.
+    """
+    remaining = iter(values)
+
+    def _next(*_args, **_kwargs):
+        return next(remaining, _empty_result())
+
+    return _next
+
+
 # ═══════════════════════════════════════════════════════════
 # approve_agent (POST /api/v1/review/agents/{id}/approve)
 # ═══════════════════════════════════════════════════════════
@@ -124,7 +140,7 @@ class TestAgentApprove:
         agent = _agent_mock(status=AgentStatus.pending, components=[])
 
         # 1st execute: select Agent; 2nd: select pending AgentVersion
-        db.execute = AsyncMock(side_effect=[_result_with(agent), _result_with(pending_ver)])
+        db.execute = AsyncMock(side_effect=_script(_result_with(agent), _result_with(pending_ver)))
 
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
             r = await ac.post(f"/api/v1/review/agents/{agent.id}/approve")
@@ -157,7 +173,7 @@ class TestAgentApprove:
         component_result.all.return_value = [blocking_row]
 
         # 1st: select Agent; 2nd: select pending AgentVersion; 3rd: component check
-        db.execute = AsyncMock(side_effect=[_result_with(agent), _result_with(pending_ver), component_result])
+        db.execute = AsyncMock(side_effect=_script(_result_with(agent), _result_with(pending_ver), component_result))
 
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
             r = await ac.post(f"/api/v1/review/agents/{agent.id}/approve")
@@ -171,7 +187,7 @@ class TestAgentApprove:
         pending_ver = _version_mock(status=AgentStatus.pending, version="1.0.0", components=[])
         agent = _agent_mock(status=AgentStatus.pending, name="my-agent", components=[])
 
-        db.execute = AsyncMock(side_effect=[_result_with(agent), _result_with(pending_ver)])
+        db.execute = AsyncMock(side_effect=_script(_result_with(agent), _result_with(pending_ver)))
 
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
             r = await ac.post(f"/api/v1/review/agents/{agent.id}/approve")
@@ -198,7 +214,7 @@ class TestAgentReject:
         agent = _agent_mock(status=AgentStatus.pending)
 
         # 1st: select Agent; 2nd: select pending AgentVersion
-        db.execute = AsyncMock(side_effect=[_result_with(agent), _result_with(pending_ver)])
+        db.execute = AsyncMock(side_effect=_script(_result_with(agent), _result_with(pending_ver)))
 
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
             r = await ac.post(
@@ -219,7 +235,7 @@ class TestAgentReject:
         pending_ver = _version_mock(status=AgentStatus.pending)
         agent = _agent_mock(status=AgentStatus.approved)
 
-        db.execute = AsyncMock(side_effect=[_result_with(agent), _result_with(pending_ver)])
+        db.execute = AsyncMock(side_effect=_script(_result_with(agent), _result_with(pending_ver)))
 
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
             r = await ac.post(
@@ -237,7 +253,7 @@ class TestAgentReject:
         agent = _agent_mock(status=AgentStatus.draft)
 
         # 1st: select Agent; 2nd: select pending AgentVersion -> None
-        db.execute = AsyncMock(side_effect=[_result_with(agent), _result_with(None)])
+        db.execute = AsyncMock(side_effect=_script(_result_with(agent), _result_with(None)))
 
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
             r = await ac.post(

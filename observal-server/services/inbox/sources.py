@@ -23,8 +23,8 @@ from loguru import logger as optic
 
 from models.inbox import InboxKind
 from services.inbox import recipients
-from services.inbox.delivery import deliver
-from services.inbox.registry import Subject
+from services.inbox.delivery import deliver, resolve_matching
+from services.inbox.registry import Subject, spec_for
 
 if TYPE_CHECKING:
     import uuid
@@ -155,6 +155,22 @@ async def on_review_decided(
         body=reason,
         context={"reason": reason} if reason else None,
     )
+
+    # The decision empties the queue for EVERY reviewer it fanned out to, not
+    # only the one who acted. Their still-open review_requested copies would
+    # otherwise keep counting as outstanding work and link to a queue that no
+    # longer holds the submission. The request items share one deterministic
+    # dedupe key per (subject, version), which is what makes them findable here.
+    request_key = spec_for(InboxKind.review_requested).dedupe(subject, {})[:255]
+    cleared = await resolve_matching(
+        db,
+        kind=InboxKind.review_requested,
+        dedupe_key=request_key,
+        detail=f"Review {'approved' if approved else 'rejected'}",
+        actor_id=actor_id,
+    )
+    if cleared:
+        optic.debug("inbox: cleared {} open review_requested item(s) for key {}", cleared, request_key)
     optic.debug(
         "inbox: review_{} for {} {} -> {} item(s)",
         "approved" if approved else "rejected",
@@ -206,7 +222,14 @@ async def on_system_notice(
     body: str | None = None,
     context: dict[str, Any] | None = None,
 ) -> int:
-    """An admin/system event worth an operator's attention."""
+    """An admin/system event worth an operator's attention.
+
+    Deliberately not wired to anything yet. The operational events that might
+    warrant one (migration failures, retention anomalies) already page through
+    the alerting path in ``services/alert_evaluator.py``, and duplicating pages
+    into the inbox is a decision to make per event, not a default. The helper
+    exists so the first such event does not invent its own delivery.
+    """
     users = await recipients.admins(db)
     ctx: dict[str, Any] = {"title": title, "notice_id": notice_id}
     if context:

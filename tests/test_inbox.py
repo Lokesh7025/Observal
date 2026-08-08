@@ -245,6 +245,158 @@ async def test_redelivery_reopens_a_resolved_item(sessions):
 
 
 @pytest.mark.asyncio
+async def test_dismissed_update_notice_stays_dismissed_on_redelivery(sessions):
+    """``observal outdated`` re-reports the same fact on every run.
+
+    A dismissed update notice must stay dismissed for as long as the version it
+    names is still the latest — otherwise dismissal means nothing for a
+    recurring check. A NEWER version is a new dedupe key and a new item, so it
+    still gets through.
+    """
+    async with sessions() as db:
+        user = await _user(db)
+        component_id = uuid.uuid4()
+        context = {"current_version": "1.0.0"}
+
+        item = await delivery.deliver_one(
+            db,
+            kind=InboxKind.update_available,
+            user_id=user.id,
+            subject=_subject(id=component_id, version="2.0.0"),
+            context=context,
+        )
+        delivery.resolve(db, item, state=InboxState.dismissed, actor_id=user.id)
+        await db.commit()
+
+        again = await delivery.deliver_one(
+            db,
+            kind=InboxKind.update_available,
+            user_id=user.id,
+            subject=_subject(id=component_id, version="2.0.0"),
+            context=context,
+        )
+        await db.commit()
+
+        assert again is None
+        assert item.state == InboxState.dismissed, "a recurring report resurrected a dismissed notice"
+
+        newer = await delivery.deliver_one(
+            db,
+            kind=InboxKind.update_available,
+            user_id=user.id,
+            subject=_subject(id=component_id, version="3.0.0"),
+            context=context,
+        )
+        await db.commit()
+        assert newer is not None and newer.state == InboxState.open
+
+
+@pytest.mark.asyncio
+async def test_open_item_content_refreshes_on_redelivery(sessions):
+    """The dedupe key names the fact, not its wording.
+
+    A second rejection of the same version carries a new reason. The recipient
+    must see the decision currently on record, and the new text is unseen, so
+    the item goes unread again with an ``updated`` history entry.
+    """
+    async with sessions() as db:
+        user = await _user(db)
+        subject = _subject()
+
+        item = await delivery.deliver_one(
+            db, kind=InboxKind.review_rejected, user_id=user.id, subject=subject, body="reason A"
+        )
+        delivery.mark_read(db, item)
+        await db.commit()
+
+        again = await delivery.deliver_one(
+            db, kind=InboxKind.review_rejected, user_id=user.id, subject=subject, body="reason B"
+        )
+        await db.commit()
+
+        assert again is None, "still not a new delivery"
+        assert item.body == "reason B"
+        assert item.read_at is None, "unseen content must read as unseen"
+        rows = (await db.execute(select(InboxItem).where(InboxItem.user_id == user.id))).scalars().all()
+        assert len(rows) == 1
+        events = (await db.execute(select(InboxItemEvent).where(InboxItemEvent.item_id == item.id))).scalars().all()
+        assert "updated" in {e.event for e in events}
+
+        # Same content again: no event churn, no unread flapping.
+        delivery.mark_read(db, item)
+        await db.commit()
+        await delivery.deliver_one(
+            db, kind=InboxKind.review_rejected, user_id=user.id, subject=subject, body="reason B"
+        )
+        await db.commit()
+        assert item.read_at is not None
+
+
+@pytest.mark.asyncio
+async def test_decision_clears_every_reviewers_request_item(sessions):
+    """One reviewer's decision resolves the other reviewers' copies too.
+
+    Their open ``review_requested`` items would otherwise keep counting as
+    outstanding work and link to a queue that no longer holds the submission.
+    """
+    from services.inbox import sources
+
+    async with sessions() as db:
+        deciding = await _user(db, UserRole.reviewer)
+        other = await _user(db, UserRole.reviewer)
+        admin = await _user(db, UserRole.admin)
+        submitter = await _user(db)
+
+        class _Entity:
+            id = uuid.uuid4()
+            name = "demo-server"
+            namespace = None
+            slug = None
+            team_id = None
+            is_private = False
+            versions = []
+            latest_version = None
+
+        entity = _Entity()
+        delivered = await sources.on_review_requested(
+            db, entity, subject_type="mcp", actor_id=submitter.id, version="1.0.0"
+        )
+        await db.commit()
+        assert delivered == 3
+
+        await sources.on_review_decided(
+            db,
+            entity,
+            subject_type="mcp",
+            approved=True,
+            actor_id=deciding.id,
+            version="1.0.0",
+            submitter_id=submitter.id,
+        )
+        await db.commit()
+
+        for reviewer in (deciding, other, admin):
+            row = (
+                await db.execute(
+                    select(InboxItem).where(
+                        InboxItem.user_id == reviewer.id, InboxItem.kind == InboxKind.review_requested
+                    )
+                )
+            ).scalar_one()
+            assert row.state == InboxState.done, f"{reviewer.email} still holds open work that no longer exists"
+            events = (await db.execute(select(InboxItemEvent).where(InboxItemEvent.item_id == row.id))).scalars().all()
+            assert "done" in {e.event for e in events}
+
+        # The submitter heard the outcome.
+        approval = (
+            await db.execute(
+                select(InboxItem).where(InboxItem.user_id == submitter.id, InboxItem.kind == InboxKind.review_approved)
+            )
+        ).scalar_one()
+        assert approval.state == InboxState.open
+
+
+@pytest.mark.asyncio
 async def test_redelivering_an_open_item_stays_a_no_op(sessions):
     async with sessions() as db:
         user = await _user(db)

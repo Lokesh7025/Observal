@@ -41,6 +41,7 @@ from models.mcp import ListingStatus
 from models.prompt import PromptListing, PromptVersion
 from models.skill import SkillListing, SkillVersion
 from models.user import User
+from services.inbox import sources as inbox
 from services.registry_namespace import slugify
 from services.registry_recommender import (
     ALL_COMPONENT_TYPES,
@@ -243,6 +244,7 @@ async def apply_insight_suggestions(
                 feature=feature,
                 submitter_id=submitter_id,
                 db=db,
+                actor_id=triggered_by,
             )
             if skill_info:
                 skill_info["confidence"] = feature.get("confidence")
@@ -256,6 +258,7 @@ async def apply_insight_suggestions(
                 feature=feature,
                 submitter_id=submitter_id,
                 db=db,
+                actor_id=triggered_by,
             )
             if hook_info:
                 hook_info["confidence"] = feature.get("confidence")
@@ -278,6 +281,7 @@ async def apply_insight_suggestions(
                 pattern=pattern,
                 submitter_id=submitter_id,
                 db=db,
+                actor_id=triggered_by,
             )
             if prompt_info:
                 applied["prompts"].append(prompt_info)
@@ -315,6 +319,7 @@ async def apply_insight_suggestions(
             new_components=new_components,
             linked_existing=linked_existing,
             removed_component_ids=removed_component_ids,
+            actor_id=triggered_by,
         )
         if version_info:
             applied["agent_version"] = version_info
@@ -442,6 +447,7 @@ async def _create_agent_version_with_additions(
     new_components: list[_NewComponent] | None = None,
     linked_existing: list[ResolvedComponent] | None = None,
     removed_component_ids: list[uuid.UUID] | None = None,
+    actor_id: uuid.UUID | None = None,
 ) -> dict | None:
     """Create a new pending AgentVersion with config_additions appended to the prompt.
 
@@ -605,6 +611,10 @@ async def _create_agent_version_with_additions(
 
     await db.flush()
     await _refresh_capability_inference(new_version, db)
+
+    # A pending self-learned version sits in the same queue as a hand-released
+    # one; the reviewers who will clear it are told the same way.
+    await inbox.on_review_requested(db, agent, subject_type="agent", actor_id=actor_id, version=new_ver)
 
     return {
         "id": str(new_version.id),
@@ -899,6 +909,7 @@ async def _create_skill_listing(
     feature: dict,
     submitter_id: uuid.UUID,
     db: AsyncSession,
+    actor_id: uuid.UUID | None = None,
 ) -> dict | None:
     """Create a pending SkillListing from a features_to_try suggestion.
 
@@ -983,6 +994,10 @@ async def _create_skill_listing(
 
     listing.latest_version_id = version.id
 
+    # Self-learned components enter the same review queue as hand-submitted
+    # ones, so the reviewers who own that queue hear about them the same way.
+    await inbox.on_review_requested(db, listing, subject_type="skill", actor_id=actor_id, version=version.version)
+
     return {
         "id": str(listing.id),
         "name": name,
@@ -1018,6 +1033,7 @@ async def _create_hook_listing(
     feature: dict,
     submitter_id: uuid.UUID,
     db: AsyncSession,
+    actor_id: uuid.UUID | None = None,
 ) -> dict | None:
     """Create a pending HookListing from a features_to_try suggestion.
 
@@ -1114,6 +1130,9 @@ async def _create_hook_listing(
     await db.flush()
 
     listing.latest_version_id = version.id
+
+    # Same review queue as a hand-submitted hook, so the same notification.
+    await inbox.on_review_requested(db, listing, subject_type="hook", actor_id=actor_id, version=version.version)
 
     return {
         "id": str(listing.id),
@@ -1219,6 +1238,7 @@ async def _create_prompt_listing(
     pattern: dict,
     submitter_id: uuid.UUID,
     db: AsyncSession,
+    actor_id: uuid.UUID | None = None,
 ) -> dict | None:
     """Create a pending PromptListing from a usage_patterns suggestion.
 
@@ -1290,6 +1310,9 @@ async def _create_prompt_listing(
     await db.flush()
 
     listing.latest_version_id = version.id
+
+    # Same review queue as a hand-submitted prompt, so the same notification.
+    await inbox.on_review_requested(db, listing, subject_type="prompt", actor_id=actor_id, version=version.version)
 
     return {
         "id": str(listing.id),

@@ -106,6 +106,22 @@ def _result_with_listings(*listings):
     return r
 
 
+def _script(*values):
+    """Scripted execute() results, then empty results indefinitely.
+
+    Same rationale as in test_review_queue.py: a fixed-length ``side_effect``
+    list makes these tests brittle to the endpoint acquiring a new query —
+    inbox delivery resolving recipients or clearing other reviewers' request
+    items — turning it into a StopIteration in a test about bundles.
+    """
+    remaining = iter(values)
+
+    def _next(*_args, **_kwargs):
+        return next(remaining, _empty_result())
+
+    return _next
+
+
 # ═══════════════════════════════════════════════════════════
 # approve_bundle (POST /api/v1/review/bundles/{id}/approve)
 # ═══════════════════════════════════════════════════════════
@@ -123,16 +139,13 @@ class TestBundleApprove:
         listing_b = _listing_mock(bundle_id=bundle.id, name="listing-b")
 
         # First call: select bundle by id -> bundle found
-        # Next 5 calls: one per listing model type -> only first returns listings
+        # Second: first listing model type returns the listings; every later
+        # query (other listing models, inbox recipients) answers empty.
         db.execute = AsyncMock(
-            side_effect=[
+            side_effect=_script(
                 _result_with_one(bundle),
                 _result_with_listings(listing_a, listing_b),
-                _empty_result(),
-                _empty_result(),
-                _empty_result(),
-                _empty_result(),
-            ]
+            )
         )
 
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
@@ -152,16 +165,7 @@ class TestBundleApprove:
         app, db, _ = _app_with()
         bundle = _bundle_mock()
 
-        db.execute = AsyncMock(
-            side_effect=[
-                _result_with_one(bundle),
-                _empty_result(),
-                _empty_result(),
-                _empty_result(),
-                _empty_result(),
-                _empty_result(),
-            ]
-        )
+        db.execute = AsyncMock(side_effect=_script(_result_with_one(bundle)))
 
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
             r = await ac.post(f"/api/v1/review/bundles/{bundle.id}/approve")
@@ -187,14 +191,10 @@ class TestBundleReject:
         listing_b = _listing_mock(bundle_id=bundle.id, name="listing-b")
 
         db.execute = AsyncMock(
-            side_effect=[
+            side_effect=_script(
                 _result_with_one(bundle),
                 _result_with_listings(listing_a, listing_b),
-                _empty_result(),
-                _empty_result(),
-                _empty_result(),
-                _empty_result(),
-            ]
+            )
         )
 
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
@@ -220,14 +220,10 @@ class TestBundleReject:
         listing = _listing_mock(bundle_id=bundle.id)
 
         db.execute = AsyncMock(
-            side_effect=[
+            side_effect=_script(
                 _result_with_one(bundle),
                 _result_with_listings(listing),
-                _empty_result(),
-                _empty_result(),
-                _empty_result(),
-                _empty_result(),
-            ]
+            )
         )
 
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:

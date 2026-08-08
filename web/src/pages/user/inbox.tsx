@@ -289,16 +289,24 @@ function DetailPane({ itemId }: { itemId: string | null }) {
 export default function InboxPage() {
 	const [rail, setRail] = useState<RailKey>("all");
 	const [selected, setSelected] = useState<string | null>(null);
+	const [page, setPage] = useState(1);
 
-	const filters = useMemo(
+	const railFilters = useMemo(
 		() => RAIL.find((r) => r.key === rail)?.filters ?? {},
 		[rail],
 	);
+	const filters = useMemo(() => ({ ...railFilters, page }), [railFilters, page]);
 	const { data, isLoading } = useInbox(filters);
 	const { data: counts } = useInboxCounts();
 	const readAll = useReadAll();
 
 	const items = data?.items ?? [];
+	// Trust the server's page size, not a copy of its default: the numbers
+	// below must describe the response they annotate.
+	const total = data?.total ?? 0;
+	const pageSize = data?.page_size ?? 25;
+	const firstRow = (page - 1) * pageSize + 1;
+	const lastRow = (page - 1) * pageSize + items.length;
 
 	return (
 		<DashboardShell>
@@ -319,7 +327,12 @@ export default function InboxPage() {
 									<button
 										key={entry.key}
 										type="button"
-										onClick={() => setRail(entry.key)}
+										onClick={() => {
+											setRail(entry.key);
+											// A new filter is a new result set; page 3 of the
+											// old one would render an empty list.
+											setPage(1);
+										}}
 										className={cn(
 											"flex shrink-0 items-center justify-between gap-2 rounded-md px-3 py-1.5 text-sm transition-colors md:shrink",
 											rail === entry.key
@@ -343,7 +356,7 @@ export default function InboxPage() {
 								variant="ghost"
 								className="w-full justify-start text-xs"
 								disabled={readAll.isPending || items.length === 0}
-								onClick={() => readAll.mutate(filters)}
+								onClick={() => readAll.mutate(railFilters)}
 							>
 								<CheckCheck className="mr-1.5 h-3.5 w-3.5" />
 								Mark these read
@@ -352,31 +365,62 @@ export default function InboxPage() {
 					</aside>
 
 					{/* List */}
-					<div className="min-h-0 flex-1 overflow-y-auto border-b md:max-w-md md:border-b-0 md:border-r">
-						{isLoading ? (
-							<div className="flex items-center justify-center p-8">
-								<Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+					<div className="flex min-h-0 flex-1 flex-col border-b md:max-w-md md:border-b-0 md:border-r">
+						<div className="min-h-0 flex-1 overflow-y-auto">
+							{isLoading ? (
+								<div className="flex items-center justify-center p-8">
+									<Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+								</div>
+							) : items.length === 0 ? (
+								<Card className="m-3 border-dashed shadow-none">
+									<CardContent className="flex flex-col items-center gap-2 p-6 text-center">
+										<InboxIcon className="h-6 w-6 text-muted-foreground" />
+										<p className="text-sm font-medium">Nothing here</p>
+										<p className="text-xs text-muted-foreground">
+											Review assignments, decisions on your submissions, and
+											update notices show up here.
+										</p>
+									</CardContent>
+								</Card>
+							) : (
+								items.map((item) => (
+									<ItemRow
+										key={item.id}
+										item={item}
+										selected={selected === item.id}
+										onSelect={() => setSelected(item.id)}
+									/>
+								))
+							)}
+						</div>
+						{/* Without this, anything past the first page simply does not
+						    exist as far as the web UI is concerned. */}
+						{total > pageSize && (
+							<div className="flex shrink-0 items-center justify-between border-t px-3 py-1.5">
+								<span className="text-xs text-muted-foreground">
+									{items.length > 0 ? `${firstRow}–${lastRow} of ${total}` : `0 of ${total}`}
+								</span>
+								<div className="flex gap-1">
+									<Button
+										size="sm"
+										variant="ghost"
+										className="h-7 px-2 text-xs"
+										disabled={page === 1 || isLoading}
+										onClick={() => setPage((p) => Math.max(1, p - 1))}
+									>
+										Previous
+									</Button>
+									<Button
+										size="sm"
+										variant="ghost"
+										className="h-7 px-2 text-xs"
+										disabled={lastRow >= total || isLoading}
+										onClick={() => setPage((p) => p + 1)}
+									>
+										Next
+									</Button>
+								</div>
 							</div>
-						) : items.length === 0 ? (
-							<Card className="m-3 border-dashed shadow-none">
-								<CardContent className="flex flex-col items-center gap-2 p-6 text-center">
-									<InboxIcon className="h-6 w-6 text-muted-foreground" />
-									<p className="text-sm font-medium">Nothing here</p>
-									<p className="text-xs text-muted-foreground">
-										Review assignments, decisions on your submissions, and update
-										notices show up here.
-									</p>
-								</CardContent>
-							</Card>
-						) : (
-							items.map((item) => (
-								<ItemRow
-									key={item.id}
-									item={item}
-									selected={selected === item.id}
-									onSelect={() => setSelected(item.id)}
-								/>
-							))
 						)}
 					</div>
 

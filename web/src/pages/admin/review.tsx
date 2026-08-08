@@ -6,7 +6,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 
-import { useState, useCallback, useMemo } from "react";
+import { useState, useCallback, useEffect, useMemo } from "react";
 import { CheckCircle2, LayoutGrid, TableProperties, Eye } from "lucide-react";
 import { useQueryClient } from "@tanstack/react-query";
 import { useSearch } from "@tanstack/react-router";
@@ -253,6 +253,12 @@ export default function ReviewPage() {
   // names. Absent, the queue opens on agents as before.
   const { tab: tabFromUrl } = useSearch({ from: "/_authed/_admin/review" });
   const [activeTab, setActiveTab] = useState<string>(tabFromUrl ?? "agents");
+  // useState only reads the initial value, so a ?tab= change while this page
+  // is already mounted (an inbox link clicked from the sidebar) must be
+  // applied explicitly or the link silently does nothing.
+  useEffect(() => {
+    if (tabFromUrl) setActiveTab(tabFromUrl);
+  }, [tabFromUrl]);
   const [selectedItem, setSelectedItem] = useState<ReviewItem | null>(null);
   const [diffItem, setDiffItem] = useState<ReviewItem | null>(null);
   const [nestedDiffItem, setNestedDiffItem] = useState<ReviewItem | null>(null);

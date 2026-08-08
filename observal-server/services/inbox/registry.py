@@ -147,6 +147,13 @@ class KindSpec:
     # what happened to something they wrote, which is theirs to know regardless
     # of where the listing ended up.
     recheck_visibility: bool = True
+    # Whether a redelivery of the same dedupe key resurrects a copy the
+    # recipient already resolved. True fits one-shot facts that can become true
+    # again (a resubmitted version re-entering review). False fits recurring
+    # reports of a fact that never stopped being true: ``update_available``
+    # arrives on every ``observal outdated`` run, and reopening a dismissed
+    # notice each time would make dismissal meaningless.
+    reopen_on_redelivery: bool = True
     subject_label: Callable[[Subject], str] = field(default=lambda s: s.name or s.type)
 
 
@@ -230,6 +237,9 @@ SPECS: dict[InboxKind, KindSpec] = {
         # Reported by the CLI about what the reporting user has installed, so
         # there is no team subject to re-check.
         recheck_visibility=False,
+        # Re-reported on every run while the user stays outdated; a dismissed
+        # notice must stay dismissed. A newer version is a new key anyway.
+        reopen_on_redelivery=False,
     ),
     InboxKind.insight_ready: KindSpec(
         kind=InboxKind.insight_ready,

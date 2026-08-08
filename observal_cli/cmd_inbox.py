@@ -58,15 +58,19 @@ def _validate(value: str | None, allowed: tuple[str, ...], label: str) -> str | 
     return normalized
 
 
-def _filter_params(
+def _filters(
     state: str | None,
     kind: str | None,
     action_required: bool,
-    unread: bool,
-    page: int = 1,
-    page_size: int = 25,
+    unread: bool = False,
 ) -> dict[str, object]:
-    params: dict[str, object] = {"page": page, "page_size": page_size}
+    """Only the filters the user actually passed — no paging defaults.
+
+    read-all builds its confirmation prompt from this dict, so implicit
+    ``page``/``page_size`` entries would make an unfiltered run read as
+    page-bounded when the server marks everything matching the filter.
+    """
+    params: dict[str, object] = {}
     if state:
         params["state"] = _validate(state, _STATES, "state")
     if kind:
@@ -75,6 +79,19 @@ def _filter_params(
         params["action_required"] = True
     if unread:
         params["unread"] = True
+    return params
+
+
+def _filter_params(
+    state: str | None,
+    kind: str | None,
+    action_required: bool,
+    unread: bool,
+    page: int = 1,
+    page_size: int = 25,
+) -> dict[str, object]:
+    params = _filters(state, kind, action_required, unread)
+    params.update({"page": page, "page_size": page_size})
     return params
 
 
@@ -315,7 +332,7 @@ def inbox_read_all(
 
         observal inbox read-all --yes
     """
-    params = _filter_params(state, kind, action_required, unread=False)
+    params = _filters(state, kind, action_required)
     if not yes:
         scope = ", ".join(f"{k}={v}" for k, v in params.items()) or "ALL unread items"
         typer.confirm(f"Mark as read: {scope}?", abort=True)

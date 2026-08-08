@@ -15,6 +15,7 @@ from services.inbox.delivery import (
     mark_unread,
     record_event,
     resolve,
+    resolve_matching,
     supersede,
 )
 from services.inbox.registry import SPECS, KindSpec, Subject, spec_for
@@ -31,6 +32,7 @@ __all__ = [
     "mark_unread",
     "record_event",
     "resolve",
+    "resolve_matching",
     "spec_for",
     "supersede",
     "visible_to",

@@ -27,6 +27,18 @@ def _review_db():
     nested.__aenter__ = AsyncMock(return_value=None)
     nested.__aexit__ = AsyncMock(return_value=False)
     db.begin_nested = MagicMock(return_value=nested)
+
+    # Every query answers empty rather than a bare AsyncMock: delivery reads
+    # rows (recipients, sibling request items) with .scalars().all(), and an
+    # AsyncMock result turns that chain into a coroutine with no .all(). These
+    # tests assert on the decision itself, so empty is the truthful answer.
+    def _empty_result(*_args, **_kwargs):
+        result = MagicMock()
+        result.scalars.return_value.all.return_value = []
+        result.scalar_one_or_none.return_value = None
+        return result
+
+    db.execute = AsyncMock(side_effect=_empty_result)
     return db
 
 

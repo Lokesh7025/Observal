@@ -626,7 +626,10 @@ class TestUnifiedReview:
 
         app, db, _ = _app_with(router)
         listing = _listing_mock(None, status=ListingStatus.pending)
-        db.execute = AsyncMock(side_effect=[_scalar_result(listing)] + [_scalar_result(None) for _ in range(4)])
+        # First query finds the listing; everything after — including the inbox
+        # queries a decision now runs — answers empty rather than exhausting.
+        script = iter([_scalar_result(listing)])
+        db.execute = AsyncMock(side_effect=lambda *a, **k: next(script, _scalar_result(None)))
         db.refresh = AsyncMock(side_effect=lambda obj: None)
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
             r = await ac.post(f"/api/v1/review/{listing.id}/approve")
@@ -639,7 +642,8 @@ class TestUnifiedReview:
 
         app, db, _ = _app_with(router)
         listing = _listing_mock(None, status=ListingStatus.pending)
-        db.execute = AsyncMock(side_effect=[_scalar_result(listing)] + [_scalar_result(None) for _ in range(4)])
+        script = iter([_scalar_result(listing)])
+        db.execute = AsyncMock(side_effect=lambda *a, **k: next(script, _scalar_result(None)))
         db.refresh = AsyncMock(side_effect=lambda obj: None)
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
             r = await ac.post(f"/api/v1/review/{listing.id}/reject", json={"reason": "incomplete"})

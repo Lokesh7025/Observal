@@ -447,6 +447,20 @@ async def _review_agent_version(
         ver.reviewed_by = current_user.id
         ver.reviewed_at = datetime.now(UTC)
 
+    # Same fact as a decision made through api/routes/review.py: the version's
+    # author hears the outcome, and every reviewer's open request item for this
+    # version is cleared. Delivered before the commit, in this transaction.
+    await inbox.on_review_decided(
+        db,
+        agent,
+        subject_type="agent",
+        approved=req.action == "approve",
+        actor_id=current_user.id,
+        version=ver.version,
+        reason=req.reason if req.action != "approve" else None,
+        submitter_id=ver.released_by,
+    )
+
     await db.commit()
 
     return {
