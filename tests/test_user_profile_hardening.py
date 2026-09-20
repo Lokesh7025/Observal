@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import pytest
 
-from services.user_profile import _id_array, _mcp_server_name, _topics_for, users_with_recent_activity
+from services.user_profile import _id_list, _mcp_server_name, _topics_for, users_with_recent_activity
 
 # Each of these, if admitted, would change how ClickHouse parses the literal.
 HOSTILE_IDS = [
@@ -40,9 +40,7 @@ HOSTILE_IDS = [
 
 @pytest.mark.parametrize("hostile", HOSTILE_IDS)
 def test_hostile_session_ids_are_dropped(hostile):
-    literal = _id_array([hostile])
-
-    assert literal == "[]", f"{hostile!r} survived into the literal"
+    assert _id_list([hostile]) == [], f"{hostile!r} survived into the parameter list"
 
 
 def test_legitimate_ids_survive():
@@ -53,56 +51,31 @@ def test_legitimate_ids_survive():
         "a:b",
         "ABC-123",
     ]
-
-    literal = _id_array(ids)
-
-    for sid in ids:
-        assert f"'{sid}'" in literal
-    assert literal.startswith("[") and literal.endswith("]")
+    assert _id_list(ids) == ids
 
 
 def test_hostile_ids_do_not_contaminate_good_ones():
-    """One bad id must not break the literal for the rest."""
-    literal = _id_array(["good-1", "a\\", "good-2", "') OR 1=1 --"])
-
-    assert literal == "['good-1','good-2']"
-
-
-def test_literal_never_contains_escape_characters():
-    literal = _id_array(["a\\", "b'", "c" * 10])
-
-    assert "\\" not in literal
-    # Quotes appear only as the delimiters we emitted.
-    assert literal.count("'") % 2 == 0
+    """One bad id must not drop the rest."""
+    assert _id_list(["good-1", "a\\", "good-2", "') OR 1=1 --"]) == ["good-1", "good-2"]
 
 
 def test_sql_metacharacters_inside_the_charset_are_inert():
-    """`--` is admitted but harmless: it cannot escape the surrounding quotes.
-
-    Hyphens must stay legal (uuids contain them). Because the allowlist bars
-    quotes and backslashes, the value can never terminate its literal, so a
-    comment marker inside it is just two characters of a string.
-    """
-    literal = _id_array(["--comment"])
-
-    assert literal == "['--comment']"
-    assert "\\" not in literal
+    """`--` is admitted: ids are bound as a list parameter, never interpolated."""
+    assert _id_list(["--comment"]) == ["--comment"]
 
 
-def test_empty_input_yields_empty_array():
-    assert _id_array([]) == "[]"
+def test_empty_input_yields_empty_list():
+    assert _id_list([]) == []
 
 
 def test_none_entries_are_tolerated():
-    assert _id_array([None, "ok-1"]) == "['ok-1']"  # type: ignore[list-item]
+    assert _id_list([None, "ok-1"]) == ["ok-1"]  # type: ignore[list-item]
 
 
-def test_array_is_capped():
+def test_list_is_capped():
     from services.user_profile import MAX_ID_ARRAY
 
-    literal = _id_array([f"id-{i}" for i in range(MAX_ID_ARRAY + 50)])
-
-    assert literal.count("','") == MAX_ID_ARRAY - 1
+    assert len(_id_list([f"id-{i}" for i in range(MAX_ID_ARRAY + 50)])) == MAX_ID_ARRAY
 
 
 # ── profile helpers under hostile input ───────────────────────────────────
@@ -125,33 +98,20 @@ def test_topics_tolerate_junk():
 # ── Active-user lookup (drives the nightly sweep's scope) ──────────────────
 
 
-class _FakeResponse:
-    def __init__(self, payload: dict):
-        self._payload = payload
-
-    def raise_for_status(self) -> None:
-        return None
-
-    def json(self) -> dict:
-        return self._payload
-
-
 @pytest.mark.asyncio
 async def test_active_users_returns_project_user_pairs(monkeypatch):
-    rows = {
-        "data": [
-            {"project_id": "org-a", "user_id": "u1"},
-            {"project_id": "org-a", "user_id": "u2"},
-            {"project_id": "default", "user_id": "u3"},
-        ]
-    }
+    rows = [
+        {"project_id": "org-a", "user_id": "u1"},
+        {"project_id": "org-a", "user_id": "u2"},
+        {"project_id": "default", "user_id": "u3"},
+    ]
 
-    async def fake_query(sql: str, params: dict):
+    async def fake_query(sql: str, params: dict, **_kwargs):
         assert "session_stats_agg" in sql
-        assert "param_since" in params
-        return _FakeResponse(rows)
+        assert "since" in params
+        return rows
 
-    monkeypatch.setattr("services.user_profile._query", fake_query)
+    monkeypatch.setattr("services.telemetry.client.query", fake_query)
 
     active = await users_with_recent_activity()
 
@@ -167,19 +127,21 @@ async def test_active_users_returns_none_when_lookup_fails(monkeypatch):
     degrade the job, not silently switch it off.
     """
 
-    async def boom(sql: str, params: dict):
-        raise RuntimeError("clickhouse unreachable")
+    from services.telemetry import TelemetryUnavailableError
 
-    monkeypatch.setattr("services.user_profile._query", boom)
+    async def boom(sql: str, params: dict, **_kwargs):
+        raise TelemetryUnavailableError("telemetry unreachable")
+
+    monkeypatch.setattr("services.telemetry.client.query", boom)
 
     assert await users_with_recent_activity() is None
 
 
 @pytest.mark.asyncio
 async def test_active_users_empty_result_is_an_empty_set(monkeypatch):
-    async def fake_query(sql: str, params: dict):
-        return _FakeResponse({"data": []})
+    async def fake_query(sql: str, params: dict, **_kwargs):
+        return []
 
-    monkeypatch.setattr("services.user_profile._query", fake_query)
+    monkeypatch.setattr("services.telemetry.client.query", fake_query)
 
     assert await users_with_recent_activity() == set()

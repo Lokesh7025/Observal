@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -56,6 +57,17 @@ def assert_read_only(sql: str) -> None:
             raise QueryRejectedError(f"'{token.strip()}' is not allowed on the query endpoint")
 
 
+_PARAM_RE = re.compile(r"\$([A-Za-z_][A-Za-z0-9_]*)")
+
+
+def prune_params(sql: str, params: dict[str, Any]) -> dict[str, Any]:
+    """Drop parameters the statement never references; DuckDB rejects extras."""
+    if not params:
+        return {}
+    used = set(_PARAM_RE.findall(sql))
+    return {k: v for k, v in params.items() if k in used}
+
+
 class Reader:
     def __init__(
         self,
@@ -84,6 +96,7 @@ class Reader:
     def _execute(self, sql: str, params: dict[str, Any], cursor_box: dict[str, Any]) -> tuple[list[str], list[tuple]]:
         cursor = self._conn.cursor()
         cursor_box["cursor"] = cursor
+        params = prune_params(sql, params)
         try:
             cursor.execute(sql, params or None)
             columns = [d[0] for d in cursor.description] if cursor.description else []

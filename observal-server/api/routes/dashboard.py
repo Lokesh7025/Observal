@@ -95,11 +95,11 @@ async def overview_stats(
     total_users_coro = db.scalar(select(func.count(User.id)))
     tool_rows_coro = _telemetry_rows(
         "SELECT sum(tool_call_count) as cnt FROM session_stats_agg WHERE last_event_time > now()::TIMESTAMP - to_days($days)",
-        {"days": str(days)},
+        {"days": int(days)},
     )
     agent_rows_coro = _telemetry_rows(
         "SELECT count(*) as cnt FROM session_stats_agg WHERE last_event_time > now()::TIMESTAMP - to_days($days)",
-        {"days": str(days)},
+        {"days": int(days)},
     )
 
     total_mcps, total_agents, total_users, tool_rows, agent_rows = await asyncio.gather(

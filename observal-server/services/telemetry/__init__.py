@@ -48,7 +48,13 @@ from services.telemetry.writes import (
     insert_webhook_deliveries,
 )
 
-tq = query
+
+async def tq(sql: str, params: dict | None = None, *, timeout_ms: int | None = None) -> list[dict]:
+    """Read-only query returning rows. Delegates at call time so tests can patch ``client.query``."""
+    from services.telemetry import client as _client
+
+    return await _client.query(sql, params, timeout_ms=timeout_ms)
+
 
 __all__ = [
     "FAR_FUTURE",

@@ -230,14 +230,10 @@ class TestAuditLogEndpoint:
             "user_agent": "",
             "detail": "{}",
         }
-        fake_resp = MagicMock()
-        fake_resp.status_code = 200
-        fake_resp.text = json.dumps(fake_row)
-
-        mock_query = AsyncMock(return_value=fake_resp)
+        mock_query = AsyncMock(return_value=[fake_row])
         mock_user = MagicMock()
 
-        with patch("api.routes.audit_log._query", mock_query):
+        with patch("api.routes.audit_log.tq", mock_query):
             result = await list_audit_logs(
                 actor=None,
                 action=None,
@@ -254,18 +250,15 @@ class TestAuditLogEndpoint:
         assert result[0]["actor_email"] == "admin@example.com"
 
     @pytest.mark.asyncio
-    async def test_list_endpoint_handles_empty_response(self):
+    async def test_list_endpoint_surfaces_store_failures(self):
         from api.routes.audit_log import list_audit_logs
+        from services.telemetry import TelemetryUnavailableError
 
-        fake_resp = MagicMock()
-        fake_resp.status_code = 500
-        fake_resp.text = ""
-
-        mock_query = AsyncMock(return_value=fake_resp)
+        mock_query = AsyncMock(side_effect=TelemetryUnavailableError("down"))
         mock_user = MagicMock()
 
-        with patch("api.routes.audit_log._query", mock_query):
-            result = await list_audit_logs(
+        with patch("api.routes.audit_log.tq", mock_query), pytest.raises(TelemetryUnavailableError):
+            await list_audit_logs(
                 actor=None,
                 action=None,
                 resource_type=None,
@@ -275,8 +268,6 @@ class TestAuditLogEndpoint:
                 offset=0,
                 current_user=mock_user,
             )
-
-        assert result == []
 
     @pytest.mark.asyncio
     async def test_list_endpoint_with_filters(self):
@@ -299,14 +290,10 @@ class TestAuditLogEndpoint:
             "user_agent": "",
             "detail": "{}",
         }
-        fake_resp = MagicMock()
-        fake_resp.status_code = 200
-        fake_resp.text = json.dumps(fake_row)
-
-        mock_query = AsyncMock(return_value=fake_resp)
+        mock_query = AsyncMock(return_value=[fake_row])
         mock_user = MagicMock()
 
-        with patch("api.routes.audit_log._query", mock_query):
+        with patch("api.routes.audit_log.tq", mock_query):
             result = await list_audit_logs(
                 actor="admin@example.com",
                 action="user.created",
@@ -322,9 +309,10 @@ class TestAuditLogEndpoint:
         # Verify the SQL includes filter params
         sql_arg = mock_query.call_args[0][0]
         params_arg = mock_query.call_args[0][1]
-        assert "actor_email = {actor:String}" in sql_arg
-        assert "action = {action:String}" in sql_arg
-        assert "resource_type = {rtype:String}" in sql_arg
-        assert params_arg["param_actor"] == "admin@example.com"
-        assert params_arg["param_action"] == "user.created"
-        assert params_arg["param_rtype"] == "user"
+        assert "actor_email = $actor" in sql_arg
+        assert "action = $action" in sql_arg
+        assert "resource_type = $rtype" in sql_arg
+        assert params_arg["actor"] == "admin@example.com"
+        assert params_arg["action"] == "user.created"
+        assert params_arg["rtype"] == "user"
+        assert params_arg["lim"] == 50 and params_arg["off"] == 0

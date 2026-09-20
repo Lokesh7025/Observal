@@ -13,6 +13,7 @@ import time
 from typing import Any
 
 import httpx
+import orjson
 from loguru import logger as optic
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
@@ -130,7 +131,10 @@ def _raise_for(resp: httpx.Response, sql_preview: str = "") -> None:
 )
 async def _post(path: str, payload: dict[str, Any], *, timeout: float | None = None) -> httpx.Response:
     client = get_client()
-    return await client.post(path, json=payload, timeout=timeout)
+    # orjson with default=str keeps best-effort writers (audit, security events)
+    # from failing on UUIDs, datetimes, or other non-JSON scalars in row values.
+    body = orjson.dumps(payload, default=str)
+    return await client.post(path, content=body, headers={"Content-Type": "application/json"}, timeout=timeout)
 
 
 async def query(sql: str, params: dict[str, Any] | None = None, *, timeout_ms: int | None = None) -> list[dict]:

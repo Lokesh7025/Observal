@@ -218,8 +218,8 @@ def _sql(statement) -> str:
 @pytest.fixture
 def boundaries(monkeypatch):
     import services.agent_snapshot as snapshot
-    import services.clickhouse as clickhouse
     import services.model_resolver as model_resolver
+    import services.telemetry as telemetry
 
     load = AsyncMock()
     validate_components = AsyncMock(return_value=[])
@@ -232,7 +232,7 @@ def boundaries(monkeypatch):
     publish = AsyncMock(return_value=1)
     review = AsyncMock(return_value=1)
     legacy_audit = AsyncMock()
-    clickhouse_insert = AsyncMock()
+    telemetry_insert = AsyncMock()
     names = AsyncMock(return_value={})
     statuses = AsyncMock(return_value={})
 
@@ -248,7 +248,7 @@ def boundaries(monkeypatch):
     monkeypatch.setattr(model_resolver, "resolve_model_for_harness", resolve_model)
     monkeypatch.setattr(routes.inbox, "on_publish", publish)
     monkeypatch.setattr(routes.inbox, "on_review_decided", review)
-    monkeypatch.setattr(clickhouse, "insert_audit_log", clickhouse_insert)
+    monkeypatch.setattr(telemetry, "insert_audit_log", telemetry_insert)
     monkeypatch.setattr(agent_routes, "_resolve_component_names", names)
     monkeypatch.setattr(agent_routes, "_resolve_component_statuses", statuses)
 
@@ -264,7 +264,7 @@ def boundaries(monkeypatch):
         publish=publish,
         review=review,
         legacy_audit=legacy_audit,
-        clickhouse_insert=clickhouse_insert,
+        telemetry_insert=telemetry_insert,
         names=names,
         statuses=statuses,
     )
@@ -322,11 +322,11 @@ def test_summary_and_detail_serialize_version_owned_fields():
     assert routes._version_to_detail(version)["models_by_harness"] == {}
 
 
-async def test_legacy_audit_shim_is_a_noop_and_never_reaches_clickhouse(monkeypatch):
-    import services.clickhouse as clickhouse
+async def test_legacy_audit_shim_is_a_noop_and_never_reaches_telemetry(monkeypatch):
+    import services.telemetry as telemetry
 
     insert = AsyncMock()
-    monkeypatch.setattr(clickhouse, "insert_audit_log", insert)
+    monkeypatch.setattr(telemetry, "insert_audit_log", insert)
 
     assert await routes.audit(_user(), "agent.version.publish") is None
     insert.assert_not_awaited()
@@ -633,7 +633,7 @@ async def test_create_resolves_components_builds_snapshot_and_reports_conflicts(
     assert f"skill_listings.id IN ('{SKILL_ID.hex}')" in skill_sql
     assert f"mcp_listings.id IN ('{MCP_ID.hex}')" in mcp_sql
     boundaries.legacy_audit.assert_not_awaited()
-    boundaries.clickhouse_insert.assert_not_awaited()
+    boundaries.telemetry_insert.assert_not_awaited()
 
 
 async def test_create_draft_skips_queue_and_has_no_warning(boundaries):
@@ -689,7 +689,7 @@ async def test_create_commit_failure_propagates_without_audit(boundaries):
 
     boundaries.publish.assert_awaited_once()
     boundaries.legacy_audit.assert_not_awaited()
-    boundaries.clickhouse_insert.assert_not_awaited()
+    boundaries.telemetry_insert.assert_not_awaited()
 
 
 async def test_review_guards_missing_version_and_nonpending_state(boundaries):
@@ -862,7 +862,7 @@ async def test_review_commit_failure_propagates_after_transactional_notification
     db.flush.assert_awaited_once()
     boundaries.review.assert_awaited_once()
     boundaries.legacy_audit.assert_not_awaited()
-    boundaries.clickhouse_insert.assert_not_awaited()
+    boundaries.telemetry_insert.assert_not_awaited()
 
 
 async def test_harness_config_serves_only_pregenerated_visible_config(boundaries):

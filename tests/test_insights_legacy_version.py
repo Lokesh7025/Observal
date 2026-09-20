@@ -9,12 +9,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-
-class _Response:
-    status_code = 200
-
-    def json(self) -> dict:
-        return {"data": [{"cnt": "2"}]}
+_ROWS = [{"cnt": 2}]
 
 
 def test_agent_version_filter_treats_unversioned_as_v1() -> None:
@@ -22,8 +17,8 @@ def test_agent_version_filter_treats_unversioned_as_v1() -> None:
 
     condition = agent_version_filter(nullable=True)
 
-    assert "coalesce(agent_version, '') = {agent_version:String}" in condition
-    assert "{agent_version:String} = '1.0.0'" in condition
+    assert "coalesce(agent_version, '') = $agent_version" in condition
+    assert "$agent_version = '1.0.0'" in condition
     assert "coalesce(agent_version, '') = ''" in condition
 
 
@@ -31,10 +26,10 @@ def test_agent_version_filter_treats_unversioned_as_v1() -> None:
 async def test_count_insight_sessions_matches_legacy_v1_rows() -> None:
     from api.routes.insights import _count_insight_sessions
 
-    query = AsyncMock(return_value=_Response())
+    query = AsyncMock(return_value=_ROWS)
     agent = SimpleNamespace(id="agent-id", name="agent-name")
 
-    with patch("services.clickhouse._query", new=query):
+    with patch("services.telemetry.client.query", new=query):
         count = await _count_insight_sessions(
             agent=agent,
             period_start=datetime(2026, 1, 1, tzinfo=UTC),
@@ -44,19 +39,20 @@ async def test_count_insight_sessions_matches_legacy_v1_rows() -> None:
 
     assert count == 2
     sql = query.await_args.args[0]
-    assert "agent_version = {agent_version:String}" in sql
-    assert "{agent_version:String} = '1.0.0'" in sql
+    assert "agent_version = $agent_version" in sql
+    assert "$agent_version = '1.0.0'" in sql
     assert "agent_version = ''" in sql
 
 
 @pytest.mark.asyncio
 async def test_count_insight_sessions_fallback_matches_nullable_legacy_rows() -> None:
     from api.routes.insights import _count_insight_sessions
+    from services.telemetry import TelemetryQueryError
 
-    query = AsyncMock(side_effect=[RuntimeError("aggregate failed"), _Response()])
+    query = AsyncMock(side_effect=[TelemetryQueryError("aggregate failed"), _ROWS])
     agent = SimpleNamespace(id="agent-id", name="agent-name")
 
-    with patch("services.clickhouse._query", new=query):
+    with patch("services.telemetry.client.query", new=query):
         count = await _count_insight_sessions(
             agent=agent,
             period_start=datetime(2026, 1, 1, tzinfo=UTC),
@@ -66,6 +62,6 @@ async def test_count_insight_sessions_fallback_matches_nullable_legacy_rows() ->
 
     assert count == 2
     fallback_sql = query.await_args_list[1].args[0]
-    assert "coalesce(agent_version, '') = {agent_version:String}" in fallback_sql
-    assert "{agent_version:String} = '1.0.0'" in fallback_sql
+    assert "coalesce(agent_version, '') = $agent_version" in fallback_sql
+    assert "$agent_version = '1.0.0'" in fallback_sql
     assert "coalesce(agent_version, '') = ''" in fallback_sql

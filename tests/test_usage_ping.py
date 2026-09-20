@@ -3,7 +3,7 @@
 
 import uuid
 from datetime import UTC, datetime
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
@@ -180,32 +180,25 @@ async def test_build_payload_contains_only_aggregate_fields(monkeypatch: pytest.
 
 @pytest.mark.asyncio
 async def test_session_metrics_include_aggregates_and_limit_harnesses(monkeypatch: pytest.MonkeyPatch):
-    from services.clickhouse import client as clickhouse_client
+    from services.telemetry import client as telemetry_client
 
-    totals_response = MagicMock()
-    totals_response.json.return_value = {
-        "data": [
-            {
-                "sessions_total": 40,
-                "sessions_7d": 20,
-                "sessions_30d": 30,
-                "active_users_30d": 12,
-                "active_agents_30d": 8,
-                "prompts_30d": 90,
-                "tool_calls_30d": 150,
-                "credits_30d": 7.5,
-                "session_duration_seconds_30d": 3000,
-            }
-        ]
-    }
-    health_response = MagicMock()
-    health_response.json.return_value = {"data": [{"parse_errors_30d": 2, "truncated_events_30d": 3}]}
-    harness_response = MagicMock()
-    harness_response.json.return_value = {
-        "data": [{"harness": f"harness-{index}", "sessions": 40 - index} for index in range(40)]
-    }
-    query = AsyncMock(side_effect=[totals_response, health_response, harness_response])
-    monkeypatch.setattr(clickhouse_client, "_query", query)
+    totals_rows = [
+        {
+            "sessions_total": 40,
+            "sessions_7d": 20,
+            "sessions_30d": 30,
+            "active_users_30d": 12,
+            "active_agents_30d": 8,
+            "prompts_30d": 90,
+            "tool_calls_30d": 150,
+            "credits_30d": 7.5,
+            "session_duration_seconds_30d": 3000,
+        }
+    ]
+    health_rows = [{"parse_errors_30d": 2, "truncated_events_30d": 3}]
+    harness_rows = [{"harness": f"harness-{index}", "sessions": 40 - index} for index in range(40)]
+    query = AsyncMock(side_effect=[totals_rows, health_rows, harness_rows])
+    monkeypatch.setattr(telemetry_client, "query", query)
 
     totals, activity, harnesses = await usage_ping._session_metrics()
 

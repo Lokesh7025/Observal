@@ -43,23 +43,30 @@ def external_calls(monkeypatch):
         dedup=AsyncMock(return_value={}),
         checkpoint=AsyncMock(return_value=(-1, 0)),
         manifest=AsyncMock(return_value=[]),
-        records=AsyncMock(return_value=[]),
-        insert=AsyncMock(),
-        insert_checkpoint=AsyncMock(),
-        refresh=AsyncMock(),
+        # One store transaction replaces rows and refreshes the summary.
+        insert=AsyncMock(return_value={"events_written": 0, "summaries_refreshed": 1}),
         resolve_agent=AsyncMock(side_effect=lambda value: value),
         resolve_version=AsyncMock(side_effect=lambda _agent_id, value: value),
     )
     monkeypatch.setattr(session_ingest, "query_existing_for_dedup", calls.dedup)
     monkeypatch.setattr(session_ingest, "query_session_checkpoint", calls.checkpoint)
     monkeypatch.setattr(session_ingest, "query_session_source_manifest", calls.manifest)
-    monkeypatch.setattr(session_ingest, "query_source_records_after", calls.records)
-    monkeypatch.setattr(session_ingest, "insert_session_events", calls.insert)
-    monkeypatch.setattr(session_ingest, "insert_session_checkpoint", calls.insert_checkpoint)
-    monkeypatch.setattr(session_ingest, "refresh_session_summary", calls.refresh)
+    monkeypatch.setattr(session_ingest, "insert_session_batch", calls.insert)
     monkeypatch.setattr(session_ingest, "_resolve_agent_id", calls.resolve_agent)
     monkeypatch.setattr(session_ingest, "_resolve_agent_version", calls.resolve_version)
     return calls
+
+
+def _assert_summary_refreshed(calls, harness: str) -> None:
+    """The write carried the session identity so the store refreshed its summary."""
+    kwargs = calls.insert.await_args.kwargs
+    assert (kwargs["session_id"], kwargs["project_id"], kwargs["user_id"], kwargs["harness"]) == (
+        SESSION_ID,
+        PROJECT_ID,
+        USER_ID,
+        harness,
+    )
+    assert kwargs.get("refresh_summary", True) is True
 
 
 async def _ingest(lines: list[str] | None, **overrides) -> session_ingest.IngestResult:
@@ -281,7 +288,7 @@ async def test_registered_harness_selects_its_parser_and_normalizes_the_write(
     assert row["source_end_offset"] == 123
     assert row["is_source_record"] == 1
     assert row["rendered"] == 1
-    external_calls.refresh.assert_awaited_once_with(SESSION_ID, PROJECT_ID, USER_ID, harness)
+    _assert_summary_refreshed(external_calls, harness)
 
 
 async def test_batch_normalizes_relationships_timestamps_usage_tools_and_result_counts(external_calls):
@@ -332,7 +339,7 @@ async def test_batch_normalizes_relationships_timestamps_usage_tools_and_result_
         assert row["line_hash"] == xxhash.xxh128(encoded).hexdigest()
         assert row["source_sha256"] == hashlib.sha256(encoded).hexdigest()
         assert row["content_length"] == len(encoded)
-    external_calls.refresh.assert_awaited_once_with(SESSION_ID, PROJECT_ID, USER_ID, "claude-code")
+    _assert_summary_refreshed(external_calls, "claude-code")
 
 
 async def test_identity_metadata_and_source_accounting_survive_redaction(external_calls):
@@ -401,7 +408,7 @@ async def test_empty_kiro_input_writes_only_credit_metadata(external_calls):
         "agent_version": "1.0.0",
     }
     assert {key: rows[0][key] for key in expected_metadata} == expected_metadata
-    external_calls.refresh.assert_awaited_once_with(SESSION_ID, PROJECT_ID, USER_ID, "kiro")
+    _assert_summary_refreshed(external_calls, "kiro")
 
 
 @pytest.mark.parametrize("lines", [None, []])
@@ -409,20 +416,17 @@ async def test_empty_input_without_metadata_does_not_write(external_calls, lines
     assert await _ingest(lines) == session_ingest.IngestResult(ingested=0, skipped=0, errors=0)
     external_calls.dedup.assert_not_awaited()
     external_calls.insert.assert_not_awaited()
-    external_calls.refresh.assert_not_awaited()
 
 
-async def test_source_and_synthetic_rows_use_separate_clickhouse_writes(external_calls):
+async def test_source_and_synthetic_rows_share_one_store_transaction(external_calls):
     await _ingest([KIRO_TOOL_CALL], harness="kiro", total_credits=2.5)
 
-    assert external_calls.insert.await_count == 2
-    source_rows = external_calls.insert.await_args_list[0].args[0]
-    extra_rows = external_calls.insert.await_args_list[1].args[0]
-    assert source_rows[0]["is_source_record"] == 1
-    assert source_rows[0]["event_type"] == "tool_call"
-    assert extra_rows[0]["is_source_record"] == 0
-    assert extra_rows[0]["event_type"] == "kiro_credits"
-    external_calls.refresh.assert_awaited_once()
+    assert external_calls.insert.await_count == 1
+    rows = external_calls.insert.await_args.args[0]
+    assert [(row["is_source_record"], row["event_type"]) for row in rows] == [
+        (1, "tool_call"),
+        (0, "kiro_credits"),
+    ]
 
 
 async def test_exact_retry_is_skipped_by_source_position(external_calls):
@@ -435,7 +439,6 @@ async def test_exact_retry_is_skipped_by_source_position(external_calls):
 
     assert result == session_ingest.IngestResult(ingested=0, skipped=1, errors=0)
     external_calls.insert.assert_not_awaited()
-    external_calls.refresh.assert_not_awaited()
 
 
 async def test_conflicting_retry_at_checkpoint_fails_before_any_write(external_calls):
@@ -448,7 +451,6 @@ async def test_conflicting_retry_at_checkpoint_fails_before_any_write(external_c
     assert error.value.offsets == [7, 8]
     assert str(error.value) == "session source content changed at line(s): 7, 8"
     external_calls.insert.assert_not_awaited()
-    external_calls.refresh.assert_not_awaited()
 
 
 async def test_retry_after_checkpoint_rewrites_the_unacknowledged_range(external_calls):
@@ -460,7 +462,7 @@ async def test_retry_after_checkpoint_rewrites_the_unacknowledged_range(external
 
     assert result == session_ingest.IngestResult(ingested=2, skipped=0, errors=0)
     assert [row["line_offset"] for row in external_calls.insert.await_args.args[0]] == [7, 8]
-    external_calls.refresh.assert_awaited_once()
+    assert external_calls.insert.await_count == 1
 
 
 async def test_invalid_byte_offsets_and_unknown_harness_fail_without_writes(external_calls):
@@ -472,11 +474,10 @@ async def test_invalid_byte_offsets_and_unknown_harness_fail_without_writes(exte
         await _ingest([CLAUDE_USER_PROMPT], harness="unregistered")
 
     external_calls.insert.assert_not_awaited()
-    external_calls.refresh.assert_not_awaited()
 
 
-@pytest.mark.parametrize("failing_call", ["dedup", "insert", "refresh"])
-async def test_clickhouse_failures_propagate_and_stop_later_writes(external_calls, failing_call: str):
+@pytest.mark.parametrize("failing_call", ["dedup", "insert"])
+async def test_store_failures_propagate_and_stop_later_writes(external_calls, failing_call: str):
     getattr(external_calls, failing_call).side_effect = RuntimeError(f"{failing_call} unavailable")
 
     with pytest.raises(RuntimeError, match=f"{failing_call} unavailable"):
@@ -484,11 +485,6 @@ async def test_clickhouse_failures_propagate_and_stop_later_writes(external_call
 
     if failing_call == "dedup":
         external_calls.insert.assert_not_awaited()
-        external_calls.refresh.assert_not_awaited()
-    elif failing_call == "insert":
-        external_calls.refresh.assert_not_awaited()
-    else:
-        external_calls.insert.assert_awaited_once()
 
 
 @pytest.mark.parametrize(
@@ -783,45 +779,29 @@ async def test_agent_version_fails_open_when_cache_and_database_are_unavailable(
     redis.setex.assert_awaited_once_with(f"agent_version_resolve:{agent_id}:latest", 300, "__none__")
 
 
-async def test_checkpoint_advances_across_full_pages_and_ignores_stale_rows(external_calls):
-    first_page = [(line, line * 10) for line in range(5_000)]
-    second_page = [(4_999, 49_990), (5_000, 50_000)]
-    external_calls.records.side_effect = [first_page, second_page]
+async def test_checkpoint_advance_is_one_store_transaction(external_calls):
+    external_calls.insert.return_value = {
+        "events_written": 0,
+        "summaries_refreshed": 0,
+        "checkpoint": {"acknowledged_line": 5_000, "acknowledged_offset": 50_000},
+    }
 
     checkpoint = await session_ingest.advance_session_checkpoint(SESSION_ID, PROJECT_ID, USER_ID, "claude-code")
 
     assert checkpoint == (5_000, 50_000)
-    assert external_calls.records.await_count == 2
-    external_calls.insert_checkpoint.assert_awaited_once_with(
-        SESSION_ID,
-        PROJECT_ID,
-        USER_ID,
-        "claude-code",
-        5_000,
-        50_000,
-    )
+    kwargs = external_calls.insert.await_args.kwargs
+    assert external_calls.insert.await_args.args[0] == []
+    assert kwargs["advance_checkpoint"] is True and kwargs["refresh_summary"] is False
+    assert (kwargs["session_id"], kwargs["harness"]) == (SESSION_ID, "claude-code")
+    external_calls.checkpoint.assert_not_awaited()
 
 
-@pytest.mark.parametrize(
-    ("initial", "records", "expected"),
-    [
-        ((3, 30), [], (3, 30)),
-        ((0, 10), [(2, 30)], (0, 10)),
-        ((-1, 0), [(0, 10), (2, 30)], (0, 10)),
-    ],
-)
-async def test_checkpoint_stops_without_records_or_at_first_gap(external_calls, initial, records, expected):
-    external_calls.checkpoint.return_value = initial
-    external_calls.records.return_value = records
+async def test_checkpoint_advance_falls_back_to_reading_when_store_omits_it(external_calls):
+    external_calls.insert.return_value = {"events_written": 0}
+    external_calls.checkpoint.return_value = (3, 30)
 
-    assert await session_ingest.advance_session_checkpoint(SESSION_ID, PROJECT_ID, USER_ID, "pi") == expected
-    external_calls.insert_checkpoint.assert_awaited_once_with(
-        SESSION_ID,
-        PROJECT_ID,
-        USER_ID,
-        "pi",
-        *expected,
-    )
+    assert await session_ingest.advance_session_checkpoint(SESSION_ID, PROJECT_ID, USER_ID, "pi") == (3, 30)
+    external_calls.checkpoint.assert_awaited_once_with(SESSION_ID, PROJECT_ID, USER_ID, "pi")
 
 
 async def test_integrity_reads_checkpoint_and_accepts_matching_line_and_offset(external_calls):

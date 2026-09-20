@@ -90,27 +90,16 @@ async def test_build_session_transcript_summarizes_long_sessions(monkeypatch):
     import services.dynamic_settings as ds
     from services.insights import transcript
 
-    class Response:
-        status_code = 200
-
-        def raise_for_status(self) -> None:
-            return None
-
-        def json(self) -> dict:
-            rows = []
-            for i in range(70):
-                rows.append(
-                    {
-                        "line_offset": i,
-                        "event_type": "user_prompt",
-                        "tool_name": "",
-                        "raw_line": '{"message":{"content":"' + ("x" * 600) + '"}}',
-                    }
-                )
-            return {"data": rows}
-
-    async def query(_sql: str, _params: dict) -> Response:
-        return Response()
+    async def query(_sql: str, _params: dict) -> list[dict]:
+        return [
+            {
+                "line_offset": i,
+                "event_type": "user_prompt",
+                "tool_name": "",
+                "raw_line": '{"message":{"content":"' + ("x" * 600) + '"}}',
+            }
+            for i in range(70)
+        ]
 
     summaries: list[str] = []
 

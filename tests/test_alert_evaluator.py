@@ -106,13 +106,10 @@ class TestQueryMetric:
     async def test_dispatches_error_rate(self):
         from services.alert_evaluator import _query_metric
 
-        mock_resp = MagicMock()
-        mock_resp.raise_for_status = MagicMock()
-        mock_resp.text = "0.05\n"
         with patch(
-            "services.alert_evaluator._query",
+            "services.alert_evaluator.query_one",
             new_callable=AsyncMock,
-            return_value=mock_resp,
+            return_value={"error_rate": 0.05},
         ):
             result = await _query_metric("error_rate", "agent", "agent-1", 5)
         assert result == pytest.approx(0.05)
@@ -121,13 +118,10 @@ class TestQueryMetric:
     async def test_dispatches_latency_p99(self):
         from services.alert_evaluator import _query_metric
 
-        mock_resp = MagicMock()
-        mock_resp.raise_for_status = MagicMock()
-        mock_resp.text = "250.5\n"
         with patch(
-            "services.alert_evaluator._query",
+            "services.alert_evaluator.query_one",
             new_callable=AsyncMock,
-            return_value=mock_resp,
+            return_value={"latency_p99": 250.5},
         ):
             result = await _query_metric("latency_p99", "mcp", "mcp-1", 5)
         assert result == pytest.approx(250.5)
@@ -136,13 +130,10 @@ class TestQueryMetric:
     async def test_dispatches_token_usage(self):
         from services.alert_evaluator import _query_metric
 
-        mock_resp = MagicMock()
-        mock_resp.raise_for_status = MagicMock()
-        mock_resp.text = "50000\n"
         with patch(
-            "services.alert_evaluator._query",
+            "services.alert_evaluator.query_one",
             new_callable=AsyncMock,
-            return_value=mock_resp,
+            return_value={"token_usage": 50000},
         ):
             result = await _query_metric("token_usage", "all", "", 5)
         assert result == pytest.approx(50000.0)
@@ -158,15 +149,12 @@ class TestQueryMetric:
     async def test_empty_response_returns_none(self):
         from services.alert_evaluator import _query_metric
 
-        mock_resp = MagicMock()
-        mock_resp.raise_for_status = MagicMock()
-        mock_resp.text = ""
         with patch(
-            "services.alert_evaluator._query",
+            "services.alert_evaluator.query_one",
             new_callable=AsyncMock,
-            return_value=mock_resp,
+            return_value={},
         ):
-            result = await _query_metric("error_rate", "all", "", 5)
+            result = await _query_metric("token_usage", "all", "", 5)
         assert result is None
 
 

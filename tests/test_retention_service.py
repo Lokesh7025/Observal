@@ -9,33 +9,30 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 
-def _response(status_code=200, data=None):
-    response = MagicMock(status_code=status_code, text="error")
-    response.json.return_value = {"data": data or []}
-    return response
-
-
 @pytest.mark.asyncio
-async def test_delete_batch_reports_clickhouse_failure():
-    with patch("services.clickhouse._query", new=AsyncMock(return_value=_response(500))):
-        from services.retention import _delete_batch
+async def test_delete_batch_reports_store_failure():
+    from services.retention import _delete_batch
+    from services.telemetry import TelemetryUnavailableError
 
+    with patch("services.retention.delete_rows", new=AsyncMock(side_effect=TelemetryUnavailableError("down"))):
         assert await _delete_batch("session_events", "timestamp", "default", "2026-01-01") == 0
 
 
 @pytest.mark.asyncio
-async def test_delete_batch_reports_success():
-    with patch("services.clickhouse._query", new=AsyncMock(return_value=_response())):
-        from services.retention import _delete_batch
+async def test_delete_batch_reports_rows_deleted():
+    from services.retention import _delete_batch
 
-        assert await _delete_batch("session_events", "timestamp", "default", "2026-01-01") == 1
+    with patch("services.retention.delete_rows", new=AsyncMock(return_value=7)) as delete_rows:
+        assert await _delete_batch("session_events", "timestamp", "default", "2026-01-01") == 7
+    delete_rows.assert_awaited_once_with("session_events", {"project_id": "default", "timestamp_lt": "2026-01-01"})
 
 
 @pytest.mark.asyncio
-async def test_has_data_fails_closed_on_clickhouse_error():
-    with patch("services.clickhouse._query", new=AsyncMock(return_value=_response(500))):
-        from services.retention import _has_data
+async def test_has_data_fails_closed_on_store_error():
+    from services.retention import _has_data
+    from services.telemetry import TelemetryUnavailableError
 
+    with patch("services.retention.query_one", new=AsyncMock(side_effect=TelemetryUnavailableError("down"))):
         assert await _has_data("default") is False
 
 
@@ -87,29 +84,25 @@ async def test_purge_insight_reports_deletes_completed_and_stuck_rows():
 
 @pytest.mark.asyncio
 async def test_purge_count_based_does_nothing_under_limit():
-    with patch(
-        "services.clickhouse._query",
-        new=AsyncMock(return_value=_response(data=[{"day": "2026-05-11", "cnt": "2"}])),
-    ):
-        from services.retention import _purge_count_based
+    from services.retention import _purge_count_based
 
+    with patch("services.telemetry.client.query", new=AsyncMock(return_value=[{"day": "2026-05-11", "cnt": 2}])):
         assert await _purge_count_based("default", 10) == 0
 
 
 @pytest.mark.asyncio
 async def test_purge_count_based_deletes_old_sessions():
-    query = AsyncMock(
-        side_effect=[
-            _response(data=[{"day": "2026-05-11", "cnt": "6"}, {"day": "2026-05-10", "cnt": "6"}]),
-            _response(),
-            _response(),
-        ]
-    )
-    with patch("services.clickhouse._query", new=query):
-        from services.retention import _purge_count_based
+    from services.retention import _purge_count_based
 
+    rows = [{"day": "2026-05-11", "cnt": 6}, {"day": "2026-05-10", "cnt": 6}]
+    with (
+        patch("services.telemetry.client.query", new=AsyncMock(return_value=rows)),
+        patch("services.retention._delete_batch", new=AsyncMock(return_value=6)) as delete_batch,
+        patch("services.retention._purge_session_stats_orphans", new=AsyncMock(return_value=1)) as orphans,
+    ):
         assert await _purge_count_based("default", 10) == 1
-    assert query.await_count == 3
+    delete_batch.assert_awaited_once_with("session_events", "timestamp", "default", "2026-05-10 00:00:00.000")
+    orphans.assert_awaited_once_with("default")
 
 
 @pytest.mark.asyncio

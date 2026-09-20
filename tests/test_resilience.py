@@ -10,114 +10,118 @@ import httpx
 import pytest
 
 # ---------------------------------------------------------------------------
-# ClickHouse _query retries on ConnectError
+# Telemetry client retries on ConnectError and raises on failure
 # ---------------------------------------------------------------------------
 
 
-class TestClickHouseRetry:
-    """Verify _query retries on transient connection errors."""
+class TestTelemetryClientRetry:
+    """The telemetry client retries transport failures, then raises - never returns []."""
 
     @pytest.mark.asyncio
-    async def test_query_retries_on_connect_error(self):
-        """_query should retry up to 3 times on ConnectError."""
-        from services.clickhouse import _query
+    async def test_query_retries_on_connect_error_then_succeeds(self):
+        from services.telemetry import client as tclient
 
+        ok = MagicMock(status_code=200)
+        ok.json.return_value = {"columns": ["one"], "rows": [{"one": 1}], "row_count": 1}
         mock_client = AsyncMock()
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_client.post = AsyncMock(
-            side_effect=[
-                httpx.ConnectError("conn refused"),
-                httpx.ConnectError("conn refused"),
-                mock_resp,
-            ]
-        )
+        mock_client.post = AsyncMock(side_effect=[httpx.ConnectError("refused"), ok])
 
-        with patch("services.clickhouse.client._get_client", return_value=mock_client):
-            resp = await _query("SELECT 1")
-            assert resp.status_code == 200
-            assert mock_client.post.call_count == 3
-
-    @pytest.mark.asyncio
-    async def test_query_raises_after_max_retries(self):
-        """_query should reraise ConnectError after exhausting retries."""
-        from services.clickhouse import _query
-
-        mock_client = AsyncMock()
-        mock_client.post = AsyncMock(side_effect=httpx.ConnectError("conn refused"))
-
-        with patch("services.clickhouse.client._get_client", return_value=mock_client):
-            with pytest.raises(httpx.ConnectError):
-                await _query("SELECT 1")
-            assert mock_client.post.call_count == 3
-
-    @pytest.mark.asyncio
-    async def test_query_retries_on_connect_timeout(self):
-        """_query should retry on ConnectTimeout."""
-        from services.clickhouse import _query
-
-        mock_client = AsyncMock()
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_client.post = AsyncMock(side_effect=[httpx.ConnectTimeout("timeout"), mock_resp])
-
-        with patch("services.clickhouse.client._get_client", return_value=mock_client):
-            resp = await _query("SELECT 1")
-            assert resp.status_code == 200
-            assert mock_client.post.call_count == 2
-
-    @pytest.mark.asyncio
-    async def test_query_does_not_retry_on_other_errors(self):
-        """_query should NOT retry on non-transient errors like ReadError."""
-        from services.clickhouse import _query
-
-        mock_client = AsyncMock()
-        mock_client.post = AsyncMock(side_effect=httpx.ReadError("broken pipe"))
-
-        with patch("services.clickhouse.client._get_client", return_value=mock_client):
-            with pytest.raises(httpx.ReadError):
-                await _query("SELECT 1")
-            assert mock_client.post.call_count == 1
-
-
-# ---------------------------------------------------------------------------
-# ClickHouse clickhouse_health()
-# ---------------------------------------------------------------------------
-
-
-class TestClickHouseHealth:
-    """Verify clickhouse_health returns True/False."""
-
-    @pytest.mark.asyncio
-    async def test_health_returns_true_on_success(self):
-        from services.clickhouse import clickhouse_health
-
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-
-        with patch("services.clickhouse.client._query", new_callable=AsyncMock, return_value=mock_resp):
-            assert await clickhouse_health() is True
-
-    @pytest.mark.asyncio
-    async def test_health_returns_false_on_error(self):
-        from services.clickhouse import clickhouse_health
-
-        with patch(
-            "services.clickhouse._query",
-            new_callable=AsyncMock,
-            side_effect=httpx.ConnectError("unreachable"),
+        with (
+            patch.object(tclient, "get_client", return_value=mock_client),
+            patch("tenacity.nap.time.sleep"),
         ):
-            assert await clickhouse_health() is False
+            assert await tclient.query("SELECT 1 AS one") == [{"one": 1}]
+        assert mock_client.post.call_count == 2
 
     @pytest.mark.asyncio
-    async def test_health_returns_false_on_non_200(self):
-        from services.clickhouse import clickhouse_health
+    async def test_query_gives_up_and_raises_unavailable(self):
+        from services.telemetry import TelemetryUnavailableError
+        from services.telemetry import client as tclient
 
-        mock_resp = MagicMock()
-        mock_resp.status_code = 500
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(side_effect=httpx.ConnectError("refused"))
 
-        with patch("services.clickhouse.client._query", new_callable=AsyncMock, return_value=mock_resp):
-            assert await clickhouse_health() is False
+        with (
+            patch.object(tclient, "get_client", return_value=mock_client),
+            patch("tenacity.nap.time.sleep"),
+            pytest.raises(TelemetryUnavailableError),
+        ):
+            await tclient.query("SELECT 1")
+        assert mock_client.post.call_count == 3
+
+    @pytest.mark.asyncio
+    async def test_query_does_not_retry_on_query_errors(self):
+        from services.telemetry import TelemetryQueryError
+        from services.telemetry import client as tclient
+
+        bad = MagicMock(status_code=400, text="nope")
+        bad.json.return_value = {"error": {"code": "query_error", "message": "boom"}}
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(return_value=bad)
+
+        with patch.object(tclient, "get_client", return_value=mock_client), pytest.raises(TelemetryQueryError):
+            await tclient.query("SELECT broken")
+        assert mock_client.post.call_count == 1
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("status", "code", "exc_name"),
+        [
+            (504, "query_timeout", "TelemetryTimeoutError"),
+            (413, "result_too_large", "TelemetryResultTooLargeError"),
+            (429, "telemetry_busy", "TelemetryBusyError"),
+            (503, "writer_paused", "TelemetryUnavailableError"),
+        ],
+    )
+    async def test_status_codes_map_to_typed_errors(self, status, code, exc_name):
+        import services.telemetry as telemetry
+        from services.telemetry import client as tclient
+
+        resp = MagicMock(status_code=status, text="")
+        resp.json.return_value = {"error": {"code": code, "message": "x"}}
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(return_value=resp)
+
+        with patch.object(tclient, "get_client", return_value=mock_client), pytest.raises(getattr(telemetry, exc_name)):
+            await tclient.write("/v1/write/append", {"table": "audit_log", "rows": []})
+
+
+# ---------------------------------------------------------------------------
+# Telemetry telemetry_health()
+# ---------------------------------------------------------------------------
+
+
+class TestTelemetryHealth:
+    """Verify telemetry_health returns True/False without raising."""
+
+    @pytest.mark.asyncio
+    async def test_returns_true_on_200(self):
+        from services.telemetry import client as tclient
+
+        resp = MagicMock(status_code=200)
+        resp.json.return_value = {"status": "ok"}
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(return_value=resp)
+        with patch.object(tclient, "get_client", return_value=mock_client):
+            assert await tclient.telemetry_health() is True
+
+    @pytest.mark.asyncio
+    async def test_returns_false_on_transport_error(self):
+        from services.telemetry import client as tclient
+
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(side_effect=httpx.ConnectError("refused"))
+        with patch.object(tclient, "get_client", return_value=mock_client):
+            assert await tclient.telemetry_health() is False
+
+    @pytest.mark.asyncio
+    async def test_returns_false_on_non_200(self):
+        from services.telemetry import client as tclient
+
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(return_value=MagicMock(status_code=503))
+        with patch.object(tclient, "get_client", return_value=mock_client):
+            assert await tclient.telemetry_health() is False
 
 
 # ---------------------------------------------------------------------------

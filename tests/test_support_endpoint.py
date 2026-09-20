@@ -48,14 +48,26 @@ def _mock_db():
     return AsyncMock()
 
 
-def _mock_ch_response(status_code=200, text="", json_data=None):
-    """Return a mock httpx Response for ClickHouse queries."""
-    resp = MagicMock()
-    resp.status_code = status_code
-    resp.text = text
-    if json_data is not None:
-        resp.json.return_value = json_data
-    return resp
+_TELEMETRY_HEALTH = {
+    "status": "ok",
+    "schema_version": "001_baseline",
+    "duckdb_version": "1.5.5",
+    "file_bytes": 10,
+    "wal_bytes": 0,
+    "writer_paused": False,
+}
+
+
+def _telemetry_patches(health=_TELEMETRY_HEALTH, counts=None):
+    """Patch the telemetry store probes used by the collectors."""
+    from contextlib import ExitStack
+
+    stack = ExitStack()
+    stack.enter_context(patch("api.routes.support.telemetry_health", new=AsyncMock(return_value=health)))
+    stack.enter_context(
+        patch("api.routes.support.table_counts", new=AsyncMock(return_value=counts if counts is not None else {}))
+    )
+    return stack
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -122,21 +134,16 @@ class TestRunCollector:
 
 
 class TestCollectVersions:
-    """Tests for the versions collector (app, alembic, CH)."""
+    """Tests for the versions collector (app, alembic, telemetry store)."""
 
     @pytest.mark.asyncio
     async def test_returns_app_version(self):
         db = _mock_db()
-        # Mock alembic query
         mock_result = MagicMock()
         mock_result.scalar_one_or_none.return_value = "abc123"
         db.execute.return_value = mock_result
 
-        with patch("api.routes.support._query", new_callable=AsyncMock) as mock_query:
-            mock_query.side_effect = [
-                _mock_ch_response(200, text="24.3.1"),
-                _mock_ch_response(200, json_data={"data": [{"name": "traces"}, {"name": "spans"}]}),
-            ]
+        with _telemetry_patches():
             result = await _collect_versions(db)
 
         assert "app_version" in result
@@ -149,11 +156,7 @@ class TestCollectVersions:
         mock_result.scalar_one_or_none.return_value = "rev_42"
         db.execute.return_value = mock_result
 
-        with patch("api.routes.support._query", new_callable=AsyncMock) as mock_query:
-            mock_query.side_effect = [
-                _mock_ch_response(200, text="24.3.1"),
-                _mock_ch_response(200, json_data={"data": []}),
-            ]
+        with _telemetry_patches():
             result = await _collect_versions(db)
 
         assert result["alembic_revision"] == "rev_42"
@@ -163,59 +166,37 @@ class TestCollectVersions:
         db = _mock_db()
         db.execute.side_effect = RuntimeError("pg down")
 
-        with patch("api.routes.support._query", new_callable=AsyncMock) as mock_query:
-            mock_query.side_effect = [
-                _mock_ch_response(200, text="24.3.1"),
-                _mock_ch_response(200, json_data={"data": []}),
-            ]
+        with _telemetry_patches():
             result = await _collect_versions(db)
 
         assert "error" in result["alembic_revision"]
 
     @pytest.mark.asyncio
-    async def test_returns_clickhouse_version(self):
+    async def test_returns_telemetry_version_schema_and_tables(self):
         db = _mock_db()
         mock_result = MagicMock()
         mock_result.scalar_one_or_none.return_value = "abc"
         db.execute.return_value = mock_result
 
-        with patch("api.routes.support._query", new_callable=AsyncMock) as mock_query:
-            mock_query.side_effect = [
-                _mock_ch_response(200, text="24.3.1.5"),
-                _mock_ch_response(200, json_data={"data": [{"name": "traces"}]}),
-            ]
+        with _telemetry_patches(counts={"session_events": 3, "audit_log": 1}):
             result = await _collect_versions(db)
 
-        assert result["clickhouse_version"] == "24.3.1.5"
+        assert result["telemetry_version"] == "duckdb 1.5.5"
+        assert result["telemetry_schema_version"] == "001_baseline"
+        assert result["telemetry_tables"] == ["audit_log", "session_events"]
 
     @pytest.mark.asyncio
-    async def test_returns_clickhouse_tables(self):
+    async def test_telemetry_error_recorded(self):
         db = _mock_db()
         mock_result = MagicMock()
         mock_result.scalar_one_or_none.return_value = "abc"
         db.execute.return_value = mock_result
 
-        with patch("api.routes.support._query", new_callable=AsyncMock) as mock_query:
-            mock_query.side_effect = [
-                _mock_ch_response(200, text="24.3.1"),
-                _mock_ch_response(200, json_data={"data": [{"name": "traces"}, {"name": "spans"}, {"name": "scores"}]}),
-            ]
+        with _telemetry_patches(health=None):
             result = await _collect_versions(db)
 
-        assert result["clickhouse_tables"] == ["traces", "spans", "scores"]
-
-    @pytest.mark.asyncio
-    async def test_clickhouse_error_recorded(self):
-        db = _mock_db()
-        mock_result = MagicMock()
-        mock_result.scalar_one_or_none.return_value = "abc"
-        db.execute.return_value = mock_result
-
-        with patch("api.routes.support._query", new_callable=AsyncMock) as mock_query:
-            mock_query.side_effect = ConnectionError("CH unreachable")
-            result = await _collect_versions(db)
-
-        assert "error" in result["clickhouse_version"]
+        assert "error" in result["telemetry_version"]
+        assert "error" in result["telemetry_tables"]
 
     @pytest.mark.asyncio
     async def test_build_hash_from_env(self):
@@ -224,14 +205,7 @@ class TestCollectVersions:
         mock_result.scalar_one_or_none.return_value = "abc"
         db.execute.return_value = mock_result
 
-        with (
-            patch("api.routes.support._query", new_callable=AsyncMock) as mock_query,
-            patch.dict("os.environ", {"BUILD_HASH": "deadbeef"}),
-        ):
-            mock_query.side_effect = [
-                _mock_ch_response(200, text="24.3.1"),
-                _mock_ch_response(200, json_data={"data": []}),
-            ]
+        with _telemetry_patches(), patch.dict("os.environ", {"BUILD_HASH": "deadbeef"}):
             result = await _collect_versions(db)
 
         assert result["build_hash"] == "deadbeef"
@@ -243,7 +217,7 @@ class TestCollectVersions:
 
 
 class TestCollectHealth:
-    """Tests for health probes against PG, CH, Redis, OTEL."""
+    """Tests for health probes against PG, the telemetry store, Redis, OTEL."""
 
     @pytest.mark.asyncio
     async def test_postgres_ok(self):
@@ -251,10 +225,9 @@ class TestCollectHealth:
         db.execute.return_value = MagicMock()
 
         with (
-            patch("api.routes.support._query", new_callable=AsyncMock) as mock_query,
+            _telemetry_patches(),
             patch("api.routes.support.get_redis") as mock_get_redis,
         ):
-            mock_query.return_value = _mock_ch_response(200)
             mock_redis = AsyncMock()
             mock_redis.ping.return_value = True
             mock_get_redis.return_value = mock_redis
@@ -270,10 +243,9 @@ class TestCollectHealth:
         db.execute.side_effect = RuntimeError("connection refused")
 
         with (
-            patch("api.routes.support._query", new_callable=AsyncMock) as mock_query,
+            _telemetry_patches(),
             patch("api.routes.support.get_redis") as mock_get_redis,
         ):
-            mock_query.return_value = _mock_ch_response(200)
             mock_redis = AsyncMock()
             mock_redis.ping.return_value = True
             mock_get_redis.return_value = mock_redis
@@ -284,48 +256,46 @@ class TestCollectHealth:
         assert result["postgres"]["error"] == "RuntimeError"
 
     @pytest.mark.asyncio
-    async def test_clickhouse_ok(self):
+    async def test_telemetry_ok(self):
         db = _mock_db()
 
         with (
-            patch("api.routes.support._query", new_callable=AsyncMock) as mock_query,
+            _telemetry_patches(),
             patch("api.routes.support.get_redis") as mock_get_redis,
         ):
-            mock_query.return_value = _mock_ch_response(200)
             mock_redis = AsyncMock()
             mock_redis.ping.return_value = True
             mock_get_redis.return_value = mock_redis
 
             result = await _collect_health(db)
 
-        assert result["clickhouse"]["status"] == "ok"
+        assert result["telemetry"]["status"] == "ok"
+        assert result["telemetry"]["file_bytes"] == 10
 
     @pytest.mark.asyncio
-    async def test_clickhouse_error(self):
+    async def test_telemetry_error(self):
         db = _mock_db()
 
         with (
-            patch("api.routes.support._query", new_callable=AsyncMock) as mock_query,
+            _telemetry_patches(health=None),
             patch("api.routes.support.get_redis") as mock_get_redis,
         ):
-            mock_query.side_effect = ConnectionError("CH down")
             mock_redis = AsyncMock()
             mock_redis.ping.return_value = True
             mock_get_redis.return_value = mock_redis
 
             result = await _collect_health(db)
 
-        assert result["clickhouse"]["status"] == "error"
+        assert result["telemetry"]["status"] == "error"
 
     @pytest.mark.asyncio
     async def test_redis_ok(self):
         db = _mock_db()
 
         with (
-            patch("api.routes.support._query", new_callable=AsyncMock) as mock_query,
+            _telemetry_patches(),
             patch("api.routes.support.get_redis") as mock_get_redis,
         ):
-            mock_query.return_value = _mock_ch_response(200)
             mock_redis = AsyncMock()
             mock_redis.ping.return_value = True
             mock_get_redis.return_value = mock_redis
@@ -339,10 +309,9 @@ class TestCollectHealth:
         db = _mock_db()
 
         with (
-            patch("api.routes.support._query", new_callable=AsyncMock) as mock_query,
+            _telemetry_patches(),
             patch("api.routes.support.get_redis") as mock_get_redis,
         ):
-            mock_query.return_value = _mock_ch_response(200)
             mock_get_redis.side_effect = ConnectionError("Redis down")
 
             result = await _collect_health(db)
@@ -354,17 +323,16 @@ class TestCollectHealth:
         db = _mock_db()
 
         with (
-            patch("api.routes.support._query", new_callable=AsyncMock) as mock_query,
+            _telemetry_patches(),
             patch("api.routes.support.get_redis") as mock_get_redis,
         ):
-            mock_query.return_value = _mock_ch_response(200)
             mock_redis = AsyncMock()
             mock_redis.ping.return_value = True
             mock_get_redis.return_value = mock_redis
 
             result = await _collect_health(db)
 
-        for probe_name in ("postgres", "clickhouse", "redis"):
+        for probe_name in ("postgres", "telemetry", "redis"):
             assert "latency_ms" in result[probe_name], f"{probe_name} missing latency_ms"
             assert isinstance(result[probe_name]["latency_ms"], int)
 
@@ -428,45 +396,29 @@ class TestCollectAggregates:
     @pytest.mark.asyncio
     async def test_returns_pg_table_counts(self):
         db = _mock_db()
-        # pg_tables query returns table names
         tables_result = MagicMock()
         tables_result.fetchall.return_value = [("users",), ("agents",)]
-        # count queries return integers
         count_result = MagicMock()
         count_result.scalar.return_value = 42
         db.execute.side_effect = [tables_result, count_result, count_result]
 
-        with patch("api.routes.support._query", new_callable=AsyncMock) as mock_query:
-            mock_query.side_effect = [
-                _mock_ch_response(200, json_data={"data": []}),
-            ]
+        with _telemetry_patches():
             result = await _collect_aggregates(db)
 
-        assert "pg_table_counts" in result
         assert result["pg_table_counts"]["users"] == 42
         assert result["pg_table_counts"]["agents"] == 42
 
     @pytest.mark.asyncio
-    async def test_returns_ch_table_counts(self):
+    async def test_returns_telemetry_table_counts(self):
         db = _mock_db()
         tables_result = MagicMock()
         tables_result.fetchall.return_value = []
         db.execute.return_value = tables_result
 
-        with patch("api.routes.support._query", new_callable=AsyncMock) as mock_query:
-            mock_query.side_effect = [
-                # CH table list
-                _mock_ch_response(200, json_data={"data": [{"name": "traces"}, {"name": "spans"}]}),
-                # count for traces
-                _mock_ch_response(200, json_data={"data": [{"count()": 1000000}]}),
-                # count for spans
-                _mock_ch_response(200, json_data={"data": [{"count()": 5000000}]}),
-            ]
+        with _telemetry_patches(counts={"session_events": 1000000, "audit_log": 5000000}):
             result = await _collect_aggregates(db)
 
-        assert "ch_table_counts" in result
-        assert result["ch_table_counts"]["traces"] == 1000000
-        assert result["ch_table_counts"]["spans"] == 5000000
+        assert result["telemetry_table_counts"] == {"session_events": 1000000, "audit_log": 5000000}
 
     @pytest.mark.asyncio
     async def test_counts_are_integers_not_row_contents(self):
@@ -478,20 +430,13 @@ class TestCollectAggregates:
         count_result.scalar.return_value = 99
         db.execute.side_effect = [tables_result, count_result]
 
-        with patch("api.routes.support._query", new_callable=AsyncMock) as mock_query:
-            mock_query.side_effect = [
-                _mock_ch_response(200, json_data={"data": [{"name": "traces"}]}),
-                _mock_ch_response(200, json_data={"data": [{"count()": 500}]}),
-            ]
+        with _telemetry_patches(counts={"session_events": 500}):
             result = await _collect_aggregates(db)
 
-        # PG counts are plain integers
         for table, count in result["pg_table_counts"].items():
             assert isinstance(count, int), f"PG table {table} has non-int count: {count}"
-
-        # CH counts are plain integers
-        for table, count in result["ch_table_counts"].items():
-            assert isinstance(count, int), f"CH table {table} has non-int count: {count}"
+        for table, count in result["telemetry_table_counts"].items():
+            assert isinstance(count, int), f"telemetry table {table} has non-int count: {count}"
 
     @pytest.mark.asyncio
     async def test_pg_error_recorded_per_table(self):
@@ -500,44 +445,24 @@ class TestCollectAggregates:
         tables_result.fetchall.return_value = [("broken_table",)]
         db.execute.side_effect = [tables_result, RuntimeError("permission denied")]
 
-        with patch("api.routes.support._query", new_callable=AsyncMock) as mock_query:
-            mock_query.side_effect = [
-                _mock_ch_response(200, json_data={"data": []}),
-            ]
+        with _telemetry_patches():
             result = await _collect_aggregates(db)
 
         assert "error" in result["pg_table_counts"]["broken_table"]
 
     @pytest.mark.asyncio
-    async def test_ch_error_recorded_per_table(self):
+    async def test_telemetry_error_recorded(self):
+        from services.telemetry import TelemetryUnavailableError
+
         db = _mock_db()
         tables_result = MagicMock()
         tables_result.fetchall.return_value = []
         db.execute.return_value = tables_result
 
-        with patch("api.routes.support._query", new_callable=AsyncMock) as mock_query:
-            mock_query.side_effect = [
-                _mock_ch_response(200, json_data={"data": [{"name": "broken"}]}),
-                ConnectionError("CH query failed"),
-            ]
+        with patch("api.routes.support.table_counts", new=AsyncMock(side_effect=TelemetryUnavailableError("down"))):
             result = await _collect_aggregates(db)
 
-        assert "error" in result["ch_table_counts"]["broken"]
-
-    @pytest.mark.asyncio
-    async def test_unsafe_ch_table_name_skipped(self):
-        db = _mock_db()
-        tables_result = MagicMock()
-        tables_result.fetchall.return_value = []
-        db.execute.return_value = tables_result
-
-        with patch("api.routes.support._query", new_callable=AsyncMock) as mock_query:
-            mock_query.side_effect = [
-                _mock_ch_response(200, json_data={"data": [{"name": "Robert'; DROP TABLE--"}]}),
-            ]
-            result = await _collect_aggregates(db)
-
-        assert "unsafe table name" in result["ch_table_counts"]["Robert'; DROP TABLE--"]
+        assert result["telemetry_table_counts"] == {"error": "TelemetryUnavailableError"}
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -893,7 +818,7 @@ class TestConfigAllowlistFiltering:
         """Boot-time allowlist contains infrastructure keys."""
         expected = {
             "DATABASE_URL",
-            "CLICKHOUSE_URL",
+            "TELEMETRY_URL",
             "REDIS_URL",
             "JWT_SIGNING_ALGORITHM",
         }

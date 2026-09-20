@@ -181,7 +181,7 @@ class TestSink:
             _buffer.clear()
             _buffer.append({"event_id": "test", "timestamp": "2026-01-01 00:00:00.000", "action": "t"})
 
-        with patch("services.clickhouse.insert_audit_log", new_callable=AsyncMock) as mock_insert:
+        with patch("services.telemetry.insert_audit_log", new_callable=AsyncMock) as mock_insert:
             async with _buffer_lock:
                 await _flush()
             mock_insert.assert_called_once()
@@ -194,7 +194,7 @@ class TestSink:
         async with _buffer_lock:
             _buffer.clear()
 
-        with patch("services.clickhouse.insert_audit_log", new_callable=AsyncMock) as mock_insert:
+        with patch("services.telemetry.insert_audit_log", new_callable=AsyncMock) as mock_insert:
             async with _buffer_lock:
                 await _flush()
             mock_insert.assert_not_called()
@@ -335,25 +335,16 @@ class TestCliAudit:
 
 
 class TestSchemaExpansion:
-    """ClickHouse schema includes new audit columns."""
+    """Telemetry schema includes the audit columns."""
 
-    def test_new_columns_in_baseline_migration(self):
-        from services.clickhouse.migrations import MIGRATIONS_DIR
+    def test_audit_columns_in_baseline_schema(self):
+        from telemetry_store.db import SCHEMA_DIR
 
-        sql_blob = (MIGRATIONS_DIR / "001_baseline.sql").read_text()
-        assert "ALTER TABLE audit_log ADD COLUMN IF NOT EXISTS sensitivity" in sql_blob
-        assert "ALTER TABLE audit_log ADD COLUMN IF NOT EXISTS outcome" in sql_blob
-        assert "ALTER TABLE audit_log ADD COLUMN IF NOT EXISTS duration_ms" in sql_blob
-        assert "ALTER TABLE audit_log ADD COLUMN IF NOT EXISTS chain_hash" in sql_blob
-        assert "ALTER TABLE audit_log ADD COLUMN IF NOT EXISTS source" in sql_blob
-
-    def test_new_indexes_in_baseline_migration(self):
-        from services.clickhouse.migrations import MIGRATIONS_DIR
-
-        sql_blob = (MIGRATIONS_DIR / "001_baseline.sql").read_text()
-        assert "idx_outcome" in sql_blob
-        assert "idx_sensitivity" in sql_blob
-        assert "idx_source" in sql_blob
+        sql_blob = (SCHEMA_DIR / "001_baseline.sql").read_text()
+        audit_ddl = sql_blob[sql_blob.index("CREATE TABLE IF NOT EXISTS audit_log") :]
+        audit_ddl = audit_ddl[: audit_ddl.index(");")]
+        for column in ("sensitivity", "outcome", "duration_ms", "chain_hash", "source", "request_id"):
+            assert column in audit_ddl
 
 
 class TestInsertAuditLog:
@@ -361,45 +352,42 @@ class TestInsertAuditLog:
 
     @pytest.mark.asyncio
     async def test_includes_all_fields(self):
-        with patch("services.clickhouse.client._query", new_callable=AsyncMock) as mock_query:
-            mock_response = MagicMock()
-            mock_response.raise_for_status = MagicMock()
-            mock_query.return_value = mock_response
+        from services.telemetry.writes import insert_audit_log
 
-            with patch("services.clickhouse.client._invalidate_cache", new_callable=AsyncMock):
-                from services.clickhouse.insert import insert_audit_log
+        with patch("services.telemetry.writes.client.write", new_callable=AsyncMock) as mock_write:
+            rows = [
+                {
+                    "event_id": str(uuid.uuid4()),
+                    "timestamp": "2026-01-01 00:00:00.000",
+                    "actor_id": "user-1",
+                    "actor_email": "t@t.com",
+                    "actor_role": "admin",
+                    "action": "test",
+                    "resource_type": "",
+                    "resource_id": "",
+                    "resource_name": "",
+                    "http_method": "POST",
+                    "http_path": "/test",
+                    "status_code": 200,
+                    "ip_address": "10.0.0.1",
+                    "user_agent": "cli",
+                    "detail": "",
+                    "sensitivity": "high",
+                    "request_id": "req-1",
+                    "outcome": "success",
+                    "duration_ms": 42.5,
+                    "chain_hash": "a" * 64,
+                    "source": "cli",
+                }
+            ]
 
-                rows = [
-                    {
-                        "event_id": str(uuid.uuid4()),
-                        "timestamp": "2026-01-01 00:00:00.000",
-                        "actor_id": "user-1",
-                        "actor_email": "t@t.com",
-                        "actor_role": "admin",
-                        "action": "test",
-                        "resource_type": "",
-                        "resource_id": "",
-                        "resource_name": "",
-                        "http_method": "POST",
-                        "http_path": "/test",
-                        "status_code": 200,
-                        "ip_address": "10.0.0.1",
-                        "user_agent": "cli",
-                        "detail": "",
-                        "sensitivity": "high",
-                        "request_id": "req-1",
-                        "outcome": "success",
-                        "duration_ms": 42.5,
-                        "chain_hash": "a" * 64,
-                        "source": "cli",
-                    }
-                ]
-
-                await insert_audit_log(rows)
-                mock_query.assert_called_once()
-                data = mock_query.call_args.kwargs.get("data", "")
-                parsed = json.loads(data)
-                assert parsed["sensitivity"] == "high"
-                assert parsed["outcome"] == "success"
-                assert parsed["source"] == "cli"
-                assert parsed["chain_hash"] == "a" * 64
+            await insert_audit_log(rows)
+            mock_write.assert_awaited_once()
+            path, payload = mock_write.call_args.args
+            assert path == "/v1/write/append"
+            assert payload["table"] == "audit_log"
+            parsed = payload["rows"][0]
+            assert parsed["sensitivity"] == "high"
+            assert parsed["outcome"] == "success"
+            assert parsed["source"] == "cli"
+            assert parsed["chain_hash"] == "a" * 64

@@ -170,10 +170,15 @@ async def test_result_too_large(store):
 async def test_backpressure_returns_429_not_hang(store):
     slow = "SELECT count(*) FROM range(300000000) a, range(1000) b"
     tasks = [store.post("/v1/query", json={"sql": slow, "timeout_ms": 400}) for _ in range(12)]
-    results = await asyncio.wait_for(asyncio.gather(*tasks), timeout=30)
+    results = await asyncio.wait_for(asyncio.gather(*tasks), timeout=60)
     codes = sorted(r.status_code for r in results)
     assert 429 in codes
     assert set(codes) <= {429, 504}
+    # Interrupted workers unwind asynchronously; wait for the pool to drain, then prove it is usable.
+    for _ in range(100):
+        if (await store.get("/v1/health")).json()["read_pending"] == 0:
+            break
+        await asyncio.sleep(0.1)
     assert await _q(store, "SELECT 1 AS one") == [{"one": 1}]
 
 

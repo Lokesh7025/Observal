@@ -465,11 +465,7 @@ async def test_upsert_retention_setting_normalizes_persists_and_refreshes_cache(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("key", ["resource.max_query_memory_mb", "custom.unknown_setting"])
 async def test_upsert_accepts_resource_map_and_unknown_keys_without_implicit_apply(key, boundaries, monkeypatch):
-    import services.clickhouse as clickhouse
-
     db = _db(_one(None))
-    apply_resources = AsyncMock()
-    monkeypatch.setattr(clickhouse, "apply_resource_settings", apply_resources)
     monkeypatch.setattr(es.ds, "is_externally_managed", lambda _key: False)
 
     response = await es.upsert_setting(key, EnterpriseConfigUpdate(value=" 300 "), db=db, current_user=_actor())
@@ -479,7 +475,6 @@ async def test_upsert_accepts_resource_map_and_unknown_keys_without_implicit_app
     assert response.value == "300"
     boundaries.invalidate.assert_awaited_once_with(key)
     boundaries.refresh.assert_awaited_once_with()
-    apply_resources.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -792,79 +787,20 @@ async def test_delete_and_revoke_nonrestart_settings_skip_restart_marker(boundar
 
 
 @pytest.mark.asyncio
-async def test_apply_resources_passes_all_overrides_but_reports_only_supported_keys(boundaries, monkeypatch):
-    import services.clickhouse as clickhouse
-
-    rows = [
-        SimpleNamespace(key="resource.max_query_memory_mb", value="300"),
-        SimpleNamespace(key="resource.unknown", value="9"),
-    ]
-    db = _db(_many(rows))
-    apply = AsyncMock()
-    monkeypatch.setattr(clickhouse, "apply_resource_settings", apply)
-
-    response = await es.apply_resources(current_user=_actor(), db=db)
-
-    expected = {"resource.max_query_memory_mb": "300", "resource.unknown": "9"}
-    apply.assert_awaited_once_with(overrides=expected)
-    assert response == {
-        "applied": {"resource.max_query_memory_mb": "300"},
-        "message": "ClickHouse resource settings applied",
-    }
-    event = boundaries.emit.await_args.args[0]
-    assert event.event_type is EventType.SETTING_CHANGED
-    assert event.severity is Severity.WARNING
-    assert event.target_id == "resource_settings"
-    assert event.target_type == "setting"
-    assert event.detail == ("Applied resource settings: ['resource.max_query_memory_mb', 'resource.unknown']")
-
-
-@pytest.mark.asyncio
-async def test_apply_resources_failure_is_not_hidden_and_emits_no_success(boundaries, monkeypatch):
-    import services.clickhouse as clickhouse
-
-    db = _db(_many([SimpleNamespace(key="resource.max_query_memory_mb", value="300")]))
-    monkeypatch.setattr(
-        clickhouse,
-        "apply_resource_settings",
-        AsyncMock(side_effect=RuntimeError("ClickHouse unavailable")),
-    )
-
-    with pytest.raises(RuntimeError, match="ClickHouse unavailable"):
-        await es.apply_resources(current_user=_actor(), db=db)
-
-    boundaries.emit.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_purge_continues_after_clickhouse_failure_and_deletes_postgres_rows(boundaries, monkeypatch):
-    import services.clickhouse.client as clickhouse_client
-
-    clickhouse_error = RuntimeError("mutation unavailable")
-    query = AsyncMock(side_effect=[None, clickhouse_error])
-    monkeypatch.setattr(clickhouse_client, "_query", query)
-    logger = MagicMock()
-    monkeypatch.setattr(es, "optic", logger)
+async def test_purge_deletes_every_project_scoped_table_then_postgres_rows(boundaries, monkeypatch):
+    delete_rows = AsyncMock(side_effect=[10, 3, 3])
+    monkeypatch.setattr("services.telemetry.writes.delete_rows", delete_rows)
+    monkeypatch.setattr("services.telemetry.delete_rows", delete_rows)
     counts = [MagicMock(rowcount=value) for value in (5, 4, 3, 2)]
     db = _db(*counts)
 
     response = await es.purge_traces_and_insights(db=db, current_user=_actor())
 
-    assert query.await_args_list == [
-        call(
-            "ALTER TABLE session_events DELETE WHERE project_id = {project_id:String}",
-            {"param_project_id": "default"},
-        ),
-        call(
-            "ALTER TABLE session_stats_agg DELETE WHERE project_id = {project_id:String}",
-            {"param_project_id": "default"},
-        ),
+    assert delete_rows.await_args_list == [
+        call("session_events", {"project_id": "default"}),
+        call("session_stats_agg", {"project_id": "default"}),
+        call("session_checkpoints", {"project_id": "default"}),
     ]
-    logger.warning.assert_any_call(
-        "danger purge failed for ClickHouse table {}: {}",
-        "session_stats_agg",
-        clickhouse_error,
-    )
     assert [statement.table.name for statement in [item.args[0] for item in db.execute.await_args_list]] == [
         "insight_reports",
         "insight_session_facets",
@@ -874,7 +810,7 @@ async def test_purge_continues_after_clickhouse_failure_and_deletes_postgres_row
     db.commit.assert_awaited_once_with()
     assert response.model_dump() == {
         "project_id": "default",
-        "clickhouse_tables": ["session_events", "session_stats_agg"],
+        "telemetry_tables": ["session_events", "session_stats_agg", "session_checkpoints"],
         "deleted_reports": 5,
         "deleted_facets": 4,
         "deleted_session_meta": 3,
@@ -887,18 +823,32 @@ async def test_purge_continues_after_clickhouse_failure_and_deletes_postgres_row
 
 
 @pytest.mark.asyncio
-async def test_purge_database_failure_propagates_without_commit_or_success_event(boundaries, monkeypatch):
-    import services.clickhouse.client as clickhouse_client
+async def test_purge_store_failure_is_loud_and_leaves_postgres_untouched(boundaries, monkeypatch):
+    from services.telemetry import TelemetryUnavailableError
 
-    query = AsyncMock(return_value=None)
-    monkeypatch.setattr(clickhouse_client, "_query", query)
+    delete_rows = AsyncMock(side_effect=TelemetryUnavailableError("store down"))
+    monkeypatch.setattr("services.telemetry.delete_rows", delete_rows)
+    db = _db()
+
+    with pytest.raises(TelemetryUnavailableError, match="store down"):
+        await es.purge_traces_and_insights(db=db, current_user=_actor())
+
+    db.execute.assert_not_awaited()
+    db.commit.assert_not_awaited()
+    boundaries.emit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_purge_database_failure_propagates_without_commit_or_success_event(boundaries, monkeypatch):
+    delete_rows = AsyncMock(return_value=0)
+    monkeypatch.setattr("services.telemetry.delete_rows", delete_rows)
     db = _db()
     db.execute.side_effect = RuntimeError("postgres unavailable")
 
     with pytest.raises(RuntimeError, match="postgres unavailable"):
         await es.purge_traces_and_insights(db=db, current_user=_actor())
 
-    assert query.await_count == 2
+    assert delete_rows.await_count == 3
     db.commit.assert_not_awaited()
     boundaries.emit.assert_not_awaited()
 
