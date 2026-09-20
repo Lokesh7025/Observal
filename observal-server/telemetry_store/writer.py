@@ -427,6 +427,16 @@ def import_chunk(
         {"pid": project_id_override} if project_id_override else {},
     )
     row_count = int(conn.execute("SELECT count(*) FROM _chunk_src").fetchone()[0])
+    if row_count == 0:
+        # An empty chunk (exported table with no rows) is a no-op, but it is still
+        # recorded so a resumed import does not re-upload it.
+        conn.execute(
+            'INSERT INTO telemetry_import_ledger (migration_id, chunk_id, "table", sha256, row_count) '
+            "VALUES ($m, $c, $t, $s, 0)",
+            {"m": migration_id, "c": chunk_id, "t": table.name, "s": sha256},
+        )
+        conn.execute("DROP TABLE IF EXISTS _chunk_src")
+        return {"skipped": False, "rows_written": 0, "rows_replaced": 0, "row_count": 0}
 
     # Derived keys: computed in Python so there is one hash implementation everywhere.
     if table.name in {"session_events", "layer_snapshots"}:

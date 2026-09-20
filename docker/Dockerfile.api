@@ -28,7 +28,7 @@ FROM python:3.14-slim@sha256:cea0e6040540fb2b965b6e7fb5ffa00871e632eef63719f0ea5
 
 RUN groupadd --system --gid 1001 appgroup && \
     useradd --system --uid 1001 --gid appgroup appuser && \
-    mkdir -p /data /data/telemetry && chown -R appuser:appgroup /data
+    mkdir -p /data && chown appuser:appgroup /data
 
 RUN apt-get update && apt-get install -y --no-install-recommends git xmlsec1 && rm -rf /var/lib/apt/lists/*
 

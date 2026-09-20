@@ -404,6 +404,22 @@ async def test_import_chunk_idempotent_and_checksummed(store, event_row, tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_import_empty_chunk_is_recorded_noop(store, event_row, tmp_path: Path):
+    """A zero-row chunk (empty source table) imports cleanly and lands in the ledger."""
+    schema = pa.Table.from_pylist([event_row("x", 0)]).schema
+    path = tmp_path / "empty.parquet"
+    pq.write_table(pa.Table.from_pylist([], schema=schema), path)
+    sha = hashlib.sha256(path.read_bytes()).hexdigest()
+    for table in ("session_events", "layer_snapshots", "audit_log"):
+        r = await _import_chunk(store, path, migration_id="m", chunk_id=f"e-{table}", table=table, sha256=sha)
+        assert r.status_code == 200, (table, r.text)
+        assert r.json() == {"skipped": False, "rows_written": 0, "rows_replaced": 0, "row_count": 0}
+    assert await _q(store, "SELECT count(*) AS c FROM telemetry_import_ledger") == [{"c": 3}]
+    r = await _import_chunk(store, path, migration_id="m", chunk_id="e-audit_log", table="audit_log", sha256=sha)
+    assert r.json()["skipped"] is True
+
+
+@pytest.mark.asyncio
 async def test_import_never_overwrites_live_rows(store, event_row, tmp_path: Path):
     identity = {"project_id": "default", "user_id": "u1", "harness": "claude-code", "session_id": "live"}
     live = [event_row("live", 0, content_preview="LIVE")]
@@ -525,6 +541,12 @@ async def test_export_parquet_with_manifest(store, event_row, tmp_path: Path):
     files = list((dest / "session_events").glob("*.parquet"))
     assert len(files) == 1
     assert pq.read_table(files[0]).num_rows == 7
+    # Empty tables are recorded in the manifest but produce no chunk files.
+    r = await store.post("/v1/export", json={"tables": ["layer_snapshots"], "dest_dir": str(tmp_path / "empty")})
+    empty_job = await _wait_job(store, r.json()["id"])
+    assert empty_job["state"] == "done" and empty_job["result"]["chunks"] == 0
+    assert empty_job["result"]["tables"] == {"layer_snapshots": {"row_count": 0}}
+    assert not (tmp_path / "empty" / "layer_snapshots").exists()
     r = await store.post("/v1/export", json={"tables": ["nope"], "dest_dir": str(dest)})
     assert r.status_code == 422
 

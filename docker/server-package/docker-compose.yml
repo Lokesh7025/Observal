@@ -117,7 +117,9 @@ services:
       - TELEMETRY_THREADS=${TELEMETRY_THREADS:-4}
       - TELEMETRY_METRICS_PUBLIC=true
     volumes:
-      - tdata:/data/telemetry
+      # Mounted at /data (owned by appuser in the image) so a fresh named volume
+      # inherits that ownership; the service creates /data/telemetry itself.
+      - tdata:/data
       - ./secrets/telemetry:/run/secrets:ro
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8125/v1/health')\""]

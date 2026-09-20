@@ -12,7 +12,7 @@ export default defineConfig({
   use: {
     // CI: Docker stack serves on port 80 via lb
     // Local: Vite dev server on port 3000
-    baseURL: isCI ? "http://localhost:80" : "http://localhost:3000",
+    baseURL: process.env.E2E_BASE_URL ?? (isCI ? "http://localhost:80" : "http://localhost:3000"),
     headless: true,
     screenshot: "only-on-failure",
     trace: "retain-on-failure",

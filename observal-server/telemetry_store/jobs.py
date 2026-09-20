@@ -157,7 +157,8 @@ class JobRegistry:
                 try:
                     count = int(cursor.execute(f'SELECT count(*) FROM "{table}"{where}', params).fetchone()[0])
                     manifest["tables"][table] = {"row_count": count}
-                    chunks = max(1, -(-count // EXPORT_CHUNK_ROWS))
+                    # Empty tables produce no chunk files; the manifest still records row_count=0.
+                    chunks = -(-count // EXPORT_CHUNK_ROWS)
                     order = ", ".join(f'"{k}"' for k in cfg.key_columns)
                     for c in range(chunks):
                         self._touch(

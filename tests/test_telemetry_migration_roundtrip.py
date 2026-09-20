@@ -324,13 +324,10 @@ async def test_store_export_roundtrips_into_a_second_store(tmp_path, route_httpx
         manifest = json.loads((out / "telemetry_manifest.json").read_text())
         assert manifest["telemetry_manifest_version"] == "3.0"
         chunks = manifest_chunks(manifest, out)
-        assert {c["table"] for c in chunks} == {
-            "session_events",
-            "audit_log",
-            "layer_snapshots",
-            "security_events",
-            "webhook_deliveries",
-        }
+        # Only tables with rows produce chunk files; empty ones appear in the manifest with row_count=0.
+        assert {c["table"] for c in chunks} == {"session_events", "audit_log", "layer_snapshots"}
+        assert manifest["tables"]["security_events"] == {"row_count": 0}
+        assert manifest["tables"]["webhook_deliveries"] == {"row_count": 0}
         for chunk in chunks:
             assert _sha(chunk["path"]) == chunk["sha256"]
 

@@ -12,7 +12,32 @@ sys.path.insert(0, str(ROOT / "packages" / "observal-shared"))
 
 # ── Telemetry store fixture (real in-process DuckDB behind ASGI) ──────
 
+import pytest  # noqa: E402
 import pytest_asyncio  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _isolate_telemetry_client():
+    """Tests never talk to a real telemetry store unless they ask for one.
+
+    Without this, a store listening on the developer's localhost:8125 (for
+    example the Docker stack) would be reached by best-effort writers, and the
+    module-level httpx client would keep pooled connections bound to a closed
+    event loop across tests. Tests that need a store use the ``telemetry``
+    fixture, which installs its own client.
+    """
+    import httpx
+
+    from services.telemetry import client as tclient
+
+    def _refuse(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("telemetry store disabled in tests", request=request)
+
+    tclient.set_client(httpx.AsyncClient(transport=httpx.MockTransport(_refuse), base_url="http://telemetry.test"))
+    try:
+        yield
+    finally:
+        tclient.set_client(None)
 
 
 @pytest_asyncio.fixture()
