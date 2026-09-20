@@ -1,0 +1,59 @@
+{
+  "session detail (by key, ~100 rows)": {
+    "p50_ms": 15.6,
+    "p95_ms": 18.9
+  },
+  "dedup lookup (line range)": {
+    "p50_ms": 11.0,
+    "p95_ms": 12.7
+  },
+  "checkpoint lookup": {
+    "p50_ms": 2.3,
+    "p95_ms": 2.8
+  },
+  "session list (page of 50)": {
+    "p50_ms": 18.9,
+    "p95_ms": 23.2
+  },
+  "overview: tool calls last 400d": {
+    "p50_ms": 3.7,
+    "p95_ms": 3.9
+  },
+  "exec: sessions by month": {
+    "p50_ms": 21.5,
+    "p95_ms": 23.6
+  },
+  "exec: tokens by user (30d window)": {
+    "p50_ms": 7.2,
+    "p95_ms": 9.1
+  },
+  "audit-style scan: tool usage (events)": {
+    "p50_ms": 167.1,
+    "p95_ms": 167.1
+  },
+  "ingest write (1000 rows + summary + ckpt)": {
+    "p50_ms": 212.7,
+    "p95_ms": 249.6
+  },
+  "backup": {
+    "seconds": 100.5,
+    "bytes": 1714958336,
+    "state": "done"
+  },
+  "health": {
+    "status": "ok",
+    "schema_version": "001_baseline",
+    "db_path": "/tmp/telemetry-bench-ba6cr8jm/bench.duckdb",
+    "file_bytes": 1714958336,
+    "wal_bytes": 11086052,
+    "memory_limit": "1536MB",
+    "writer_paused": false,
+    "read_pending": 0,
+    "read_active": 0,
+    "write_inflight": 0,
+    "duckdb_version": "1.5.5"
+  },
+  "rows": 30000000,
+  "sessions": 300000,
+  "file_gb": 1.72
+}
