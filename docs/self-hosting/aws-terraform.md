@@ -3,7 +3,7 @@
 
 # AWS deployment with Terraform
 
-End state: an Observal install running in your own AWS account, fronted by an Application Load Balancer with HTTPS, with managed Postgres + Redis, ECS Fargate for the stateless app tier, and a single EC2 host for ClickHouse. Prometheus and Grafana are optional through `observability_stack`.
+End state: an Observal install running in your own AWS account, fronted by an Application Load Balancer with HTTPS, with managed Postgres + Redis, ECS Fargate for the stateless app tier, and a single EC2 host for the DuckDB telemetry store. Prometheus and Grafana are optional through `observability_stack`.
 
 This is the recommended path for enterprise self-hosting on AWS. If you only want to evaluate Observal, use [Docker Compose setup](docker-compose.md) instead.
 
@@ -20,13 +20,13 @@ A single `terraform apply` creates:
   * `init` (one-shot migrations + seeds): runs as a Fargate `RunTask` whenever `image_tag` changes
 * **RDS Postgres 16**: Multi-AZ on `prod`, encrypted, automated daily backups, Performance Insights, Enhanced Monitoring, log exports
 * **ElastiCache Redis 7**: 2-node replication group with automatic failover on `prod`, slow-log to CloudWatch
-* **Data tier EC2** (Amazon Linux 2023): single host running ClickHouse on EBS gp3, optional Prometheus and Grafana, ENI with static private IP, internal Route 53 zone for DNS, daily ClickHouse → S3 snapshot via systemd timer
+* **Data tier EC2** (Amazon Linux 2023): single host running the telemetry store on EBS gp3, optional Prometheus and Grafana, ENI with static private IP, internal Route 53 zone for DNS, daily telemetry snapshot → S3 via systemd timer
 * **S3 backups bucket**: versioned, AES256, lifecycle to STANDARD\_IA → GLACIER\_IR → expire, TLS-only
 * **CloudWatch log groups**: per ECS service, data host, RDS, Redis slow log, VPC flow logs
-* **SSM Parameter Store**: generated DB / ClickHouse / SECRET\_KEY / optional Grafana passwords, plus pre-built connection URLs injected into ECS tasks
+* **SSM Parameter Store**: generated DB password, telemetry token, SECRET\_KEY, optional Grafana password, plus pre-built connection URLs injected into ECS tasks
 * **SSM Session Manager**: shell access to the data host, no SSH
 
-ClickHouse runs on EC2 because AWS does not offer a managed ClickHouse service. The data volume keeps it durable across instance replacements. For real ClickHouse HA, set `clickhouse_mode = "cloud"` and point at ClickHouse Cloud.
+The telemetry store is a single-writer DuckDB service, so it runs on one EC2 host with its database file on EBS; the volume keeps it durable across instance replacements and a daily snapshot lands in S3. Existing installs migrating from ClickHouse set `enable_legacy_clickhouse = true` for the cutover window (see [Data migration](data-migration.md)).
 
 ## Prerequisites
 
@@ -138,8 +138,8 @@ api_autoscale_max    = 10
 web_desired_count    = 2
 worker_desired_count = 1
 
-# Data tier (ClickHouse)
-data_instance_type   = "t3.large"   # 8 GB - minimum viable for ClickHouse
+# Data tier (telemetry store)
+data_instance_type   = "t3.large"   # 8 GB; the store uses ~2 GB, the rest is page cache
 data_volume_size_gb  = 100
 observability_stack  = "none"       # none | prometheus | grafana
 
@@ -147,24 +147,21 @@ db_instance_class    = "db.t4g.small"
 redis_node_type      = "cache.t4g.micro"
 ```
 
-For high-throughput installs (>100 trace events/sec sustained), bump `data_instance_type` to `m6i.xlarge` and `db_instance_class` to `db.m6g.large`, or move ClickHouse to ClickHouse Cloud (see below).
+For high-throughput installs (>100 trace events/sec sustained), bump `data_instance_type` to `m6i.xlarge` and `db_instance_class` to `db.m6g.large`.
 
-### ClickHouse Cloud instead of EC2
+### Upgrading from a ClickHouse install
 
 ```hcl
-clickhouse_mode           = "cloud"
-clickhouse_cloud_url      = "https://abc123.us-east-1.aws.clickhouse.cloud:8443"
-clickhouse_cloud_user     = "default"
-clickhouse_cloud_password = "..."
+enable_legacy_clickhouse = true
 ```
 
-The EC2 data host, EBS volume, internal DNS records, and bundled observability are all skipped. You become responsible for monitoring and dashboards yourself, typically AWS Managed Grafana or Grafana Cloud.
+keeps the old ClickHouse container on the data host and publishes `CLICKHOUSE_URL` to SSM so `observal server migrate telemetry-cutover` can back-fill the store. Set it back to `false` after verification; `/data/clickhouse` on the EBS volume is left in place.
 
 ### Application options
 
 ```hcl
 deployment_mode     = "enterprise"   # SSO-only login
-data_retention_days = 90             # ClickHouse TTL; 0 to disable
+data_retention_days = 90             # session event retention; 0 to disable
 log_retention_days  = 30             # CloudWatch log group retention
 image_tag           = "v1.4.0"       # specific Observal release; "latest" pulls main
 ```
@@ -264,7 +261,7 @@ $(terraform output -raw data_host_ssm_session_command)
 # inside the session:
 sudo journalctl -u observal-bootstrap -f                                 # cloud-init / first-boot logs
 sudo docker compose -f /opt/observal/docker-compose.data.yml ps          # CH/Grafana/Prom status
-sudo docker compose -f /opt/observal/docker-compose.data.yml logs -f clickhouse
+sudo docker compose -f /opt/observal/docker-compose.data.yml logs -f telemetry
 ```
 
 ### Read a generated secret
@@ -275,7 +272,7 @@ aws ssm get-parameter --with-decryption \
   --query Parameter.Value --output text
 ```
 
-The Terraform run generates and stores `DB_PASSWORD`, `CLICKHOUSE_PASSWORD`, `SECRET_KEY`, and `GRAFANA_ADMIN_PASSWORD`, plus pre-built `DATABASE_URL`, `REDIS_URL`, and `CLICKHOUSE_URL` connection strings. ECS injects these into tasks at start; you never paste them in.
+The Terraform run generates and stores `DB_PASSWORD`, `TELEMETRY_TOKEN`, `SECRET_KEY`, and `GRAFANA_ADMIN_PASSWORD`, plus pre-built `DATABASE_URL`, `REDIS_URL`, and `TELEMETRY_URL` connection strings. ECS injects these into tasks at start; you never paste them in.
 
 ### Upgrade to a new Observal release
 
@@ -360,7 +357,7 @@ The defaults are safe but conservative. Before pointing real traffic at this:
 * [ ] Add CloudWatch alarms on RDS `CPUUtilization`, `FreeableMemory`, ECS service CPU, ALB `HTTPCode_Target_5XX_Count`
 * [ ] Attach AWS WAF to the ALB
 * [ ] Set `transit_encryption_enabled = true` on the ElastiCache replication group and switch `REDIS_URL` to `rediss://...`
-* [ ] Move ClickHouse to ClickHouse Cloud (`clickhouse_mode = "cloud"`) for actual HA
+* [ ] Restore-test the daily telemetry snapshot from the backups bucket
 * [ ] Configure Observal SSO. See [Authentication and SSO](authentication.md)
 * [ ] Test the [backup and restore](backup-and-restore.md) procedure end-to-end
 * [ ] Replace the GitHub tarball download in `user-data.sh.tftpl` with an artifact URL you control

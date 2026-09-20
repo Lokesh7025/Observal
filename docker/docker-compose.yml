@@ -148,6 +148,7 @@ services:
       - TELEMETRY_BIND=0.0.0.0:8125
       - TELEMETRY_MEMORY_LIMIT=${TELEMETRY_MEMORY_LIMIT_DUCKDB:-1536MB}
       - TELEMETRY_THREADS=${TELEMETRY_THREADS:-4}
+      - TELEMETRY_METRICS_PUBLIC=true
     volumes:
       - tdata:/data/telemetry
     healthcheck:

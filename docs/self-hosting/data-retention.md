@@ -11,7 +11,7 @@ The **Purge Traces & Insights** danger-zone action permanently deletes telemetry
 
 It removes:
 
-- ClickHouse session events and session aggregates for project `default`.
+- Telemetry store session events, summaries, and checkpoints for project `default`.
 - Agent insight reports and insight caches/facets for all agents.
 
 It does **not** delete registry agents, versions, skills, hooks, prompts, users, reviews, or audit/security logs.
@@ -31,9 +31,9 @@ The admin retention controls store deployment-wide policy values in the followin
 
 The policy values are independent of registry ownership. Leave a threshold empty when that limit is not needed. If `retention.score_days` is empty, the purge uses twice `retention.trace_days`, with a 30-day minimum.
 
-## ClickHouse TTL {#data-retention}
+## Session event retention {#data-retention}
 
-`data.retention_days` remains the separate ClickHouse TTL setting. It controls automatic expiry of raw session content and defaults to 90 days. Application retention values cannot exceed this ceiling when it is enabled.
+`data.retention_days` remains the separate ceiling for session event retention, applied by the worker purge job in the telemetry store. It defaults to 90 days. Application retention values cannot exceed this ceiling when it is enabled. Independently, transcript bodies (`raw_line`) are trimmed after 30 days and audit/security events after 730 days.
 
 | Value | Effect |
 |-------|--------|
@@ -42,7 +42,7 @@ The policy values are independent of registry ownership. Leave a threshold empty
 | `365` | Long TTL for annual analysis |
 | `0` | Keep raw telemetry indefinitely, not recommended unless storage is actively managed |
 
-**When to lower:** The deployment has strict data minimization rules, or ClickHouse storage is growing too quickly.
+**When to lower:** The deployment has strict data minimization rules, or the telemetry volume is growing too quickly.
 
 **When to raise:** You need longer trend windows for audits, investigations, or longitudinal agent performance analysis.
 
@@ -62,7 +62,7 @@ Cache duration, in seconds, for expensive dashboard aggregation queries.
 
 | Value | Effect |
 |-------|--------|
-| `60` (default) | Dashboards feel fresh without hammering ClickHouse |
+| `60` (default) | Dashboards feel fresh without hammering the telemetry store |
 | `15` | Near-live dashboard updates, higher query load |
 | `300` | Lower query load for large deployments, charts can lag by several minutes |
 

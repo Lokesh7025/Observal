@@ -10,7 +10,7 @@ FastAPI backend that powers the Observal platform. Provides REST and GraphQL API
 
 - **Framework**: FastAPI with Uvicorn
 - **Database**: PostgreSQL (async via SQLAlchemy + asyncpg)
-- **Analytics**: ClickHouse for telemetry, traces, and scoring data
+- **Telemetry**: single-writer DuckDB service (`telemetry_store/`) for session events, summaries, and audit data
 - **Cache / Jobs**: Redis with arq for background workers
 - **GraphQL**: Strawberry (dashboard queries with DataLoaders)
 - **Auth**: JWT (asymmetric signing), OAuth/OIDC via Authlib
@@ -89,4 +89,4 @@ cd observal-server
 uv run uvicorn main:app --reload --port 8000
 ```
 
-Requires PostgreSQL, ClickHouse, and Redis. See `config.py` for all environment variables and defaults.
+Requires PostgreSQL, the telemetry store service, and Redis. See `config.py` for all environment variables and defaults.

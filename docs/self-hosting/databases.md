@@ -3,12 +3,12 @@
 
 # Databases
 
-Observal runs two DBs with very different jobs.
+Observal runs two data stores with very different jobs.
 
-| DB | Role | Access pattern | Schema source of truth |
+| Store | Role | Access pattern | Schema source of truth |
 | --- | --- | --- | --- |
 | Postgres 16 | Registry, users, config | Relational, transactional | Alembic migrations in `observal-server/alembic/versions/` |
-| ClickHouse 26.5 | Telemetry and audit event storage | Columnar, time-series, high-write | Versioned SQL migrations in `observal-server/clickhouse/migrations/` |
+| Telemetry store (DuckDB) | Session events, summaries, audit and security events, webhook deliveries | Columnar; one writer, many readers, HTTP API | `observal-server/telemetry_store/schema/001_baseline.sql` |
 
 ## Postgres
 
@@ -20,7 +20,7 @@ Observal runs two DBs with very different jobs.
 * `feedback`, `ratings`
 * `alerts`, `alert_history`
 * `api_keys`
-* `audit_log` and related audit tables
+* insight reports and caches
 
 ### Migrations
 
@@ -32,7 +32,7 @@ For Docker Compose deployments, run the init service manually when needed:
 docker compose -f docker/docker-compose.yml run --rm observal-init
 ```
 
-The init service applies Alembic and ClickHouse migrations before API startup. `observal server migrate` moves data between deployments; it does not apply schema migrations.
+The init service applies Alembic migrations and the telemetry schema before API startup. `observal server migrate` moves data between deployments; it does not apply schema migrations.
 
 ### Reset
 
@@ -47,73 +47,63 @@ The `-v` deletes all named volumes. Use only in dev.
 
 ---
 
-## ClickHouse
+## Telemetry store
+
+The telemetry store is a **single-writer DuckDB service** (`observal-telemetry`, `python -m telemetry_store`) that owns one database file and exposes it over HTTP on port 8125. The API, worker, Grafana, and CLI never open the file; they call the service with a bearer token. See [Telemetry service](telemetry-service.md) for the service itself and [Data migration](data-migration.md) for moving from ClickHouse.
 
 ### What's in it
 
-Core tables:
+| Table | Contents | Logical key |
+| --- | --- | --- |
+| `session_events` | Raw and parsed harness JSONL lines, token fields, tool fields, and session metadata | `(session_key, line_offset)` |
+| `session_stats_agg` | One summary row per session (counts, tokens, credits, first/last event time) | `session_key` |
+| `session_checkpoints` | Highest contiguous acknowledged source line per session | `session_key` |
+| `layer_snapshots` | Harness config snapshots used by version-aware insights (and baseline pins) | `snapshot_key` |
+| `audit_log` | Audit events (append-only) | `event_id` |
+| `security_events` | Security events for login, auth, and admin activity (append-only) | `event_id` |
+| `webhook_deliveries` | Alert webhook delivery attempts and status (append-only) | `delivery_id` |
+| `telemetry_import_ledger` | Chunks already imported by `migrate import-telemetry` / the cutover | `(migration_id, chunk_id)` |
 
-| Table | Contents |
-| --- | --- |
-| `session_events` | Raw and parsed harness JSONL lines, token fields, tool fields, and session metadata |
-| `session_stats_agg` | Pre-aggregated session list and summary metrics from `session_events` |
-| `layer_snapshots` | Harness config snapshots used by version-aware insights |
-| `audit_log` | Audit events |
-| `security_events` | Security events for login, auth, and admin activity |
-| `webhook_deliveries` | Alert webhook delivery attempts and status |
+`session_key` is a 64-bit hash of `(project_id, user_id, harness, session_id)` computed in `observal_shared.telemetry_keys`. Every identity lookup filters on it, so session reads are integer scans.
 
-### Deduplication and aggregates
+### No constraints, no indexes
 
-`session_events` and `layer_snapshots` use `ReplacingMergeTree` for idempotent ingest. `session_stats_agg` uses `AggregatingMergeTree` and is maintained by a materialized view.
+The schema deliberately has **no primary keys, unique constraints, or indexes**. DuckDB's ART indexes multiply memory and write-ahead-log replay cost at tens of millions of rows and add nothing over zone-map-pruned integer scans. Logical keys are enforced by the writer: a "replace" is `DELETE … WHERE key IN (…)` followed by `INSERT` inside one transaction. `INSERT OR REPLACE` is never used. Tests in `tests/test_telemetry_policy.py` fail the build if either rule is broken.
 
-The API query layer handles the required `FINAL` or aggregate reads. If you query ClickHouse directly, match the table engine instead of assuming every table reads the same way.
+### Deduplication and summaries
 
-### Retention (TTL)
+Ingest writes a batch in one transaction: replace the canonical rows for `(session_key, line_offset)`, recompute that session's `session_stats_agg` row, and advance `session_checkpoints`. The summary and checkpoint SQL live once, in `observal-server/telemetry_store/sql.py`, and the same statements drive the post-migration rebuild.
 
-Controlled by `DATA_RETENTION_DAYS`:
+### Retention
 
-* Default `90`: rows older than 90 days are TTL'd out.
-* `0`: retention disabled (disk grows without bound).
-* The server enforces a minimum of `7` on any non-zero value.
+Retention runs as worker jobs, not database TTLs:
 
-TTL runs asynchronously. Disk space is reclaimed on the next merge; don't expect instant free-up.
+| What | Setting / default | Job |
+| --- | --- | --- |
+| Session events | `retention.trace_days`, `retention.max_trace_count` | `run_retention_purge` (every 6 h) |
+| `raw_line` transcript bodies | 30 days (`RAW_LINE_RETENTION_DAYS`) | `maintain_telemetry` (every 4 h) sets `raw_line=''`, `raw_line_truncated=2` |
+| Audit and security events | 730 days | `maintain_telemetry` |
 
-### Schema migrations
+Deleted blocks are reused after the store's periodic `CHECKPOINT`; the database file does not shrink on its own. To reclaim disk, take a backup (`COPY FROM DATABASE`, see below) and swap the file in.
 
-ClickHouse schema changes are managed separately from Alembic. Alembic is only for Postgres.
+### Schema changes
 
-ClickHouse migration files live in:
-
-```bash
-observal-server/clickhouse/migrations/*.sql
-```
-
-The init container runs ClickHouse migrations after Alembic and before the API starts. The migration runner records applied files in `clickhouse_schema_migrations`.
-
-On existing installations that predate versioned ClickHouse migrations, the runner detects the existing baseline tables and stamps `001_baseline.sql` as applied instead of replaying the whole baseline.
-
-For local checks outside Docker, run the same runner from the server package:
-
-```bash
-cd observal-server
-python -m services.clickhouse.migrations
-```
-
-Do not put ClickHouse DDL in startup code. Add a new migration file instead.
+There is exactly one schema file, `observal-server/telemetry_store/schema/001_baseline.sql`, applied by the service at start (`python -m telemetry_store.migrate` applies it from an init container). Edit the baseline; do not add versioned files. Never put DDL in application code.
 
 ### Capacity planning
 
-Session record size depends on harness transcript detail and tool output size. Measure representative sessions, apply the configured raw-line retention window, and plan 2 to 3 times headroom for merges and replicas.
+At the supported target of 30 million `session_events` (about 300 thousand sessions) the store runs in a 2 GB container with `TELEMETRY_MEMORY_LIMIT=1536MB`. Measured on that dataset (`tests/perf/bench_telemetry.py`): session detail p95 19 ms, session list page 23 ms, executive-dashboard aggregates under 25 ms, a 1 000-row ingest transaction 250 ms. Disk depends on transcript size: budget roughly 1–1.5 KB per event after compression with the 30-day `raw_line` window, plus room for one backup copy.
 
-### External ClickHouse
+### External telemetry store
 
-For heavy workloads, run ClickHouse outside the compose stack (ClickHouse Cloud, a dedicated VM, etc.). Point the API at it:
+Run the service anywhere with a persistent disk and point the API at it:
 
 ```
-CLICKHOUSE_URL=clickhouse://user:pass@external-clickhouse.example.com:8123/observal
+TELEMETRY_URL=http://telemetry.internal:8125
+TELEMETRY_TOKEN=<shared token>
 ```
 
-Remove the `observal-clickhouse` service from `docker-compose.yml` or ignore it.
+Only one service process may own the database file; the service refuses to start with more than one worker.
 
 ---
 
@@ -122,9 +112,9 @@ Remove the `observal-clickhouse` service from `docker-compose.yml` or ignore it.
 See [Backup and restore](backup-and-restore.md). Short version:
 
 * Postgres: `pg_dump` from a running container.
-* ClickHouse: snapshot the `chdata` volume, or use ClickHouse's native `BACKUP` command.
-* Both: back up before every upgrade.
+* Telemetry store: `python -m telemetry_store.backup <path>` inside the telemetry container produces an online, snapshot-consistent copy (`COPY FROM DATABASE`); restore by stopping the service and replacing the file.
+* Both: back up before every upgrade (`observal server upgrade` does this automatically).
 
 ## Next
 
-→ [Authentication and SSO](authentication.md)
+→ [Telemetry service](telemetry-service.md)

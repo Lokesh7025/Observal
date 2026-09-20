@@ -30,7 +30,7 @@ flowchart TB
         worker["Worker - arq"]
         pg[(Postgres)]
         redis[(Redis)]
-        ch[(ClickHouse)]
+        ch[(Telemetry store)]
         grafana[Grafana]
         systemd["systemd - docker compose restart"]
         cron["cron - daily backups to S3"]
@@ -74,7 +74,7 @@ Everything runs as Docker containers on a single host. The nginx LB routes traff
 | 30–50 users | `t3.xlarge` (4 vCPU / 16 GB) | ~$120/mo |
 | 50+ users | Consider the [Terraform module](aws-terraform.md) | ~$255/mo |
 
-ClickHouse is the memory consumer. If you run out, increase `CLICKHOUSE_MEMORY_LIMIT` before resizing the VM.
+The telemetry store is the memory consumer. If you run out, raise `TELEMETRY_MEMORY_LIMIT` (container) and `TELEMETRY_MEMORY_LIMIT_DUCKDB` (DuckDB ceiling, keep ~25% below) before resizing the VM.
 
 ## Step 1: Provision the VM
 
@@ -129,7 +129,7 @@ SECRET_KEY=$(python3 -c "import secrets; print(secrets.token_urlsafe(32))")
 
 # Set strong database passwords
 POSTGRES_PASSWORD=$(openssl rand -base64 24)
-CLICKHOUSE_PASSWORD=$(openssl rand -base64 24)
+TELEMETRY_TOKEN=$(openssl rand -base64 32)
 
 # Set your domain (used for CORS and OAuth redirects)
 CORS_ALLOWED_ORIGINS=https://observal.yourcompany.com
@@ -144,7 +144,7 @@ Write them into `.env`:
 ```bash
 sed -i "s|^SECRET_KEY=.*|SECRET_KEY=$SECRET_KEY|" .env
 sed -i "s|^POSTGRES_PASSWORD=.*|POSTGRES_PASSWORD=$POSTGRES_PASSWORD|" .env
-sed -i "s|^CLICKHOUSE_PASSWORD=.*|CLICKHOUSE_PASSWORD=$CLICKHOUSE_PASSWORD|" .env
+sed -i "s|^TELEMETRY_TOKEN=.*|TELEMETRY_TOKEN=$TELEMETRY_TOKEN|" .env
 ```
 
 > SAML SSO, audit logs, and executive dashboards are included in the open-source distribution. See [Configuration](configuration.md). For mounted credentials and private keys, use the documented [`NAME_FILE` inputs](configuration.md#secret-files) instead of placing secret contents in `.env`.
@@ -279,11 +279,13 @@ Schedule it:
 echo "0 3 * * * root /opt/observal-backups/backup.sh >> /var/log/observal-backup.log 2>&1" | sudo tee /etc/cron.d/observal-backup
 ```
 
-For ClickHouse (weekly, since it's larger):
+For the telemetry store (daily; the copy is online and snapshot-consistent):
 
 ```bash
-echo "0 4 * * 0 root docker compose -f /home/ubuntu/Observal/docker/docker-compose.yml exec -T observal-clickhouse clickhouse-client --password \$CLICKHOUSE_PASSWORD --query \"BACKUP DATABASE observal TO Disk('backups', 'weekly-\$(date +\%Y\%m\%d).zip')\" >> /var/log/observal-backup.log 2>&1" | sudo tee /etc/cron.d/observal-ch-backup
+echo "0 4 * * * root docker compose -f /home/ubuntu/Observal/docker/docker-compose.yml exec -T observal-telemetry /app/.venv/bin/python -m telemetry_store.backup /data/telemetry/backups/daily-\$(date +\%Y\%m\%d).duckdb >> /var/log/observal-backup.log 2>&1" | sudo tee /etc/cron.d/observal-telemetry-backup
 ```
+
+Copy the snapshot out of the `tdata` volume (or `docker compose cp`) to offsite storage and prune old ones.
 
 See [Backup and restore](backup-and-restore.md) for detailed restore procedures.
 
@@ -371,8 +373,8 @@ When you outgrow a single node:
 | Symptom | Fix |
 |---|---|
 | API response times increasing | Increase `API_WORKERS` in `.env` (default 2), or bump to a bigger VM |
-| ClickHouse queries slow | Increase `CLICKHOUSE_MEMORY_LIMIT`, move to a bigger VM, or externalize to [ClickHouse Cloud](https://clickhouse.cloud) |
-| Disk filling up | Reduce `DATA_RETENTION_DAYS`, add a bigger disk, or move ClickHouse data to a separate volume |
+| Telemetry queries slow or `504 telemetry_timeout` | Raise `TELEMETRY_MEMORY_LIMIT` / `TELEMETRY_THREADS`, move to a bigger VM, or give the telemetry store its own host |
+| Disk filling up | Reduce `DATA_RETENTION_DAYS`, add a bigger disk, or move the `tdata` volume to a separate disk (back up, swap file) |
 | Need HA / zero downtime deploys | Migrate to the [Terraform module](aws-terraform.md) |
 
 ## Next

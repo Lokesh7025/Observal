@@ -115,6 +115,7 @@ services:
       - TELEMETRY_TOKEN_FILE=/run/secrets/telemetry_token
       - TELEMETRY_MEMORY_LIMIT=${TELEMETRY_MEMORY_LIMIT_DUCKDB:-1536MB}
       - TELEMETRY_THREADS=${TELEMETRY_THREADS:-4}
+      - TELEMETRY_METRICS_PUBLIC=true
     volumes:
       - tdata:/data/telemetry
       - ./secrets/telemetry:/run/secrets:ro

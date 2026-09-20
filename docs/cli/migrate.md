@@ -4,7 +4,7 @@
 
 # `observal server migrate`
 
-Move PostgreSQL registry data and ClickHouse telemetry between Observal deployments.
+Move PostgreSQL registry data and telemetry between Observal deployments, and back-fill a DuckDB telemetry store from a legacy ClickHouse install.
 
 Migration uses the supplied database connections directly. Local shell and database access are the authorization boundary; the command does not authenticate against a configured Observal API.
 
@@ -14,14 +14,14 @@ Install the optional dependency first:
 pip install 'observal-cli[migrate]'
 ```
 
-Keep connection URLs in environment variables or secret files managed by the shell. Source commands read `DATABASE_URL` and `CLICKHOUSE_URL`; target commands read `TARGET_DATABASE_URL` and `TARGET_CLICKHOUSE_URL`. Explicit URL options remain available when no secret is embedded. Do not paste credentials into shared shell history, logs, or issue reports. JSON results and categorized errors never echo a connection URL.
+Keep connection URLs in environment variables or secret files managed by the shell. Registry commands read `DATABASE_URL` (source) and `TARGET_DATABASE_URL` (target); telemetry commands read `TELEMETRY_URL` and `TELEMETRY_TOKEN`; the cutover additionally reads `CLICKHOUSE_URL`. Explicit URL options remain available when no secret is embedded. Do not paste credentials into shared shell history, logs, or issue reports. JSON results and categorized errors never echo a connection URL.
 
 ## Workflow
 
 1. Export PostgreSQL. This creates a checksummed registry archive and a migration manifest.
 2. Validate and import PostgreSQL on the target.
-3. Export ClickHouse using the PostgreSQL migration manifest.
-4. Validate and import ClickHouse on the target.
+3. Export telemetry from the source telemetry store.
+4. Validate and import telemetry on the target.
 
 PostgreSQL must be imported first so referenced users and agents exist before telemetry validation.
 
@@ -67,48 +67,59 @@ Validation checks archive structure and SHA-256 checksums. When a target URL is 
 
 Import verifies checksums before insertion. Existing rows are skipped according to the migration service's idempotent import rules. The result contains per-table inserted and skipped counts plus warnings.
 
-## ClickHouse export
-
-ClickHouse export requires the PostgreSQL sidecar manifest and a new destination directory:
+## Telemetry export
 
 ```bash
 observal server migrate export-telemetry \
-  --manifest registry.manifest.json \
+  --telemetry-url http://source:8125 \
   --output-dir telemetry-export \
   --output json
 ```
 
-The destination must not already exist. This lets the exporter remove the complete directory after failure without touching pre-existing files. The directory and streamed Parquet files use restrictive permissions and atomic temporary files.
+The destination must be empty. The export runs as a job inside the telemetry store (no interactive timeout); the CLI polls for progress, downloads every Parquet chunk, verifies each SHA-256, and writes `telemetry_manifest.json` (schema `3.0`) recording table row counts and per-chunk checksums. `--since` limits the export to rows written after a UTC timestamp, which is what the rollback path uses.
 
-The export covers active session, checkpoint, layer, audit, security, and webhook tables. Older sources may omit tables. Telemetry is divided into deterministic time-and-hash chunks so each ClickHouse query and Parquet file stays bounded independently of the total dataset size. Oversized or memory-limited chunks are split again automatically. `telemetry_manifest.json` records every chunk's range, shard, checksum, size, row count, and migration ID.
-
-## ClickHouse validation and import
+## Telemetry validation and import
 
 ```bash
 observal server migrate validate-telemetry \
   --input-dir telemetry-export \
+  --telemetry-url http://target:8125 \
   --output json
 
 observal server migrate import-telemetry \
+  --telemetry-url http://target:8125 \
   --input-dir telemetry-export \
   --output json
 ```
 
 Telemetry validation checks:
 
-* Parquet checksums
-* Manifest row counts against target ClickHouse when supplied
+* Parquet checksums and per-chunk row counts (both `3.0` store exports and `2.0` legacy ClickHouse exports)
+* Manifest row counts against the target telemetry store when supplied
 * Agent and user references against target PostgreSQL when supplied
 
 Checksum failure is fatal. Row-count differences and orphan groups are returned explicitly.
 
-Telemetry import is resumable per Parquet chunk. Successfully imported chunk IDs and checksums are recorded in `.import_state.json` in the input directory, so a retry skips only verified completed chunks rather than an entire table or month. Deterministic insert tokens protect ambiguous retries on current non-replicated MergeTree schemas. Imported project-keyed rows normalize to the deployment project `default`, and session summaries are rebuilt after event import so summaries reflect complete sessions rather than individual insert blocks.
+Telemetry import is idempotent per chunk: the store records `(migration_id, chunk_id)` in `telemetry_import_ledger`, so a retry skips completed chunks even if `import_state.json` beside the artifact is lost. Only `session_events`, `layer_snapshots`, `audit_log`, `security_events`, and `webhook_deliveries` are imported; `session_stats_agg` and `session_checkpoints` are rebuilt from the imported events afterwards (`--no-rebuild` skips that step). Imported rows never overwrite rows the store ingested live after the export's cutoff.
+
+## ClickHouse cutover
+
+Existing installs that stored telemetry in ClickHouse back-fill the new store with one resumable command while ingest keeps running:
+
+```bash
+observal server migrate telemetry-cutover \
+  --clickhouse-url clickhouse://default:PASSWORD@localhost:8123/observal \
+  --telemetry-url http://localhost:8125 --telemetry-token "$TELEMETRY_TOKEN" \
+  --artifact-dir ./cutover --output json
+```
+
+Phases: preflight → chunked ClickHouse export (`legacy_clickhouse_export`, checksummed Parquet) → idempotent import → derived rebuild → verification (row counts against the export cutoff and a `--spot-check N` session-by-session comparison, default 100). State lives in `cutover_state.json`; `--resume` continues after an interruption and `--verify-only` re-checks a finished cutover. `--reverse --since TS` exports store rows for loading back into ClickHouse on rollback. Nothing is deleted on either side; retire ClickHouse afterwards with `observal server retire-clickhouse`.
 
 ## Human and JSON behavior
 
-All six leaves accept `--output table|json`. Human mode renders progress and summaries. JSON mode is finite, prompt-free, suppresses progress and warnings from stdout, and returns one result document. Failures leave stdout empty and emit one categorized error to stderr.
+All seven leaves accept `--output table|json`. Human mode renders progress and summaries. JSON mode is finite, prompt-free, suppresses progress and warnings from stdout, and returns one result document. Failures leave stdout empty and emit one categorized error to stderr.
 
-Cleartext ClickHouse transport with credentials produces a human warning. JSON mode does not print a banner; operators should use `clickhouses://` for TLS.
+Cleartext ClickHouse transport with credentials (cutover source) produces a human warning. JSON mode does not print a banner; operators should use `clickhouses://` for TLS.
 
 ## Exit codes
 
@@ -127,7 +138,7 @@ Cleartext ClickHouse transport with credentials produces a human warning. JSON m
 # Source
 observal server migrate export --file registry.tar.gz --output json
 observal server migrate export-telemetry \
-  --manifest registry.manifest.json \
+  --telemetry-url http://source:8125 \
   --output-dir telemetry-export \
   --output json
 
@@ -138,6 +149,7 @@ observal server migrate validate-telemetry \
   --input-dir telemetry-export \
   --output json
 observal server migrate import-telemetry \
+  --telemetry-url http://target:8125 \
   --input-dir telemetry-export \
   --output json
 ```

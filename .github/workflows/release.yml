@@ -365,7 +365,7 @@ jobs:
           VERSION: ${{ needs.preflight.outputs.version }}
         run: |
           STAGING="observal-server-v${VERSION}"
-          mkdir -p "$STAGING/clickhouse/users.d"
+          mkdir -p "$STAGING/clickhouse/users.d"   # legacy-clickhouse profile (cutover window)
           mkdir -p "$STAGING/grafana"
 
           # Standalone compose (pre-built images, no source needed)
@@ -377,9 +377,9 @@ jobs:
           cp prometheus.yml "$STAGING/"
           cp .env.example "$STAGING/"
 
-          # Supporting configs
-          cp -r docker/clickhouse/config.d "$STAGING/clickhouse/config.d"
-          cp docker/clickhouse/users.d/memory.xml "$STAGING/clickhouse/users.d/"
+          # Supporting configs (legacy ClickHouse configs ship only for the cutover profile)
+          cp -r docker/legacy-clickhouse/config.d "$STAGING/clickhouse/config.d"
+          cp docker/legacy-clickhouse/users.d/memory.xml "$STAGING/clickhouse/users.d/"
           cp -r grafana/provisioning "$STAGING/grafana/provisioning"
           cp -r grafana/dashboards "$STAGING/grafana/dashboards"
 

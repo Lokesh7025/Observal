@@ -70,34 +70,29 @@ docker run --rm \
 docker compose -f docker/docker-compose.yml start observal-api
 ```
 
-## ClickHouse backup
+## Telemetry store backup
 
-### Option A - volume snapshot (simplest)
-
-```bash
-docker compose -f docker/docker-compose.yml stop observal-clickhouse
-docker run --rm -v observal_chdata:/data -v "$(pwd)":/backup \
-  alpine tar czf /backup/observal-ch-$(date +%Y%m%d).tar.gz -C /data .
-docker compose -f docker/docker-compose.yml start observal-clickhouse
-```
-
-Downtime: however long the tar takes (a minute to tens of minutes depending on size).
-
-### Option B - ClickHouse native `BACKUP` (no downtime)
+The telemetry store copies its own database while online. The copy is snapshot-consistent (`COPY FROM DATABASE` in one transaction) and ingest keeps running.
 
 ```bash
-docker compose -f docker/docker-compose.yml exec observal-clickhouse \
-  clickhouse-client --query "BACKUP DATABASE observal TO Disk('backups', 'observal-$(date +%Y%m%d).zip')"
+docker compose -f docker/docker-compose.yml exec -T observal-telemetry \
+  /app/.venv/bin/python -m telemetry_store.backup /data/telemetry/backups/observal-$(date +%Y%m%d).duckdb
+docker compose -f docker/docker-compose.yml cp \
+  observal-telemetry:/data/telemetry/backups/observal-$(date +%Y%m%d).duckdb ./observal-telemetry-$(date +%Y%m%d).duckdb
 ```
 
-Requires configuring a backup disk in ClickHouse config; see [ClickHouse docs](https://clickhouse.com/docs/en/operations/backup).
+Downtime: none. Throughput is roughly 15–20 MB/s, so budget about 40 minutes for a 40 GB store. The command prints the SHA-256 of the copy; keep it with the file.
 
 Restore:
 
 ```bash
-docker compose -f docker/docker-compose.yml exec observal-clickhouse \
-  clickhouse-client --query "RESTORE DATABASE observal FROM Disk('backups', 'observal-20260421.zip')"
+docker compose -f docker/docker-compose.yml stop observal-telemetry observal-api observal-worker
+docker run --rm -v observal_tdata:/data -v "$(pwd)":/backup alpine sh -c \
+  "rm -f /data/observal.duckdb /data/observal.duckdb.wal && cp /backup/observal-telemetry-20260421.duckdb /data/observal.duckdb && chown 1001:1001 /data/observal.duckdb"
+docker compose -f docker/docker-compose.yml start observal-telemetry observal-api observal-worker
 ```
+
+Backing up the whole `tdata` volume with the service stopped also works, but is not needed.
 
 ## Restore order
 
@@ -106,7 +101,7 @@ If you're restoring from backup after a catastrophic failure:
 1. Stop the whole stack: `docker compose down`.
 2. Restore `apidata` (JWT keys) first.
 3. Restore `pgdata` (Postgres).
-4. Restore `chdata` (ClickHouse).
+4. Restore `tdata` (telemetry store).
 5. Bring up the stack: `docker compose up -d`.
 6. Smoke test: `observal auth login`, `observal auth status`.
 
@@ -139,12 +134,13 @@ A minimal cron setup (on the Docker host):
   docker compose -f docker/docker-compose.yml exec -T observal-api \
   tar czf - -C /data keys > /backups/keys-$(date +\%Y\%m\%d).tar.gz
 
-# Weekly Sunday at 04:00 - ClickHouse
-0 4 * * 0 cd /opt/Observal && \
-  docker compose -f docker/docker-compose.yml stop observal-clickhouse && \
-  docker run --rm -v observal_chdata:/data -v /backups:/backup alpine \
-    tar czf /backup/ch-$(date +\%Y\%m\%d).tar.gz -C /data . && \
-  docker compose -f docker/docker-compose.yml start observal-clickhouse
+# Daily at 04:00 - telemetry store (online snapshot, no downtime)
+0 4 * * * cd /opt/Observal && \
+  docker compose -f docker/docker-compose.yml exec -T observal-telemetry \
+    /app/.venv/bin/python -m telemetry_store.backup /data/telemetry/backups/daily.duckdb && \
+  docker compose -f docker/docker-compose.yml cp observal-telemetry:/data/telemetry/backups/daily.duckdb \
+    /backups/telemetry-$(date +\%Y\%m\%d).duckdb && \
+  docker compose -f docker/docker-compose.yml exec -T observal-telemetry rm -f /data/telemetry/backups/daily.duckdb
 ```
 
 Ship the `/backups` directory offsite (S3, B2, rsync to another host).

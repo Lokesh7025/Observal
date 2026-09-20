@@ -10,7 +10,7 @@ Only super admins can start migration jobs.
 ## What can be moved
 
 - **Registry data**: users, agents, components, versions, settings, review records, and related PostgreSQL data.
-- **Telemetry data**: sessions, checkpoints, layer snapshots, audit events, security events, and webhook delivery history stored in ClickHouse. Large tables are exported as bounded Parquet chunks, so total export size is not limited by ClickHouse query memory.
+- **Telemetry data**: sessions, layer snapshots, audit events, security events, and webhook delivery history stored in the telemetry store. Tables are exported as checksummed Parquet chunks by the store itself, so total export size is not bounded by request memory or HTTP timeouts. Session summaries and checkpoints are rebuilt on import rather than copied.
 - **Registry + telemetry**: a full instance move when both stores are available.
 
 ## Before you start
@@ -56,7 +56,7 @@ Do not import artifacts that fail checksum validation.
 2. Select **Import**.
 3. Upload the validated artifacts. For **Registry + telemetry**, both the PostgreSQL and telemetry archives are required.
 4. Choose the import scope.
-5. Imports normalize all project-keyed telemetry to the deployment project `default`.
+5. Imports are idempotent: every chunk is recorded in the store's import ledger, so a retried or resumed import never duplicates rows. Summaries and checkpoints are rebuilt after the last chunk.
 6. Click **Start import**.
 7. Wait for the job to finish.
 8. Check agents, components, users, and sessions in the target instance.
@@ -65,7 +65,7 @@ PostgreSQL imports skip conflicting rows. Telemetry imports resume per checksumm
 
 ## CLI alternative
 
-The CLI uses the same shared migration core as the server jobs. Source commands read `DATABASE_URL` and `CLICKHOUSE_URL`; target commands read `TARGET_DATABASE_URL` and `TARGET_CLICKHOUSE_URL`.
+The CLI uses the same shared migration core as the server jobs. Registry commands read `DATABASE_URL` (source) and `TARGET_DATABASE_URL` (target); telemetry commands read `TELEMETRY_URL` and `TELEMETRY_TOKEN`.
 
 ```bash
 observal server migrate export --file backup.tar.gz --output json
@@ -76,10 +76,43 @@ observal server migrate import --archive backup.tar.gz --output json
 Telemetry commands are separate:
 
 ```bash
-observal server migrate export-telemetry --manifest backup-manifest.json --output-dir telemetry --output json
-observal server migrate validate-telemetry --input-dir telemetry --output json
-observal server migrate import-telemetry --input-dir telemetry --output json
+observal server migrate export-telemetry --telemetry-url http://source:8125 --output-dir telemetry --output json
+observal server migrate validate-telemetry --input-dir telemetry --telemetry-url http://target:8125 --output json
+observal server migrate import-telemetry --telemetry-url http://target:8125 --input-dir telemetry --output json
 ```
+
+## Migrating an existing ClickHouse install (cutover)
+
+Releases before the DuckDB telemetry store kept telemetry in ClickHouse. Upgrading is a **switch-then-backfill**: the new version writes to the telemetry store from the first request, and you copy ClickHouse history into it afterwards while ingest keeps running. Nothing is deleted on either side until you say so.
+
+1. **Upgrade** the stack. Keep ClickHouse running next to the new telemetry service:
+   - Compose / server package: `docker compose --profile legacy-clickhouse up -d` (the `chdata` volume is still declared).
+   - Helm: `--set clickhouse.legacy.enabled=true`.
+   - Terraform (AWS, GCP, Azure): `enable_legacy_clickhouse = true`.
+   - Embedded (`observal server`): nothing to do; the CLI starts the old data directory for you.
+2. **Run the cutover** (resumable, verifies before it reports success):
+
+   ```bash
+   observal server migrate telemetry-cutover \
+     --clickhouse-url clickhouse://default:PASSWORD@localhost:8123/observal \
+     --telemetry-url http://localhost:8125 --telemetry-token "$TELEMETRY_TOKEN" \
+     --artifact-dir ./cutover --output json
+   ```
+
+   Steps: preflight (both stores reachable, source counts, disk space) → chunked, checksummed ClickHouse export → idempotent import → rebuild of session summaries and checkpoints → verification (per-table row counts against the export cutoff plus a 100-session event-by-event spot check). Rows ingested live after the cutoff are never overwritten by the backfill. Re-run with `--resume` after an interruption, or `--verify-only` to re-check later.
+3. **Retire ClickHouse** once verification passes: `observal server retire-clickhouse` (embedded), `docker compose --profile legacy-clickhouse stop observal-clickhouse`, `clickhouse.legacy.enabled=false`, or `enable_legacy_clickhouse = false`. The ClickHouse volume stays until you delete it explicitly (`retire-clickhouse --delete-volume`, `docker volume rm`, PVC deletion).
+
+### Rolling back
+
+Roll back the image with `observal server rollback`; ClickHouse still holds everything up to the cutover, so the only gap is telemetry ingested into the store since then. To close it, export those rows and load them into ClickHouse:
+
+```bash
+observal server migrate telemetry-cutover --reverse --since "2026-06-01 00:00:00" \
+  --clickhouse-url ... --telemetry-url ... --artifact-dir ./rollback
+# then, per chunk: clickhouse-client --query "INSERT INTO <table> FORMAT Parquet" < chunk.parquet
+```
+
+`observal reconcile` fills any remaining gap from the local session JSONL files.
 
 ## Cleanup
 
@@ -98,11 +131,15 @@ Large migration uploads are streamed through nginx and spooled to the persistent
 
 ### Import resumes completed telemetry chunks
 
-Telemetry resume state is stored beside the extracted artifact in `.import_state.json`. A retry verifies the artifact and skips chunks already completed with the same checksum. It does not skip an entire month merely because the target already contains some rows from that month.
+Telemetry resume state is stored beside the extracted artifact in `import_state.json` and, authoritatively, in the store's `telemetry_import_ledger` table. A retry verifies each artifact's checksum and skips chunks already imported for the same migration id.
 
-### ClickHouse reports a memory limit
+### The cutover reports a verification failure
 
-The exporter automatically subdivides a memory-limited chunk and retries it. If the smallest supported chunk still fails, inspect the reported table and chunk ID for a pathological key distribution or a ClickHouse limit below the documented deployment minimum. Increasing the container limit should not be required merely because the total telemetry archive is large.
+Nothing was deleted. Read `cutover_state.json` in the artifact directory: `count_mismatches` lists tables where the store holds fewer pre-cutoff rows than ClickHouse, and `spot_check.mismatched` lists sessions whose events differ. Re-run with `--resume` (chunks already in the ledger are skipped) and then `--verify-only`.
+
+### ClickHouse reports a memory limit during the cutover export
+
+The exporter automatically subdivides a memory-limited chunk and retries it. If the smallest supported chunk still fails, inspect the reported table and chunk ID for a pathological key distribution.
 
 ### Telemetry import has missing registry references
 

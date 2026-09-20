@@ -44,19 +44,19 @@ Full list in [Ports and volumes](ports-and-volumes.md).
 
 ### Service stuck in `starting`
 
-The API depends on Postgres, ClickHouse, and Redis being healthy. Check each:
+The API depends on Postgres, the telemetry store, and Redis being healthy. Check each:
 
 ```bash
 docker compose -f docker/docker-compose.yml ps
 docker compose -f docker/docker-compose.yml logs observal-db
-docker compose -f docker/docker-compose.yml logs observal-clickhouse
+docker compose -f docker/docker-compose.yml logs observal-telemetry
 docker compose -f docker/docker-compose.yml logs observal-redis
 ```
 
 Common causes:
 
-* ClickHouse stuck during initial `CREATE TABLE`. Restart it once the healthcheck passes on other DBs
-* `CLICKHOUSE_PASSWORD` mismatch between services and API config
+* Telemetry store refusing to start because another process holds `observal.duckdb.lock` (only one `observal-telemetry` may run)
+* `TELEMETRY_TOKEN` mismatch between the API/worker and the telemetry container (API logs `401` from the store)
 
 ### Services restart in a loop
 
@@ -115,30 +115,31 @@ curl http://localhost/health
 
 If hooks are missing, run `observal doctor patch --harness <harness>`. If sessions still are not arriving, check `~/.observal/telemetry_buffer.db`; growth indicates pending session delivery rather than silent loss.
 
-### ClickHouse not receiving data
+### Telemetry store not receiving data
 
-Check the `CLICKHOUSE_URL` the API is using:
+Check the `TELEMETRY_URL` the API is using and that the token matches:
 
 ```bash
+docker compose -f docker/docker-compose.yml exec observal-api printenv TELEMETRY_URL
 docker compose -f docker/docker-compose.yml exec observal-api \
-  printenv CLICKHOUSE_URL
+  sh -c 'curl -fsS -H "Authorization: Bearer $TELEMETRY_TOKEN" "$TELEMETRY_URL/v1/stats"'
 ```
 
-The source Compose default is `clickhouse://default:clickhouse@observal-clickhouse:8123/observal`. Mismatches typically happen after changing `CLICKHOUSE_PASSWORD` without updating the URL.
-
-Server-package installs use `CLICKHOUSE_URL_FILE=/run/secrets/clickhouse_url`, a hashed ClickHouse user configuration, and a separate health-check password file. Confirm the file is mounted without printing it:
+The source Compose default is `http://observal-telemetry:8125`. Server-package installs mount the token from `/run/secrets/telemetry_token`; confirm it is readable without printing it:
 
 ```bash
-docker compose exec observal-api test -r /run/secrets/clickhouse_url
-docker compose exec observal-clickhouse test -r /run/secrets/clickhouse_password
+docker compose exec observal-api test -r /run/secrets/telemetry_token
+docker compose exec observal-telemetry test -r /run/secrets/telemetry_token
 ```
 
-Verify ClickHouse itself:
+Verify the store itself (row counts, file size, writer state):
 
 ```bash
-docker compose -f docker/docker-compose.yml exec observal-clickhouse \
-  clickhouse-client --query "SELECT count() FROM observal.session_events"
+curl -fsS http://127.0.0.1:8125/v1/health
+curl -fsS -H "Authorization: Bearer $TELEMETRY_TOKEN" http://127.0.0.1:8125/v1/stats
 ```
+
+A `503 telemetry_unavailable` from the API means the store is down or unreachable; ingest clients retry from their local outbox, so nothing is lost while you fix it. A `504 telemetry_timeout` means a read exceeded `TELEMETRY_QUERY_TIMEOUT_MS`; a `429 telemetry_busy` means the read pool is saturated. See [Telemetry service](telemetry-service.md).
 
 ## Web UI
 

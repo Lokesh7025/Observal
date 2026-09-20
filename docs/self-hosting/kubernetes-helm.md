@@ -7,7 +7,7 @@
 Deploy Observal onto a Kubernetes cluster using the official Helm chart.
 
 > [!WARNING]
-> **Production Notice**: The in-cluster PostgreSQL, ClickHouse, and Redis StatefulSets deployed by this chart are intended for evaluation, development, and small-scale testing. For production workloads, set `postgresql.enabled=false`, `clickhouse.enabled=false`, and `redis.enabled=false`, then provide `postgresql.externalUrl`, `clickhouse.externalUrl`, and `redis.externalUrl` for managed services such as AWS RDS, Cloud SQL, ClickHouse Cloud, or ElastiCache.
+> **Production Notice**: The in-cluster PostgreSQL and Redis StatefulSets deployed by this chart are intended for evaluation, development, and small-scale testing. For production workloads, set `postgresql.enabled=false` and `redis.enabled=false`, then provide `postgresql.externalUrl` and `redis.externalUrl` for managed services such as AWS RDS, Cloud SQL, or ElastiCache. The telemetry store is a single-writer DuckDB service and always runs as one replica on a persistent volume; size `telemetry.storage.size` and back it up with `python -m telemetry_store.backup`.
 
 ## Prerequisites
 
@@ -85,9 +85,11 @@ helm install observal oci://ghcr.io/observal/charts/observal \
 | `postgresql.enabled` | Deploy embedded PostgreSQL StatefulSet | `true` |
 | `postgresql.externalUrl` | PostgreSQL URL used when embedded PostgreSQL is disabled | `""` |
 | `postgresql.storage.size` | PVC size for PostgreSQL | `10Gi` |
-| `clickhouse.enabled` | Deploy embedded ClickHouse StatefulSet | `true` |
-| `clickhouse.externalUrl` | ClickHouse URL used when embedded ClickHouse is disabled | `""` |
-| `clickhouse.storage.size` | PVC size for ClickHouse | `50Gi` |
+| `telemetry.enabled` | Deploy the telemetry store StatefulSet (one replica) | `true` |
+| `telemetry.externalUrl` | Telemetry store URL used when the in-cluster store is disabled | `""` |
+| `telemetry.storage.size` | PVC size for the telemetry store | `50Gi` |
+| `telemetry.memoryLimit` | DuckDB memory ceiling (`TELEMETRY_MEMORY_LIMIT`) | `1536MB` |
+| `clickhouse.legacy.enabled` | Keep the legacy ClickHouse StatefulSet running during a telemetry cutover | `false` |
 | `redis.enabled` | Deploy embedded Redis StatefulSet | `true` |
 | `redis.externalUrl` | Redis URL used when embedded Redis is disabled | `""` |
 | `redis.storage.size` | PVC size for Redis | `2Gi` |
@@ -162,7 +164,7 @@ helm uninstall observal --namespace observal
 ```
 
 > [!NOTE]
-> Persistent Volume Claims (PVCs) for PostgreSQL, ClickHouse, Redis, and API data are retained by default to prevent accidental data loss. To delete them permanently, execute: `kubectl delete pvc -l app.kubernetes.io/instance=observal -n observal`.
+> Persistent Volume Claims (PVCs) for PostgreSQL, the telemetry store, legacy ClickHouse, Redis, and API data are retained by default to prevent accidental data loss. To delete them permanently, execute: `kubectl delete pvc -l app.kubernetes.io/instance=observal -n observal`.
 
 ## Chart Publishing
 
