@@ -362,6 +362,14 @@ def _write_parquet(path: Path, rows: list[dict]) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+async def _import_chunk(store, path: Path, **form):
+    """POST a parquet chunk the way the migration client does: always as an upload."""
+    with path.open("rb") as fh:
+        return await store.post(
+            "/v1/import/chunk", data=form, files={"file": (path.name, fh, "application/octet-stream")}
+        )
+
+
 @pytest.mark.asyncio
 async def test_import_chunk_idempotent_and_checksummed(store, event_row, tmp_path: Path):
     rows = []
@@ -371,29 +379,28 @@ async def test_import_chunk_idempotent_and_checksummed(store, event_row, tmp_pat
         rows.append(row)
     path = tmp_path / "chunk.parquet"
     sha = _write_parquet(path, rows)
-    form = {"migration_id": "m1", "chunk_id": "c1", "table": "session_events", "sha256": sha, "path": str(path)}
-    r = await store.post("/v1/import/chunk", data=form)
+    form = {"migration_id": "m1", "chunk_id": "c1", "table": "session_events", "sha256": sha}
+    r = await _import_chunk(store, path, **form)
     assert r.status_code == 200, r.text
     assert r.json()["rows_written"] == 4 and r.json()["skipped"] is False
 
-    r = await store.post("/v1/import/chunk", data=form)
+    r = await _import_chunk(store, path, **form)
     assert r.json()["skipped"] is True
     assert await _q(store, "SELECT count(*) AS c FROM session_events") == [{"c": 4}]
     assert await _q(store, "SELECT count(*) AS c FROM telemetry_import_ledger") == [{"c": 1}]
 
-    r = await store.post("/v1/import/chunk", data={**form, "chunk_id": "c2", "sha256": "0" * 64})
+    r = await _import_chunk(store, path, **{**form, "chunk_id": "c2", "sha256": "0" * 64})
     assert r.status_code == 422 and "checksum" in r.json()["error"]["message"]
     assert await _q(store, "SELECT count(*) AS c FROM telemetry_import_ledger") == [{"c": 1}]
 
-    # Upload variant
-    with path.open("rb") as fh:
-        r = await store.post(
-            "/v1/import/chunk",
-            data={**form, "chunk_id": "c3", "path": ""},
-            files={"file": ("chunk.parquet", fh, "application/octet-stream")},
-        )
-    assert r.status_code == 200 and r.json()["rows_written"] == 4  # same keys → replaced, not duplicated
+    # Same keys under a new chunk id → replaced, not duplicated
+    r = await _import_chunk(store, path, **{**form, "chunk_id": "c3"})
+    assert r.status_code == 200 and r.json()["rows_written"] == 4
     assert await _q(store, "SELECT count(*) AS c FROM session_events") == [{"c": 4}]
+
+    # A caller-supplied local path is not accepted; chunks must be uploaded.
+    r = await store.post("/v1/import/chunk", data={**form, "chunk_id": "c4", "path": str(path)})
+    assert r.status_code == 422
 
 
 @pytest.mark.asyncio
@@ -408,10 +415,7 @@ async def test_import_never_overwrites_live_rows(store, event_row, tmp_path: Pat
     other["ingested_at"] = "2026-01-01 00:00:00.000"
     path = tmp_path / "old.parquet"
     sha = _write_parquet(path, [old, other])
-    r = await store.post(
-        "/v1/import/chunk",
-        data={"migration_id": "m", "chunk_id": "c", "table": "session_events", "sha256": sha, "path": str(path)},
-    )
+    r = await _import_chunk(store, path, migration_id="m", chunk_id="c", table="session_events", sha256=sha)
     assert r.status_code == 200, r.text
     rows = await _q(store, "SELECT line_offset, content_preview FROM session_events ORDER BY line_offset")
     assert rows == [{"line_offset": 0, "content_preview": "LIVE"}, {"line_offset": 1, "content_preview": "OLD1"}]
@@ -422,12 +426,10 @@ async def test_import_append_table_dedupes_on_id(store, tmp_path: Path):
     rows = [{"event_id": "33333333-3333-3333-3333-333333333333", "timestamp": "2026-01-01 00:00:00.000", "action": "x"}]
     path = tmp_path / "audit.parquet"
     sha = _write_parquet(path, rows)
-    form = {"migration_id": "m", "chunk_id": "a1", "table": "audit_log", "sha256": sha, "path": str(path)}
-    assert (await store.post("/v1/import/chunk", data=form)).status_code == 200
+    form = {"migration_id": "m", "chunk_id": "a1", "table": "audit_log", "sha256": sha}
+    assert (await _import_chunk(store, path, **form)).status_code == 200
     sha2 = _write_parquet(tmp_path / "audit2.parquet", rows)
-    r = await store.post(
-        "/v1/import/chunk", data={**form, "chunk_id": "a2", "sha256": sha2, "path": str(tmp_path / "audit2.parquet")}
-    )
+    r = await _import_chunk(store, tmp_path / "audit2.parquet", **{**form, "chunk_id": "a2", "sha256": sha2})
     assert r.status_code == 200
     assert await _q(store, "SELECT count(*) AS c FROM audit_log") == [{"c": 1}]
 
@@ -436,10 +438,7 @@ async def test_import_append_table_dedupes_on_id(store, tmp_path: Path):
 async def test_import_rejects_derived_tables(store, tmp_path: Path):
     path = tmp_path / "x.parquet"
     sha = _write_parquet(path, [{"session_id": "s"}])
-    r = await store.post(
-        "/v1/import/chunk",
-        data={"migration_id": "m", "chunk_id": "d", "table": "session_stats_agg", "sha256": sha, "path": str(path)},
-    )
+    r = await _import_chunk(store, path, migration_id="m", chunk_id="d", table="session_stats_agg", sha256=sha)
     assert r.status_code == 422
 
 
@@ -528,6 +527,17 @@ async def test_export_parquet_with_manifest(store, event_row, tmp_path: Path):
     assert pq.read_table(files[0]).num_rows == 7
     r = await store.post("/v1/export", json={"tables": ["nope"], "dest_dir": str(dest)})
     assert r.status_code == 422
+
+    # Download endpoint serves files inside the job directory only.
+    job_id = job["id"]
+    r = await store.get(f"/v1/export/{job_id}/files/telemetry_manifest.json")
+    assert r.status_code == 200 and r.content == manifest.encode()
+    outside = tmp_path / "secret.txt"
+    outside.write_text("nope")
+    for name in ("../secret.txt", "..%2Fsecret.txt", "/etc/passwd", "session_events/../../secret.txt"):
+        r = await store.get(f"/v1/export/{job_id}/files/{name}")
+        assert r.status_code == 404, name
+    assert (await store.get("/v1/export/nope/files/telemetry_manifest.json")).status_code == 404
 
 
 @pytest.mark.asyncio

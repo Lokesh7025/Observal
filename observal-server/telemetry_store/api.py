@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import hmac
+import os
 import shutil
 import tempfile
 from contextlib import asynccontextmanager
@@ -226,9 +227,10 @@ def create_app(settings: TelemetrySettings | None = None) -> FastAPI:
     @app.exception_handler(duckdb.Error)
     async def _duckdb_error(request: Request, exc: duckdb.Error):
         optic.error("duckdb error on {}: {}", request.url.path, exc)
-        code = "query_error" if request.url.path.endswith("/query") else "write_failed"
-        status = 400 if code == "query_error" else 500
-        return _error(status, code, str(exc))
+        if request.url.path.endswith("/query"):
+            # Binder/parser errors describe the caller's SQL; they carry no internal state.
+            return _error(400, "query_error", str(exc))
+        return _error(500, "write_failed", "telemetry write failed; see service logs")
 
     # ── Health / stats ────────────────────────────────────────
 
@@ -236,8 +238,9 @@ def create_app(settings: TelemetrySettings | None = None) -> FastAPI:
     async def health():
         try:
             state.database.open().cursor().execute("SELECT 1").fetchone()
-        except Exception as exc:
-            return _error(503, "unhealthy", str(exc))
+        except Exception:
+            optic.exception("telemetry health probe failed")
+            return _error(503, "unhealthy", "database probe failed; see service logs")
         file_bytes, wal_bytes = state.database.file_sizes()
         return {
             "status": "ok",
@@ -357,22 +360,14 @@ def create_app(settings: TelemetrySettings | None = None) -> FastAPI:
         table: str = Form(...),
         sha256: str = Form(...),
         project_id: str | None = Form(None),
-        path: str | None = Form(None),
-        file: UploadFile | None = File(None),
+        file: UploadFile = File(...),
     ):
-        tmp_dir: Path | None = None
-        if file is not None:
-            tmp_dir = Path(tempfile.mkdtemp(prefix="telemetry-chunk-", dir=str(settings.temp_dir)))
-            parquet_path = tmp_dir / "chunk.parquet"
-            with parquet_path.open("wb") as out:
-                while block := await file.read(1 << 20):
-                    out.write(block)
-        elif path:
-            parquet_path = Path(path)
-            if not parquet_path.is_file():
-                raise HTTPException(status_code=422, detail={"code": "missing_file", "message": path})
-        else:
-            raise HTTPException(status_code=422, detail={"code": "missing_chunk", "message": "file or path required"})
+        # Chunks are always uploaded; the store never opens caller-supplied paths.
+        tmp_dir = Path(tempfile.mkdtemp(prefix="telemetry-chunk-", dir=str(settings.temp_dir)))
+        parquet_path = tmp_dir / "chunk.parquet"
+        with parquet_path.open("wb") as out:
+            while block := await file.read(1 << 20):
+                out.write(block)
         try:
             with metrics.write_latency.time():
                 return await state.writer.run(
@@ -385,8 +380,7 @@ def create_app(settings: TelemetrySettings | None = None) -> FastAPI:
                     project_id_override=project_id,
                 )
         finally:
-            if tmp_dir is not None:
-                shutil.rmtree(tmp_dir, ignore_errors=True)
+            shutil.rmtree(tmp_dir, ignore_errors=True)
 
     # ── Jobs ──────────────────────────────────────────────────
 
@@ -411,11 +405,11 @@ def create_app(settings: TelemetrySettings | None = None) -> FastAPI:
         job = state.jobs.get(job_id)
         if job is None or job.kind != "export" or job.state != "done":
             raise HTTPException(status_code=404, detail={"code": "not_found", "message": job_id})
-        root = Path(job.result["dest_dir"]).resolve()
-        target = (root / name).resolve()
-        if root not in target.parents or not target.is_file():
+        root = os.path.realpath(job.result["dest_dir"])
+        candidate = os.path.realpath(os.path.normpath(os.path.join(root, name)))
+        if not candidate.startswith(root + os.sep) or not os.path.isfile(candidate):
             raise HTTPException(status_code=404, detail={"code": "not_found", "message": name})
-        return FileResponse(target, media_type="application/octet-stream", filename=target.name)
+        return FileResponse(candidate, media_type="application/octet-stream", filename=os.path.basename(candidate))
 
     @app.post("/v1/admin/backup", dependencies=[auth], status_code=202)
     async def backup(req: BackupRequest):

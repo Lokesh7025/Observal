@@ -54,7 +54,7 @@ jobs:
           done
           echo "::error::API failed health check"
           echo "Docker logs:"
-          cd docker && docker compose logs --tail 50 observal-api observal-init observal-db || true
+          cd docker && docker compose logs --tail 50 observal-api observal-init observal-db observal-telemetry || true
           exit 1
 
       - name: Wait for Web health

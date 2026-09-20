@@ -27,7 +27,6 @@ spec:
         {{- include "observal.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: telemetry
     spec:
-      {{- include "observal.podSecurityContext" . | nindent 6 }}
       securityContext:
         fsGroup: 1001
         seccompProfile:
