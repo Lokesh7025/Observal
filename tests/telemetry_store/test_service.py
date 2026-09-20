@@ -560,3 +560,69 @@ async def test_stats_and_metrics(store):
     assert r.status_code == 200 and b"telemetry_query_seconds" in r.content
     r = await store.post("/v1/admin/checkpoint")
     assert r.json() == {"ok": True}
+
+
+# ── init-container migrate ──────────────────────────────────────────────
+
+
+def test_migrate_file_mode_applies_schema(tmp_path: Path, monkeypatch):
+    from telemetry_store import migrate
+
+    monkeypatch.delenv("TELEMETRY_URL", raising=False)
+    monkeypatch.setenv("TELEMETRY_DB_PATH", str(tmp_path / "m.duckdb"))
+    monkeypatch.setenv("TELEMETRY_TOKEN", "t")
+    assert migrate.main() == 0
+    assert migrate.main() == 0  # idempotent
+    db = Database(TelemetrySettings.from_env())
+    try:
+        tables = {r[0] for r in db.open().cursor().execute("SHOW TABLES").fetchall()}
+    finally:
+        db.close()
+    assert {"session_events", "session_stats_agg", "telemetry_import_ledger"} <= tables
+
+
+def test_migrate_service_mode_never_opens_file(tmp_path: Path, monkeypatch):
+    """With TELEMETRY_URL set the init container only probes the running service."""
+    from telemetry_store import migrate
+
+    calls: list[str] = []
+
+    class _Resp:
+        status_code = 200
+        text = ""
+
+        @staticmethod
+        def json():
+            return {"schema_version": "001_baseline", "duckdb_version": "x"}
+
+    class _Client:
+        def __init__(self, *a, **kw): ...
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def get(self, url, headers=None):
+            calls.append(url)
+            assert headers == {"Authorization": "Bearer tok"}
+            return _Resp()
+
+    monkeypatch.setattr(migrate.httpx, "Client", _Client)
+    monkeypatch.setenv("TELEMETRY_URL", "http://observal-telemetry:8125/")
+    monkeypatch.setenv("TELEMETRY_TOKEN", "tok")
+    monkeypatch.setenv("TELEMETRY_DB_PATH", str(tmp_path / "never.duckdb"))
+    assert migrate.main() == 0
+    assert calls == ["http://observal-telemetry:8125/v1/health"]
+    assert not (tmp_path / "never.duckdb").exists()
+
+
+def test_migrate_service_mode_fails_when_unreachable(tmp_path: Path, monkeypatch):
+    from telemetry_store import migrate
+
+    monkeypatch.setenv("TELEMETRY_URL", "http://127.0.0.1:1")  # nothing listens here
+    monkeypatch.setenv("TELEMETRY_MIGRATE_WAIT_S", "0")
+    monkeypatch.setenv("TELEMETRY_DB_PATH", str(tmp_path / "never.duckdb"))
+    assert migrate.main() == 1
+    assert not (tmp_path / "never.duckdb").exists()

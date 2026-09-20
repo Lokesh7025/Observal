@@ -88,7 +88,7 @@ Deleted blocks are reused after the store's periodic `CHECKPOINT`; the database 
 
 ### Schema changes
 
-There is exactly one schema file, `observal-server/telemetry_store/schema/001_baseline.sql`, applied by the service at start (`python -m telemetry_store.migrate` applies it from an init container). Edit the baseline; do not add versioned files. Never put DDL in application code.
+There is exactly one schema file, `observal-server/telemetry_store/schema/001_baseline.sql`, applied by the service at start. The init container runs `python -m telemetry_store.migrate`, which waits for the running service to report a healthy schema (it never opens the database file itself); without `TELEMETRY_URL` the same command applies the baseline directly to `TELEMETRY_DB_PATH`, which is how embedded installs and manual repair work. Edit the baseline; do not add versioned files. Never put DDL in application code.
 
 ### Capacity planning
 
