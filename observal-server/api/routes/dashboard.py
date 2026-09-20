@@ -45,7 +45,7 @@ from schemas.dashboard import (
     TrendPoint,
     UnannotatedTrace,
 )
-from services.clickhouse import _query
+from services.telemetry import tq
 
 router = APIRouter(prefix="/api/v1", tags=["dashboard"])
 
@@ -56,20 +56,16 @@ def _range_days(range_: str | None) -> int:
     return _RANGE_MAP.get(range_ or "7d", 7)
 
 
-async def _ch_json(sql: str, params: dict | None = None) -> list[dict]:
-    """Run a ClickHouse query and return data rows."""
-    sql = sql.replace("project_id = '{project_id}'", f"project_id = '{DEFAULT_PROJECT_ID}'")
-    # Optimize FINAL scans: process partitions independently instead of a
-    # single cross-partition merge pass.  Benchmarks show ~2x speedup.
-    if "FINAL" in sql and "SETTINGS" not in sql:
-        sql += " SETTINGS do_not_merge_across_partitions_select_final = 1"
-    try:
-        r = await _query(f"{sql} FORMAT JSON", params)
-        if r.status_code == 200:
-            return r.json().get("data", [])
-    except Exception as e:
-        optic.warning("clickhouse_query_failed", error=str(e))
-    return []
+async def _telemetry_rows(sql: str, params: dict | None = None) -> list[dict]:
+    """Run a read-only telemetry query scoped to the deployment project.
+
+    Raises ``TelemetryError`` on failure; the app-level handler turns it into
+    a 503 so dashboards never render zeros for an outage.
+    """
+    bound = {"pid": DEFAULT_PROJECT_ID}
+    if params:
+        bound.update(params)
+    return await tq(sql, bound)
 
 
 @router.get("/overview/stats", response_model=OverviewStats)
@@ -83,7 +79,7 @@ async def overview_stats(
 
     days = _range_days(range_)
 
-    # Fan out all independent queries in parallel (3 Postgres + 2 ClickHouse)
+    # Fan out all independent queries in parallel (3 Postgres + 2 telemetry)
     total_mcps_stmt = (
         select(func.count(McpListing.id))
         .join(McpVersion, McpListing.latest_version_id == McpVersion.id)
@@ -97,13 +93,13 @@ async def overview_stats(
     total_mcps_coro = db.scalar(apply_visibility_filter(total_mcps_stmt, McpListing, current_user))
     total_agents_coro = db.scalar(apply_visibility_filter(total_agents_stmt, Agent, current_user))
     total_users_coro = db.scalar(select(func.count(User.id)))
-    tool_rows_coro = _ch_json(
-        "SELECT sum(tool_call_count) as cnt FROM session_stats_agg FINAL WHERE last_event_time > now() - INTERVAL {days:UInt32} DAY",
-        {"param_days": str(days)},
+    tool_rows_coro = _telemetry_rows(
+        "SELECT sum(tool_call_count) as cnt FROM session_stats_agg WHERE last_event_time > now()::TIMESTAMP - to_days($days)",
+        {"days": str(days)},
     )
-    agent_rows_coro = _ch_json(
-        "SELECT count() as cnt FROM session_stats_agg FINAL WHERE last_event_time > now() - INTERVAL {days:UInt32} DAY",
-        {"param_days": str(days)},
+    agent_rows_coro = _telemetry_rows(
+        "SELECT count(*) as cnt FROM session_stats_agg WHERE last_event_time > now()::TIMESTAMP - to_days($days)",
+        {"days": str(days)},
     )
 
     total_mcps, total_agents, total_users, tool_rows, agent_rows = await asyncio.gather(

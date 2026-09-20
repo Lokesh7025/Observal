@@ -205,13 +205,13 @@ def configure_insights():
     from models.insight_meta_cache import InsightMetaCache
     from models.insight_session_facets import InsightSessionFacets
     from models.insight_session_meta import InsightSessionMeta
-    from services.clickhouse import _query
+    from services.telemetry import tq
 
     from . import _deps
 
     _deps.configure(
         settings=settings,
-        query_fn=_query,
+        query_fn=tq,
         call_model_fn=call_model,
         db_session_factory=async_session,
         meta_model=InsightSessionMeta,

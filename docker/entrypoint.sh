@@ -59,7 +59,7 @@ finally:
     fi
 fi
 
-echo "Running ClickHouse migrations..."
-/app/.venv/bin/python -m services.clickhouse.migrations
+echo "Applying telemetry store schema..."
+/app/.venv/bin/python -m telemetry_store.migrate
 
 echo "Initialization complete."

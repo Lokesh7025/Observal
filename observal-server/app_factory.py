@@ -9,6 +9,7 @@ from logging_config import setup_logging
 from middleware import configure_middleware
 from routes import configure_routes
 from services.optic import setup_optic
+from services.telemetry.errors import configure_telemetry_errors
 from startup import lifespan
 
 setup_logging()
@@ -29,4 +30,5 @@ def create_app() -> FastAPI:
     configure_middleware(app)
     configure_routes(app)
     configure_health_and_metrics(app)
+    configure_telemetry_errors(app)
     return app

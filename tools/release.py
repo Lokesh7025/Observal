@@ -310,7 +310,7 @@ def migration_changes(changes: list[Change]) -> list[Change]:
             paths.update(run("git", "diff-tree", "--no-commit-id", "--name-only", "-r", sha).splitlines())
         if any(
             path.startswith("observal-server/alembic/versions/")
-            or path.startswith("observal-server/clickhouse/migrations/")
+            or path.startswith("observal-server/telemetry_store/schema/")
             for path in paths
         ):
             result.append(change)

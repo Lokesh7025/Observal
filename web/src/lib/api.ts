@@ -752,7 +752,7 @@ export const admin = {
 	purgeTracesAndInsights: () =>
 		post<{
 			project_id: string;
-			clickhouse_tables: string[];
+			telemetry_tables: string[];
 			deleted_reports?: number;
 			deleted_facets?: number;
 			deleted_session_meta?: number;
@@ -792,11 +792,6 @@ export const admin = {
 			must_change_password?: string;
 		}>(`/admin/users/${id}/password`, body),
 	deleteUser: (id: string) => del(`/admin/users/${id}`),
-	applyResources: () =>
-		post<{ applied: Record<string, string>; message: string }>(
-			"/admin/resources/apply",
-			{},
-		),
 	getTracePrivacy: () =>
 		get<{ trace_privacy: boolean }>("/admin/trace-privacy"),
 	setTracePrivacy: (enabled: boolean) =>

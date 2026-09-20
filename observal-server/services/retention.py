@@ -1,4 +1,5 @@
-# SPDX-FileCopyrightText: 2026 Kaushik Kumar <kaushikrjpm10@gmail.com>
+# SPDX-FileCopyrightText: 2026 Hari Srinivasan <harisrini21@gmail.com>
+# SPDX-FileCopyrightText: 2026 Lokesh Selvam <lokeshselvam7025@gmail.com>
 # SPDX-License-Identifier: Apache-2.0
 
 """Deployment-wide data retention purge service."""
@@ -12,38 +13,35 @@ import services.dynamic_settings as ds
 from database import async_session
 from models.insight_report import InsightReport, InsightReportStatus
 from observal_shared.migration.constants import DEFAULT_PROJECT_ID
+from services.telemetry import TelemetryError, delete_orphan_summaries, delete_rows, query_one
 
 TIME_PURGE_TABLES = {"session_events": "timestamp"}
 
+#: ClickHouse kept ``raw_line`` for 30 days via a column TTL; the store expires it nightly.
+RAW_LINE_RETENTION_DAYS = 30
+#: Audit and security events were kept for 730 days via table TTL.
+AUDIT_RETENTION_DAYS = 730
+
 
 async def _delete_batch(table: str, time_col: str, project_id: str, cutoff_str: str) -> int:
-    """Execute a lightweight delete and return one on success."""
-    from services.clickhouse import _query
-
-    sql = (
-        f"DELETE FROM {table} "
-        f"WHERE project_id = {{pid:String}} AND {time_col} < {{cutoff:String}} "
-        "SETTINGS lightweight_deletes_sync = 0"
-    )
-    response = await _query(sql, {"param_pid": project_id, "param_cutoff": cutoff_str})
-    if response.status_code != 200:
-        optic.warning(
-            "retention delete failed on table {} (status={}): {}", table, response.status_code, response.text[:200]
-        )
+    """Delete rows older than *cutoff_str* for one table. Returns rows deleted."""
+    del time_col  # the store resolves the time column from the table registry
+    try:
+        return await delete_rows(table, {"project_id": project_id, "timestamp_lt": cutoff_str})
+    except TelemetryError as exc:
+        optic.error("retention delete failed on table {}: {}", table, exc)
         return 0
-    return 1
 
 
 async def _has_data(project_id: str) -> bool:
-    from services.clickhouse import _query
-
-    response = await _query(
-        "SELECT 1 FROM session_events WHERE project_id = {pid:String} LIMIT 1 FORMAT JSON",
-        {"param_pid": project_id},
-    )
-    if response.status_code != 200:
+    try:
+        row = await query_one(
+            "SELECT 1 AS present FROM session_events WHERE project_id = $pid LIMIT 1", {"pid": project_id}
+        )
+    except TelemetryError as exc:
+        optic.error("retention: could not check for data: {}", exc)
         return False
-    return bool(response.json().get("data", []))
+    return bool(row)
 
 
 async def _has_inflight_insights() -> bool:
@@ -66,17 +64,11 @@ async def _purge_time_based(project_id: str, cutoff_str: str, tables: dict[str, 
 
 
 async def _purge_session_stats_orphans(project_id: str) -> int:
-    from services.clickhouse import _query
-
-    sql = (
-        "DELETE FROM session_stats_agg "
-        "WHERE project_id = {pid:String} "
-        "AND session_id NOT IN ("
-        "  SELECT DISTINCT session_id FROM session_events WHERE project_id = {pid2:String}"
-        ") SETTINGS lightweight_deletes_sync = 0"
-    )
-    response = await _query(sql, {"param_pid": project_id, "param_pid2": project_id})
-    return 1 if response.status_code == 200 else 0
+    try:
+        return await delete_orphan_summaries(project_id)
+    except TelemetryError as exc:
+        optic.error("retention: orphan summary cleanup failed: {}", exc)
+        return 0
 
 
 async def _purge_insight_reports(score_cutoff: datetime) -> int:
@@ -98,18 +90,19 @@ async def _purge_insight_reports(score_cutoff: datetime) -> int:
 
 
 async def _purge_count_based(project_id: str, max_trace_count: int) -> int:
-    from services.clickhouse import _query
+    from services.telemetry import tq
 
-    sql = (
-        "SELECT toDate(timestamp) AS day, count(DISTINCT session_id) AS cnt "
-        "FROM session_events WHERE project_id = {pid:String} "
-        "AND timestamp >= now() - INTERVAL 730 DAY "
-        "GROUP BY day ORDER BY day DESC LIMIT 730 FORMAT JSON"
-    )
-    response = await _query(sql, {"param_pid": project_id})
-    if response.status_code != 200:
+    try:
+        data = await tq(
+            'SELECT CAST("timestamp" AS DATE) AS day, count(DISTINCT session_id) AS cnt '
+            "FROM session_events WHERE project_id = $pid "
+            'AND "timestamp" >= now()::TIMESTAMP - to_days(730) '
+            "GROUP BY day ORDER BY day DESC LIMIT 730",
+            {"pid": project_id},
+        )
+    except TelemetryError as exc:
+        optic.error("retention: count-based purge scan failed: {}", exc)
         return 0
-    data = response.json().get("data", [])
     running_total = 0
     cutoff_day = None
     for row in data:
@@ -123,6 +116,36 @@ async def _purge_count_based(project_id: str, max_trace_count: int) -> int:
     await _delete_batch("session_events", "timestamp", project_id, f"{cutoff_day} 00:00:00.000")
     await _purge_session_stats_orphans(project_id)
     return 1
+
+
+async def expire_raw_lines(now: datetime | None = None) -> int:
+    """Drop transcript bodies older than the raw-line window (ClickHouse column TTL equivalent)."""
+    from services.telemetry import expire_raw_lines as _expire
+
+    now = now or datetime.now(UTC)
+    before = (now - timedelta(days=RAW_LINE_RETENTION_DAYS)).strftime("%Y-%m-%d %H:%M:%S.000")
+    try:
+        expired = await _expire(before)
+    except TelemetryError as exc:
+        optic.error("raw_line expiry failed: {}", exc)
+        return 0
+    if expired:
+        optic.info("expired raw_line on {} session events older than {} days", expired, RAW_LINE_RETENTION_DAYS)
+    return expired
+
+
+async def purge_audit_tables(now: datetime | None = None) -> dict[str, int]:
+    """Apply the 730-day retention to audit and security events."""
+    now = now or datetime.now(UTC)
+    cutoff = (now - timedelta(days=AUDIT_RETENTION_DAYS)).strftime("%Y-%m-%d %H:%M:%S.000")
+    stats: dict[str, int] = {}
+    for table in ("audit_log", "security_events"):
+        try:
+            stats[table] = await delete_rows(table, {"timestamp_lt": cutoff})
+        except TelemetryError as exc:
+            optic.error("audit retention delete failed on {}: {}", table, exc)
+            stats[table] = 0
+    return stats
 
 
 async def run_retention_purge(ctx: dict | None = None):
@@ -147,7 +170,7 @@ async def run_retention_purge(ctx: dict | None = None):
     if trace_days:
         cutoff = (now - timedelta(days=trace_days)).strftime("%Y-%m-%d %H:%M:%S.000")
         stats["time"] = await _purge_time_based(DEFAULT_PROJECT_ID, cutoff, TIME_PURGE_TABLES)
-        await _purge_session_stats_orphans(DEFAULT_PROJECT_ID)
+        stats["orphans"] = await _purge_session_stats_orphans(DEFAULT_PROJECT_ID)
 
     score_days = score_days or (trace_days * 2 if trace_days else 0)
     if score_days:
@@ -156,3 +179,13 @@ async def run_retention_purge(ctx: dict | None = None):
         stats["count_purge"] = await _purge_count_based(DEFAULT_PROJECT_ID, max_trace_count)
 
     optic.info("retention purge complete: {}", stats)
+
+
+__all__ = [
+    "AUDIT_RETENTION_DAYS",
+    "RAW_LINE_RETENTION_DAYS",
+    "TIME_PURGE_TABLES",
+    "expire_raw_lines",
+    "purge_audit_tables",
+    "run_retention_purge",
+]

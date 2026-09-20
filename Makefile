@@ -6,7 +6,7 @@
 # SPDX-FileCopyrightText: 2026 RAWx18 <rawx18.dev@gmail.com>
 # SPDX-License-Identifier: Apache-2.0
 
-.PHONY: lint format check test test-adversarial test-eval-completeness test-fuzz test-all hooks clean migrate migrate-clickhouse check-migrations new-migration reset rebuild rebuild-fast rebuild-prometheus rebuild-observability rebuild-local reset-prometheus reset-observability up-prometheus up-observability down-prometheus down-observability logs-prometheus logs-observability release release-preview sync-skill ensure-host-dirs
+.PHONY: lint format check test test-adversarial test-eval-completeness test-fuzz test-all hooks clean migrate migrate-telemetry check-migrations new-migration reset rebuild rebuild-fast rebuild-prometheus rebuild-observability rebuild-local reset-prometheus reset-observability up-prometheus up-observability down-prometheus down-observability logs-prometheus logs-observability release release-preview sync-skill ensure-host-dirs
 
 # ── Linting ──────────────────────────────────────────────
 
@@ -84,8 +84,8 @@ down-observability:  ## Stop Docker stack with Prometheus and Grafana
 migrate:  ## Run Postgres migrations
 	cd docker && docker compose $(COMPOSE_FILES) exec observal-api /app/.venv/bin/python -m alembic upgrade head
 
-migrate-clickhouse:  ## Run ClickHouse migrations manually
-	cd docker && docker compose $(COMPOSE_FILES) run --rm --no-deps observal-api /app/.venv/bin/python -m services.clickhouse.migrations
+migrate-telemetry:  ## Apply the telemetry store schema manually
+	cd docker && docker compose $(COMPOSE_FILES) run --rm --no-deps observal-api /app/.venv/bin/python -m telemetry_store.migrate
 
 check-migrations:  ## Validate alembic migration chain (no duplicates, no forks)
 	python3 scripts/check_migrations.py

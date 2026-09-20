@@ -14,7 +14,7 @@ from arq.worker import func
 from loguru import logger as optic
 
 from jobs.catalog import batch_generate_insights, generate_insight_report, refresh_user_profiles
-from jobs.maintenance import maintain_clickhouse, purge_inbox_items, sync_component_sources
+from jobs.maintenance import maintain_telemetry, purge_inbox_items, sync_component_sources
 from jobs.migration import MAX_MIGRATION_JOB_TIMEOUT_SECONDS, purge_migration_artifacts, run_migration_job
 from jobs.usage_ping import submit_usage_ping
 from logging_config import setup_logging
@@ -51,7 +51,7 @@ class WorkerSettings:
     functions = [
         sync_component_sources,
         evaluate_alerts,
-        maintain_clickhouse,
+        maintain_telemetry,
         generate_insight_report,
         batch_generate_insights,
         run_retention_purge,
@@ -63,7 +63,7 @@ class WorkerSettings:
     cron_jobs = [
         cron(sync_component_sources, hour={0, 6, 12, 18}),  # Every 6 hours
         cron(evaluate_alerts, second={0}, timeout=55),  # Every minute
-        cron(maintain_clickhouse, hour={0, 4, 8, 12, 16, 20}, timeout=120),  # Every 4 hours
+        cron(maintain_telemetry, hour={0, 4, 8, 12, 16, 20}, timeout=900),  # Every 4 hours
         cron(batch_generate_insights, weekday={0}, hour={6}, minute={0}, timeout=300),  # Weekly Monday 6AM
         cron(
             run_retention_purge, hour={1, 7, 13, 19}, minute={30}, timeout=3600, unique=True

@@ -108,17 +108,17 @@ async def preview_retention(
     if days < 7:
         raise HTTPException(status_code=422, detail="days must be >= 7")
 
-    from services.clickhouse import _query
+    from services.telemetry import scalar
 
-    response = await _query(
-        "SELECT count() AS cnt FROM session_events "
-        "WHERE project_id = {pid:String} AND timestamp < now() - INTERVAL {days:UInt32} DAY FORMAT JSON",
-        {"param_pid": DEFAULT_PROJECT_ID, "param_days": str(days)},
-    )
-    counts = {"session_events": 0}
-    if response.status_code == 200:
-        data = response.json().get("data", [])
-        counts["session_events"] = int(data[0].get("cnt", 0)) if data else 0
+    counts = {
+        "session_events": int(
+            await scalar(
+                "SELECT count(*) AS cnt FROM session_events "
+                'WHERE project_id = $pid AND "timestamp" < now()::TIMESTAMP - to_days($days)',
+                {"pid": DEFAULT_PROJECT_ID, "days": int(days)},
+            )
+        )
+    }
 
     score_cutoff = datetime.now(UTC) - timedelta(days=days * 2)
     report_count = (
@@ -152,35 +152,28 @@ async def get_retention_stats(current_user: User = Depends(require_role(UserRole
             "next_purge_approx": None,
         }
 
-    from services.clickhouse import _query
+    from services.telemetry import query_one, scalar
 
-    response = await _query(
+    row = await query_one(
         "SELECT count(DISTINCT session_id) AS cnt, "
-        "if(cnt > 0, dateDiff('day', min(timestamp), now()), 0) AS age "
-        "FROM session_events WHERE project_id = {pid:String} FORMAT JSON",
-        {"param_pid": DEFAULT_PROJECT_ID},
+        "coalesce(date_diff('day', min(\"timestamp\"), now()::TIMESTAMP), 0) AS age "
+        "FROM session_events WHERE project_id = $pid",
+        {"pid": DEFAULT_PROJECT_ID},
     )
-    total_traces = 0
-    oldest_age_days = 0
-    if response.status_code == 200:
-        data = response.json().get("data", [])
-        if data:
-            total_traces = int(data[0].get("cnt", 0))
-            oldest_age_days = int(data[0].get("age", 0)) if total_traces else 0
+    total_traces = int(row.get("cnt", 0) or 0)
+    oldest_age_days = int(row.get("age", 0) or 0) if total_traces else 0
 
     traces_expiring = 0
     if config.data_retention_days:
         cutoff_soon = config.data_retention_days - 7
         if cutoff_soon > 0:
-            response = await _query(
-                "SELECT count(DISTINCT session_id) AS cnt FROM session_events "
-                "WHERE project_id = {pid:String} "
-                "AND timestamp < now() - INTERVAL {days:UInt32} DAY FORMAT JSON",
-                {"param_pid": DEFAULT_PROJECT_ID, "param_days": str(cutoff_soon)},
+            traces_expiring = int(
+                await scalar(
+                    "SELECT count(DISTINCT session_id) AS cnt FROM session_events "
+                    'WHERE project_id = $pid AND "timestamp" < now()::TIMESTAMP - to_days($days)',
+                    {"pid": DEFAULT_PROJECT_ID, "days": int(cutoff_soon)},
+                )
             )
-            if response.status_code == 200:
-                data = response.json().get("data", [])
-                traces_expiring = int(data[0].get("cnt", 0)) if data else 0
 
     return {
         "retention_enabled": True,

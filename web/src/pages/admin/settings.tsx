@@ -224,7 +224,6 @@ export default function SettingsPage() {
 	const [editingValue, setEditingValue] = useState("");
 	const [revokeConfirmKey, setRevokeConfirmKey] = useState<string | null>(null);
 	const [saving, setSaving] = useState(false);
-	const [applyingResources, setApplyingResources] = useState(false);
 	const [purgingTracesInsights, setPurgingTracesInsights] = useState(false);
 	const [tracePrivacy, setTracePrivacy] = useState(false);
 	const [tracePrivacyLoading, setTracePrivacyLoading] = useState(true);
@@ -668,28 +667,6 @@ export default function SettingsPage() {
 		);
 	};
 
-	const handleApplyResources = useCallback(async () => {
-		setApplyingResources(true);
-		try {
-			const res = await admin.applyResources();
-			const count = Object.keys(res.applied).length;
-			if (count > 0) {
-				toast.success(
-					`Applied ${count} resource setting${count > 1 ? "s" : ""} to ClickHouse`,
-				);
-			} else {
-				toast.info(
-					"No resource settings configured yet. Add resource.* settings first.",
-				);
-			}
-		} catch (e) {
-			toast.error(
-				e instanceof Error ? e.message : "Failed to apply resource settings",
-			);
-		} finally {
-			setApplyingResources(false);
-		}
-	}, []);
 
 
 	if (!ready) return null;

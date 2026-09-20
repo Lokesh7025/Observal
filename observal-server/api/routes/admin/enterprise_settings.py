@@ -391,47 +391,12 @@ async def revoke_setting(
     return {"revoked": key, "message": "Secret has been permanently deleted"}
 
 
-@router.post("/resources/apply")
-async def apply_resources(
-    current_user: User = Depends(require_role(UserRole.admin)),
-    db: AsyncSession = Depends(get_db),
-):
-    """Re-apply resource tuning settings to ClickHouse without restart."""
-    optic.trace("user_id={}", current_user.id)
-    from services.clickhouse import RESOURCE_SETTINGS_MAP, apply_resource_settings
-
-    result = await db.execute(select(EnterpriseConfig).where(EnterpriseConfig.key.like("resource.%")))
-    current = {cfg.key: cfg.value for cfg in result.scalars().all()}
-
-    await apply_resource_settings(overrides=current)
-
-    await emit_security_event(
-        SecurityEvent(
-            event_type=EventType.SETTING_CHANGED,
-            severity=Severity.WARNING,
-            outcome="success",
-            actor_id=str(current_user.id),
-            actor_email=current_user.email,
-            actor_role=current_user.role.value,
-            target_id="resource_settings",
-            target_type="setting",
-            detail=f"Applied resource settings: {list(current.keys())}",
-        )
-    )
-
-    applied_keys = [k for k in current if k in RESOURCE_SETTINGS_MAP]
-    return {
-        "applied": {k: current[k] for k in applied_keys},
-        "message": "ClickHouse resource settings applied",
-    }
-
-
 # ── Danger Zone Purge ───────────────────────────────
 
 
 class _PurgeTracesInsightsResponse(BaseModel):
     project_id: str
-    clickhouse_tables: list[str]
+    telemetry_tables: list[str]
     deleted_reports: int | None = None
     deleted_facets: int | None = None
     deleted_session_meta: int | None = None
@@ -447,17 +412,14 @@ async def purge_traces_and_insights(
     optic.warning("danger purge traces+insights requested by user={}", current_user.id)
     project_id = DEFAULT_PROJECT_ID
 
-    from services.clickhouse.client import _query as ch_query
+    from observal_shared.telemetry_tables import PROJECT_SCOPED_TABLES
+    from services.telemetry import delete_rows
 
-    clickhouse_tables = ["session_events", "session_stats_agg"]
-    for table in clickhouse_tables:
-        try:
-            await ch_query(
-                f"ALTER TABLE {table} DELETE WHERE project_id = {{project_id:String}}",
-                {"param_project_id": project_id},
-            )
-        except Exception as e:
-            optic.warning("danger purge failed for ClickHouse table {}: {}", table, e)
+    # Raises TelemetryError (-> 503) if the store is down: a purge must never
+    # report success while telemetry rows survive.
+    for table in PROJECT_SCOPED_TABLES:
+        deleted = await delete_rows(table, {"project_id": project_id})
+        optic.warning("danger purge removed {} rows from {}", deleted, table)
 
     agent_ids_stmt = select(Agent.id)
     report_result = await db.execute(delete(InsightReport).where(InsightReport.agent_id.in_(agent_ids_stmt)))
@@ -484,7 +446,7 @@ async def purge_traces_and_insights(
 
     return _PurgeTracesInsightsResponse(
         project_id=project_id,
-        clickhouse_tables=clickhouse_tables,
+        telemetry_tables=list(PROJECT_SCOPED_TABLES),
         deleted_reports=report_result.rowcount,
         deleted_facets=facets_result.rowcount,
         deleted_session_meta=meta_result.rowcount,

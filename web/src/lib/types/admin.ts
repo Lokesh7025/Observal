@@ -352,7 +352,7 @@ export interface InsightAppliedItems {
 // ── Telemetry ───────────────────────────────────────────────────────
 
 export interface TelemetryStatus {
-	clickhouse: boolean;
+	telemetry: boolean;
 	traces_count: number;
 	spans_count: number;
 	scores_count: number;

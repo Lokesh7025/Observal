@@ -6,7 +6,7 @@
 
 Emits security events to:
 1. Python logging (observal.security) - picked up by OTEL Collector for SIEM forwarding
-2. ClickHouse security_events table - in-app audit log queries
+2. Telemetry security_events table - in-app audit log queries
 
 Events follow a consistent schema compatible with CEF/LEEF/RFC 5424 formats.
 """
@@ -103,7 +103,7 @@ class SecurityEvent:
         d["severity"] = self.severity.value
         return d
 
-    def to_clickhouse_row(self) -> dict[str, Any]:
+    def to_row(self) -> dict[str, Any]:
         return {
             "event_id": self.event_id,
             "timestamp": self.timestamp,
@@ -122,7 +122,7 @@ class SecurityEvent:
 
 
 async def emit_security_event(event: SecurityEvent) -> None:
-    """Emit a security event to structured logging and ClickHouse."""
+    """Emit a security event to structured logging and the telemetry store."""
     optic.trace("emitting security event: {} ({})", event.event_type, event.severity)
     log_data = event.to_log_dict()
 
@@ -138,14 +138,12 @@ async def emit_security_event(event: SecurityEvent) -> None:
         json.dumps(log_data, default=str),
     )
 
-    try:
-        from services.clickhouse import _query
+    from services.telemetry import insert_security_event
 
-        row = event.to_clickhouse_row()
-        data = json.dumps(row, default=str)
-        await _query("INSERT INTO security_events FORMAT JSONEachRow", data=data)
-    except Exception:
-        logger.debug("ClickHouse security_events insert skipped", exc_info=True)
+    row = event.to_row()
+    row["event_id"] = str(row["event_id"])
+    row["timestamp"] = str(row["timestamp"])
+    await insert_security_event(row)
 
 
 def _extract_request_info(request: Any) -> tuple[str, str]:

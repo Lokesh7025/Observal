@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Hari Srinivasan <harisrini21@gmail.com>
 # SPDX-License-Identifier: Apache-2.0
 
-"""Maintenance background jobs: ClickHouse optimization, component source sync, retention."""
+"""Maintenance background jobs: telemetry store upkeep, component source sync, retention."""
 
 from loguru import logger as optic
 
@@ -97,39 +97,36 @@ async def purge_inbox_items(ctx: dict):
         )
 
 
-async def maintain_clickhouse(ctx: dict):
-    """Periodic ClickHouse maintenance: compact parts to prevent OOM on long-running agents.
+async def maintain_telemetry(ctx: dict):
+    """Periodic telemetry-store maintenance.
 
-    OPTIMIZE TABLE (without FINAL) merges small parts into larger ones.
-    This is lightweight and safe to run frequently.  Without it, a
-    month-long agent session accumulates thousands of tiny parts that
-    bloat memory during merges and FINAL queries.
+    Runs a CHECKPOINT so freed blocks are reclaimed, expires ``raw_line`` bodies
+    past their 30-day window, applies the 730-day audit retention, and logs table
+    sizes so growth is visible in dev logs before it becomes a problem.
     """
-    optic.debug("maintain_clickhouse")
-    from services.clickhouse.client import _query
+    del ctx
+    optic.debug("maintain_telemetry")
+    from services.retention import expire_raw_lines, purge_audit_tables
+    from services.telemetry import TelemetryError, checkpoint, health, table_counts
 
-    tables = ["session_events", "session_stats_agg"]
-    for table in tables:
-        try:
-            await _query(f"OPTIMIZE TABLE {table}")
-        except Exception as e:
-            optic.warning("ClickHouse OPTIMIZE {} failed: {}", table, e)
-
-    # Check part health: warn before things get critical
+    expired = await expire_raw_lines()
+    audit_stats = await purge_audit_tables()
     try:
-        resp = await _query(
-            "SELECT table, count() as parts, sum(rows) as total_rows "
-            "FROM system.parts WHERE database = currentDatabase() AND active "
-            "GROUP BY table FORMAT JSON"
-        )
-        if resp.status_code == 200:
-            for row in resp.json().get("data", []):
-                parts = int(row.get("parts", 0))
-                if parts > 300:
-                    optic.warning(
-                        "ClickHouse table {} has {} active parts, merges may be falling behind",
-                        row["table"],
-                        parts,
-                    )
-    except Exception as e:
-        optic.debug("Part health check failed: {}", e)
+        await checkpoint()
+    except TelemetryError as e:
+        optic.warning("telemetry checkpoint failed: {}", e)
+
+    try:
+        counts = await table_counts()
+    except TelemetryError as e:
+        optic.warning("telemetry table count failed: {}", e)
+        counts = {}
+    status = await health() or {}
+    optic.info(
+        "telemetry maintenance: expired_raw_lines={} audit_purged={} file_bytes={} wal_bytes={} rows={}",
+        expired,
+        audit_stats,
+        status.get("file_bytes"),
+        status.get("wal_bytes"),
+        {k: v for k, v in counts.items() if not k.startswith("schema_")},
+    )

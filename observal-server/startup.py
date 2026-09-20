@@ -18,10 +18,11 @@ from services.audit import setup_audit, shutdown_audit
 from services.audit.event_handlers import register_audit_handlers
 from services.audit.event_handlers import shutdown_audit as shutdown_audit_handlers
 from services.cache import close_cache, init_cache
-from services.clickhouse import init_clickhouse
 from services.crypto import init_key_manager
 from services.migration_uploads import configure_migration_upload_tempdir
 from services.redis import close as close_redis
+from services.telemetry import close_client as close_telemetry_client
+from services.telemetry import verify_telemetry
 
 
 async def ensure_columns(conn) -> None:
@@ -52,7 +53,7 @@ async def run_startup_tasks() -> None:
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
             await ensure_columns(conn)
-        await init_clickhouse()
+    await verify_telemetry()
 
     ds.load_external_settings()
     await ds.load_sync_cache()
@@ -119,6 +120,7 @@ async def run_shutdown_tasks() -> None:
 
     await close_cache()
     await close_redis()
+    await close_telemetry_client()
 
 
 @asynccontextmanager

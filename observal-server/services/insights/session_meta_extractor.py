@@ -4,7 +4,7 @@
 
 """Deterministic per-session metadata extraction from raw JSONL transcripts.
 
-Reads session_events.raw_line from ClickHouse and computes rich stats
+Reads session_events.raw_line from the telemetry store and computes rich stats
 per session: lines added/removed, git commits, languages, tool errors,
 response times, interruptions, file modifications, subagent/MCP usage,
 message timestamps, and more.
@@ -437,26 +437,23 @@ async def fetch_session_stats(
 
     sql = """
         SELECT session_id, total_credits, harness, layer_hash
-        FROM session_stats_agg FINAL
-        WHERE (agent_id = {agent_id:String} OR agent_id = {agent_name:String})
-          AND last_event_time >= {t_start:String}
-          AND last_event_time <= {t_end:String}
+        FROM session_stats_agg
+        WHERE (agent_id = $agent_id OR agent_id = $agent_name)
+          AND last_event_time >= $t_start
+          AND last_event_time <= $t_end
           AND __AGENT_VERSION_FILTER__
         GROUP BY session_id, total_credits, harness, layer_hash
-        FORMAT JSON
     """.replace("__AGENT_VERSION_FILTER__", agent_version_filter())
     params = {
-        "param_agent_id": agent_id,
-        "param_agent_name": agent_name,
-        "param_t_start": period_start,
-        "param_t_end": period_end,
-        "param_agent_version": agent_version or "",
+        "agent_id": agent_id,
+        "agent_name": agent_name,
+        "t_start": period_start,
+        "t_end": period_end,
+        "agent_version": agent_version or "",
     }
 
     try:
-        r = await query(sql, params)
-        r.raise_for_status()
-        rows = r.json().get("data", [])
+        rows = await query(sql, params)
         return {
             row["session_id"]: {
                 "credits": float(row.get("total_credits") or 0),
@@ -472,20 +469,17 @@ async def fetch_session_stats(
         SELECT
             session_id,
             max(credits) AS total_credits,
-            anyIf(harness, harness != '') AS harness,
-            anyIf(layer_hash, layer_hash IS NOT NULL AND layer_hash != '') AS layer_hash
-        FROM session_events FINAL
-        WHERE (agent_id = {agent_id:String} OR agent_id = {agent_name:String})
-          AND timestamp >= {t_start:String}
-          AND timestamp <= {t_end:String}
+            any_value(harness) FILTER (WHERE harness != '') AS harness,
+            any_value(layer_hash) FILTER (WHERE layer_hash IS NOT NULL AND layer_hash != '') AS layer_hash
+        FROM session_events
+        WHERE (agent_id = $agent_id OR agent_id = $agent_name)
+          AND timestamp >= $t_start
+          AND timestamp <= $t_end
           AND __AGENT_VERSION_FILTER__
         GROUP BY session_id
-        FORMAT JSON
     """.replace("__AGENT_VERSION_FILTER__", agent_version_filter(nullable=True))
     try:
-        r = await query(fallback_sql, params)
-        r.raise_for_status()
-        rows = r.json().get("data", [])
+        rows = await query(fallback_sql, params)
         return {
             row["session_id"]: {
                 "credits": float(row.get("total_credits") or 0),
@@ -507,7 +501,7 @@ async def fetch_all_session_transcripts(
     agent_version: str | None = None,
     batch_size: int = 50,
 ) -> dict[str, list[str]]:
-    """Fetch raw JSONL lines for all sessions of an agent from ClickHouse.
+    """Fetch raw JSONL lines for all sessions of an agent from the telemetry store.
 
     Batches by session_id to avoid loading 200MB+ into memory at once.
     For 20 users x 100 sessions, fetches ~50 sessions at a time.
@@ -519,43 +513,37 @@ async def fetch_all_session_transcripts(
     # First, get the list of session_ids from the lightweight session_stats_agg
     id_sql = """
         SELECT session_id
-        FROM session_stats_agg FINAL
-        WHERE (agent_id = {agent_id:String} OR agent_id = {agent_name:String})
-          AND last_event_time >= {t_start:String}
-          AND last_event_time <= {t_end:String}
+        FROM session_stats_agg
+        WHERE (agent_id = $agent_id OR agent_id = $agent_name)
+          AND last_event_time >= $t_start
+          AND last_event_time <= $t_end
           AND __AGENT_VERSION_FILTER__
         GROUP BY session_id
         ORDER BY min(last_event_time)
-        FORMAT JSON
     """.replace("__AGENT_VERSION_FILTER__", agent_version_filter())
     params = {
-        "param_agent_id": agent_id,
-        "param_agent_name": agent_name,
-        "param_t_start": period_start,
-        "param_t_end": period_end,
-        "param_agent_version": agent_version or "",
+        "agent_id": agent_id,
+        "agent_name": agent_name,
+        "t_start": period_start,
+        "t_end": period_end,
+        "agent_version": agent_version or "",
     }
 
     try:
-        r = await query(id_sql, params)
-        r.raise_for_status()
-        session_ids = [row["session_id"] for row in r.json().get("data", [])]
+        session_ids = [row["session_id"] for row in await query(id_sql, params)]
     except Exception as e:
         logger.warning("fetch_session_ids_agg_failed", error=str(e))
         fallback_id_sql = """
             SELECT DISTINCT session_id
-            FROM session_events FINAL
-            WHERE (agent_id = {agent_id:String} OR agent_id = {agent_name:String})
-              AND timestamp >= {t_start:String}
-              AND timestamp <= {t_end:String}
+            FROM session_events
+            WHERE (agent_id = $agent_id OR agent_id = $agent_name)
+              AND timestamp >= $t_start
+              AND timestamp <= $t_end
               AND __AGENT_VERSION_FILTER__
             ORDER BY session_id
-            FORMAT JSON
         """.replace("__AGENT_VERSION_FILTER__", agent_version_filter(nullable=True))
         try:
-            r = await query(fallback_id_sql, params)
-            r.raise_for_status()
-            session_ids = [row["session_id"] for row in r.json().get("data", [])]
+            session_ids = [row["session_id"] for row in await query(fallback_id_sql, params)]
         except Exception as fallback_error:
             logger.error("fetch_session_ids_failed", error=str(fallback_error))
             return {}
@@ -573,18 +561,15 @@ async def fetch_all_session_transcripts(
 
         batch_sql = """
             SELECT session_id, raw_line
-            FROM session_events FINAL
-            WHERE session_id IN ({ids:Array(String)})
+            FROM session_events
+            WHERE session_id IN (SELECT unnest($ids))
               AND raw_line != ''
             ORDER BY session_id, line_offset
-            FORMAT JSON
         """
-        params = {"param_ids": "[" + ",".join(f"'{sid.replace(chr(39), '')}" + "'" for sid in batch_ids) + "]"}
+        params = {"ids": list(batch_ids)}
 
         try:
-            r = await query(batch_sql, params)
-            r.raise_for_status()
-            rows = r.json().get("data", [])
+            rows = await query(batch_sql, params)
             for row in rows:
                 sid = row["session_id"]
                 all_sessions.setdefault(sid, []).append(row["raw_line"])
@@ -610,7 +595,7 @@ async def extract_all_session_metas(
 ) -> list[dict]:
     """Fetch transcripts and extract deterministic metadata for all sessions.
 
-    This is the main entry point: fetches raw lines from ClickHouse,
+    This is the main entry point: fetches raw lines from the telemetry store,
     then runs extract_session_meta on each session.
     Also enriches each meta with credits and harness info from session_stats_agg.
     """

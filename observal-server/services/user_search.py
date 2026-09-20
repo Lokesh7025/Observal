@@ -14,6 +14,7 @@ from sqlalchemy import case, desc, func, literal, or_, select
 
 from api.sanitize import escape_like
 from models.user import User
+from services.telemetry.sql import in_condition
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -133,18 +134,7 @@ def _dedupe(values: Iterable[str]) -> list[str]:
     return result
 
 
-def clickhouse_in_condition(column: str, values: list[str], prefix: str, params: dict[str, str]) -> str | None:
-    if not values:
-        return None
-    placeholders = []
-    for idx, value in enumerate(values):
-        name = f"{prefix}_{idx}"
-        placeholders.append(f"{{{name}:String}}")
-        params[f"param_{name}"] = value
-    return f"{column} IN ({', '.join(placeholders)})"
-
-
-def clickhouse_user_conditions(
+def telemetry_user_conditions(
     *,
     id_column: str,
     email_column: str,
@@ -153,8 +143,8 @@ def clickhouse_user_conditions(
     params: dict[str, str],
 ) -> list[str]:
     conditions = []
-    id_condition = clickhouse_in_condition(id_column, values.ids, f"{prefix}_id", params)
-    email_condition = clickhouse_in_condition(email_column, values.emails, f"{prefix}_email", params)
+    id_condition = in_condition(id_column, values.ids, f"{prefix}_id", params)
+    email_condition = in_condition(email_column, values.emails, f"{prefix}_email", params)
     if id_condition:
         conditions.append(id_condition)
     if email_condition:

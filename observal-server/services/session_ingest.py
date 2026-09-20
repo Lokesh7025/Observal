@@ -5,7 +5,8 @@
 """Session JSONL ingest service.
 
 Receives raw JSONL transcript lines from harness sessions, classifies each
-line into an event type, and batch-inserts into the ``session_events`` table.
+line into an event type, and writes them to the telemetry store's
+``session_events`` table in one transaction per request.
 
 Classification dispatches strictly by harness via
 ``services.session_parsers.ingest_classify.get_classifier`` -- there is no
@@ -21,17 +22,14 @@ import orjson
 import xxhash
 from loguru import logger as optic
 
-from services.clickhouse import (
-    insert_session_checkpoint,
-    insert_session_events,
+from services.secrets_redactor import redact_secrets
+from services.session_parsers.ingest_classify import extract_timestamp, get_classifier, get_extra_rows
+from services.telemetry import (
+    insert_session_batch,
     query_existing_for_dedup,
     query_session_checkpoint,
     query_session_source_manifest,
-    query_source_records_after,
-    refresh_session_summary,
 )
-from services.secrets_redactor import redact_secrets
-from services.session_parsers.ingest_classify import extract_timestamp, get_classifier, get_extra_rows
 
 # ---------------------------------------------------------------------------
 # Per-harness token usage extraction (dispatch pattern)
@@ -424,8 +422,14 @@ async def ingest_session_lines(
             row["is_source_record"] = 0
             row["rendered"] = 1
         if extra:
-            await insert_session_events(extra)
-            await refresh_session_summary(session_id, project_id, user_id, harness)
+            await insert_session_batch(
+                extra,
+                session_id=session_id,
+                project_id=project_id,
+                user_id=user_id,
+                harness=harness,
+                advance_checkpoint=False,
+            )
         optic.debug("no lines to ingest for session {}", session_id)
         return IngestResult(ingested=0, skipped=0, errors=0)
 
@@ -540,19 +544,23 @@ async def ingest_session_lines(
         )
         ingested += rendered
 
-    if rows:
-        await insert_session_events(rows)
-        optic.debug("inserted {} canonical rows for session={}", len(rows), session_id)
-
     extra = get_extra_rows(harness, session_id, project_id, user_id, agent_id, agent_version, total_credits)
     for row in extra:
         row["is_source_record"] = 0
         row["rendered"] = 1
-    if extra:
-        await insert_session_events(extra)
 
     if rows or extra:
-        await refresh_session_summary(session_id, project_id, user_id, harness)
+        # One transaction: replace canonical rows, refresh the summary. The
+        # checkpoint is advanced separately by ``advance_session_checkpoint``.
+        await insert_session_batch(
+            rows + extra,
+            session_id=session_id,
+            project_id=project_id,
+            user_id=user_id,
+            harness=harness,
+            advance_checkpoint=False,
+        )
+        optic.debug("wrote {} canonical rows (+{} extra) for session={}", len(rows), len(extra), session_id)
 
     return IngestResult(ingested=ingested, skipped=skipped, errors=errors)
 
@@ -563,41 +571,24 @@ async def advance_session_checkpoint(
     user_id: str,
     harness: str,
 ) -> tuple[int, int]:
-    """Advance and return the highest contiguous canonical source position."""
-    acknowledged_line, acknowledged_offset = await query_session_checkpoint(session_id, project_id, user_id, harness)
-    while True:
-        records = await query_source_records_after(
-            session_id,
-            project_id,
-            user_id,
-            harness,
-            acknowledged_line,
-        )
-        if not records:
-            break
-        expected = acknowledged_line + 1
-        advanced = False
-        for line_offset, end_offset in records:
-            if line_offset < expected:
-                continue
-            if line_offset != expected:
-                break
-            acknowledged_line = line_offset
-            acknowledged_offset = end_offset
-            expected += 1
-            advanced = True
-        if not advanced or len(records) < 5000 or records[-1][0] != acknowledged_line:
-            break
+    """Advance and return the highest contiguous canonical source position.
 
-    await insert_session_checkpoint(
-        session_id,
-        project_id,
-        user_id,
-        harness,
-        acknowledged_line,
-        acknowledged_offset,
+    The contiguous walk runs inside the telemetry store in one transaction, so
+    the checkpoint can never observe a partially written batch.
+    """
+    result = await insert_session_batch(
+        [],
+        session_id=session_id,
+        project_id=project_id,
+        user_id=user_id,
+        harness=harness,
+        refresh_summary=False,
+        advance_checkpoint=True,
     )
-    return acknowledged_line, acknowledged_offset
+    checkpoint = result.get("checkpoint") or {}
+    if not checkpoint:
+        return await query_session_checkpoint(session_id, project_id, user_id, harness)
+    return int(checkpoint["acknowledged_line"]), int(checkpoint.get("acknowledged_offset") or 0)
 
 
 async def check_session_integrity(

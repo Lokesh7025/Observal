@@ -19,11 +19,11 @@ from sqlalchemy import select
 from database import async_session
 from models.agent import Agent, AgentStatus, AgentVersion
 from models.insight_report import InsightReport, InsightReportStatus
-from services.clickhouse import _query
 from services.inbox import sources as inbox
 from services.insight_version_filters import agent_version_filter
 from services.redis import _get_arq_pool
 from services.secrets_redactor import redact_secrets
+from services.telemetry import TelemetryError, tq
 
 from .registry_match import RegistryScope
 
@@ -297,39 +297,33 @@ async def run_single_report(report_id: str) -> None:
 async def _count_agent_sessions(agent_id: str, agent_name: str, since: str, agent_version: str | None = None) -> int:
     """Count sessions for an agent/version since a given timestamp."""
     sql = """
-        SELECT count() AS cnt
-        FROM session_stats_agg FINAL
-        WHERE (agent_id = {agent_id:String} OR agent_id = {aname:String})
-          AND last_event_time >= {t_start:String}
+        SELECT count(*) AS cnt
+        FROM session_stats_agg
+        WHERE (agent_id = $agent_id OR agent_id = $aname)
+          AND last_event_time >= $t_start
           AND __AGENT_VERSION_FILTER__
-        FORMAT JSON
     """.replace("__AGENT_VERSION_FILTER__", agent_version_filter())
     params = {
-        "param_agent_id": agent_id,
-        "param_aname": agent_name,
-        "param_t_start": since,
-        "param_agent_version": agent_version or "",
+        "agent_id": agent_id,
+        "aname": agent_name,
+        "t_start": since,
+        "agent_version": agent_version or "",
     }
     try:
-        r = await _query(sql, params)
-        r.raise_for_status()
-        data = r.json().get("data", [])
+        data = await tq(sql, params)
         return int(data[0]["cnt"]) if data else 0
-    except Exception as e:
+    except TelemetryError as e:
         logger.warning("insight_batch_count_agg_failed", agent_name=agent_name, version=agent_version, error=str(e))
 
     fallback_sql = """
         SELECT count(DISTINCT session_id) AS cnt
-        FROM session_events FINAL
-        WHERE (agent_id = {agent_id:String} OR agent_id = {aname:String})
-          AND timestamp >= {t_start:String}
+        FROM session_events
+        WHERE (agent_id = $agent_id OR agent_id = $aname)
+          AND timestamp >= $t_start
           AND __AGENT_VERSION_FILTER__
-        FORMAT JSON
     """.replace("__AGENT_VERSION_FILTER__", agent_version_filter(nullable=True))
     try:
-        r = await _query(fallback_sql, params)
-        r.raise_for_status()
-        data = r.json().get("data", [])
+        data = await tq(fallback_sql, params)
         return int(data[0]["cnt"]) if data else 0
     except Exception as e:
         logger.warning(

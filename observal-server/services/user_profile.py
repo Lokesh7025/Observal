@@ -8,11 +8,10 @@ metadata — file extensions, tool names, MCP server names, harnesses, error
 categories. Prompt and transcript text is never read, so the profile is safe
 to compute for every user regardless of the org's ``trace_privacy`` setting.
 
-ClickHouse access pattern matters here. ``session_stats_agg`` has a bloom
-filter on ``user_id``; ``session_events`` does **not** (only session_id,
-project_id, event_type, line_hash). So we resolve user -> session ids from the
-aggregate table first, then fetch events by session id. Filtering
-``session_events`` on ``user_id`` directly would scan whole partitions.
+Access pattern matters here. ``session_stats_agg`` holds one row per session
+and is cheap to filter by ``user_id``; ``session_events`` is the wide table.
+So we resolve user -> session ids from the aggregate table first, then fetch
+events by session id.
 """
 
 from __future__ import annotations
@@ -27,7 +26,7 @@ from loguru import logger as optic
 from sqlalchemy import select
 
 from models.user_profile import UserWorkProfile
-from services.clickhouse import _query
+from services.telemetry import TelemetryError, tq
 
 if TYPE_CHECKING:
     import uuid
@@ -37,8 +36,8 @@ if TYPE_CHECKING:
 # How far back a profile looks, and how many sessions it will consider.
 DEFAULT_PROFILE_DAYS = 60
 MAX_PROFILE_SESSIONS = 300
-# Session ids travel to ClickHouse in the HTTP query string, so the id-array
-# queries use a tighter cap than the session listing to keep the URI sane.
+# Session id lists are bound as a list parameter; the cap keeps the per-user
+# event query bounded.
 MAX_ID_ARRAY = 150
 
 # Tool/server name fragments mapped to a coarse work topic. Deliberately a
@@ -127,13 +126,12 @@ def _topics_for(terms: list[str]) -> Counter:
     return found
 
 
-async def _ch_rows(sql: str, params: dict) -> list[dict]:
+async def _rows(sql: str, params: dict) -> list[dict]:
+    """Profile building is a background enrichment: a store outage degrades to an empty profile."""
     try:
-        response = await _query(sql, params)
-        response.raise_for_status()
-        return response.json().get("data", [])
-    except Exception as e:
-        optic.warning("user_profile: clickhouse query failed: {}", e)
+        return await tq(sql, params)
+    except TelemetryError as e:
+        optic.warning("user_profile: telemetry query failed: {}", e)
         return []
 
 
@@ -143,28 +141,24 @@ async def _ch_rows(sql: str, params: dict) -> list[dict]:
 _SAFE_SESSION_ID = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
 
 
-def _id_array(session_ids: list[str]) -> str:
-    """Render session ids as a ClickHouse array literal.
+def _id_list(session_ids: list[str]) -> list[str]:
+    """Bound session ids as a list parameter.
 
-    Parameters travel as HTTP query values, so the array has to arrive
-    pre-formatted rather than bound. Ids are therefore *rejected* unless they
-    match a strict allowlist — not escaped, and not merely quote-stripped.
-    Stripping only quotes would still admit a trailing backslash, which
-    ClickHouse treats as an escape and which could swallow the closing quote
-    of the literal.
+    Ids are *rejected* unless they match a strict allowlist so the profile
+    query only ever touches identifiers a real harness could have produced.
     """
     safe = [sid for sid in session_ids if _SAFE_SESSION_ID.match(sid or "")]
     dropped = len(session_ids) - len(safe)
     if dropped:
         optic.warning("user_profile: dropped {} session id(s) with unexpected characters", dropped)
-    return "[" + ",".join(f"'{sid}'" for sid in safe[:MAX_ID_ARRAY]) + "]"
+    return safe[:MAX_ID_ARRAY]
 
 
 async def users_with_recent_activity(days: int = DEFAULT_PROFILE_DAYS) -> set[tuple[str, str]] | None:
     """``(project_id, user_id)`` pairs that have a session in the window.
 
     One query for the whole instance, so a caller sweeping every user can
-    skip the inactive ones instead of paying a ClickHouse round trip each to
+    skip the inactive ones instead of paying a telemetry round trip each to
     discover they have nothing. ``session_stats_agg`` is the aggregate table,
     so this reads far less than the per-user profile queries it saves.
 
@@ -174,20 +168,17 @@ async def users_with_recent_activity(days: int = DEFAULT_PROFILE_DAYS) -> set[tu
     """
     since = (datetime.now(UTC) - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
     try:
-        response = await _query(
+        rows = await tq(
             """
             SELECT DISTINCT project_id, user_id
-            FROM session_stats_agg FINAL
-            WHERE last_event_time >= {since:String}
+            FROM session_stats_agg
+            WHERE last_event_time >= $since
               AND user_id != ''
-            FORMAT JSON
             """,
-            {"param_since": since},
+            {"since": since},
         )
-        response.raise_for_status()
-        rows = response.json().get("data", [])
-    except Exception:
-        optic.warning("user_profile: active-user lookup failed")
+    except TelemetryError as e:
+        optic.warning("user_profile: active-user lookup failed: {}", e)
         return None
 
     return {(str(r.get("project_id") or ""), str(r.get("user_id") or "")) for r in rows}
@@ -202,23 +193,22 @@ async def build_profile(
     since = (datetime.now(UTC) - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
 
     # Step 1: user -> sessions, via the table that indexes user_id.
-    session_rows = await _ch_rows(
+    session_rows = await _rows(
         """
-        SELECT session_id, anyLast(harness) AS harness
-        FROM session_stats_agg FINAL
-        WHERE user_id = {uid:String}
-          AND project_id = {pid:String}
-          AND last_event_time >= {since:String}
+        SELECT session_id, arg_max(harness, last_event_time) AS harness
+        FROM session_stats_agg
+        WHERE user_id = $uid
+          AND project_id = $pid
+          AND last_event_time >= $since
         GROUP BY session_id
         ORDER BY max(last_event_time) DESC
-        LIMIT {limit:UInt32}
-        FORMAT JSON
+        LIMIT $limit
         """,
         {
-            "param_uid": str(user_id),
-            "param_pid": project_id,
-            "param_since": since,
-            "param_limit": MAX_PROFILE_SESSIONS,
+            "uid": str(user_id),
+            "pid": project_id,
+            "since": since,
+            "limit": MAX_PROFILE_SESSIONS,
         },
     )
     if not session_rows:
@@ -230,19 +220,18 @@ async def build_profile(
         return WorkProfile()
 
     # Step 2: sessions -> tool usage, keyed on the indexed session_id column.
-    tool_rows = await _ch_rows(
+    tool_rows = await _rows(
         """
-        SELECT tool_name, count() AS uses
+        SELECT tool_name, count(*) AS uses
         FROM session_events
-        WHERE session_id IN ({ids:Array(String)})
+        WHERE session_id IN (SELECT unnest($ids))
           AND tool_name IS NOT NULL
           AND tool_name != ''
         GROUP BY tool_name
         ORDER BY uses DESC
         LIMIT 200
-        FORMAT JSON
         """,
-        {"param_ids": _id_array(session_ids)},
+        {"ids": _id_list(session_ids)},
     )
 
     tools: Counter = Counter()
@@ -281,17 +270,16 @@ async def _languages_for_sessions(session_ids: list[str]) -> Counter:
     ``content_preview`` is a short, already-truncated summary written at
     ingest — this does not read full transcripts.
     """
-    rows = await _ch_rows(
+    rows = await _rows(
         """
         SELECT content_preview
         FROM session_events
-        WHERE session_id IN ({ids:Array(String)})
+        WHERE session_id IN (SELECT unnest($ids))
           AND event_type = 'tool_call'
           AND content_preview != ''
         LIMIT 5000
-        FORMAT JSON
         """,
-        {"param_ids": _id_array(session_ids)},
+        {"ids": _id_list(session_ids)},
     )
 
     # Imported lazily: `services.insights` pulls in LiteLLM at package import
@@ -316,7 +304,7 @@ async def get_or_build_profile(
 ) -> WorkProfile:
     """Return a cached profile, recomputing it when stale.
 
-    Recomputation touches ClickHouse, so the cache is what keeps the
+    Recomputation touches the telemetry store, so the cache is what keeps the
     recommendations endpoint cheap enough to call on page load.
     """
     existing = (

@@ -28,9 +28,10 @@ from api.deps import get_db, require_role
 from api.ratelimit import limiter
 from config import Settings, settings
 from models.user import UserRole
-from services.clickhouse import CLICKHOUSE_DB, _query
 from services.redis import get_redis
 from services.secrets_redactor import redact_dict
+from services.telemetry import TelemetryError, table_counts
+from services.telemetry import health as telemetry_health
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -42,8 +43,7 @@ router = APIRouter(prefix="/api/v1/support", tags=["support"])
 
 COLLECTOR_TIMEOUT_SECONDS = 10
 
-# Valid ClickHouse/PG table name: alphanumeric + underscores, starting with a letter or underscore
-_SAFE_TABLE_NAME_RE = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
+# Valid PG table name: alphanumeric + underscores, starting with a letter or underscore
 
 
 # ── Request / Response models ────────────────────────────────────────
@@ -95,7 +95,7 @@ async def _run_collector(name: str, coro) -> tuple[str, CollectorData]:
 
 
 async def _collect_versions(db: AsyncSession) -> dict:
-    """Collect app version, build hash, Alembic revision, ClickHouse version + tables."""
+    """Collect app version, build hash, Alembic revision, telemetry store version + tables."""
     optic.debug("_collect_versions called")
     result: dict[str, Any] = {}
 
@@ -118,35 +118,25 @@ async def _collect_versions(db: AsyncSession) -> dict:
     except Exception as exc:
         result["alembic_revision"] = f"error: {type(exc).__name__}"
 
-    # ClickHouse version
-    try:
-        resp = await _query("SELECT version()")
-        if resp.status_code == 200:
-            result["clickhouse_version"] = resp.text.strip()
-        else:
-            result["clickhouse_version"] = f"error: HTTP {resp.status_code}"
-    except Exception as exc:
-        result["clickhouse_version"] = f"error: {type(exc).__name__}"
-
-    # ClickHouse table list
-    try:
-        resp = await _query(
-            "SELECT name FROM system.tables WHERE database = {db:String} FORMAT JSON",
-            {"param_db": CLICKHOUSE_DB},
-        )
-        if resp.status_code == 200:
-            rows = resp.json().get("data", [])
-            result["clickhouse_tables"] = [r["name"] for r in rows]
-        else:
-            result["clickhouse_tables"] = []
-    except Exception as exc:
-        result["clickhouse_tables"] = f"error: {type(exc).__name__}"
+    # Telemetry store version, schema, and table list
+    status = await telemetry_health()
+    if status is None:
+        result["telemetry_version"] = "error: unreachable"
+        result["telemetry_schema_version"] = "unknown"
+        result["telemetry_tables"] = "error: unreachable"
+    else:
+        result["telemetry_version"] = f"duckdb {status.get('duckdb_version', 'unknown')}"
+        result["telemetry_schema_version"] = status.get("schema_version") or "unknown"
+        try:
+            result["telemetry_tables"] = sorted(await table_counts())
+        except TelemetryError as exc:
+            result["telemetry_tables"] = f"error: {type(exc).__name__}"
 
     return result
 
 
 async def _collect_health(db: AsyncSession) -> dict:
-    """Run health probes against PG, CH, Redis, and OTEL collector."""
+    """Run health probes against PG, the telemetry store, Redis, and OTEL collector."""
     optic.debug("_collect_health called")
     result: dict[str, Any] = {}
 
@@ -160,18 +150,20 @@ async def _collect_health(db: AsyncSession) -> dict:
         pg_ms = int((time.monotonic() - pg_start) * 1000)
         result["postgres"] = {"status": "error", "latency_ms": pg_ms, "error": type(exc).__name__}
 
-    # ClickHouse health
-    ch_start = time.monotonic()
-    try:
-        resp = await _query("SELECT 1")
-        ch_ms = int((time.monotonic() - ch_start) * 1000)
-        if resp.status_code == 200:
-            result["clickhouse"] = {"status": "ok", "latency_ms": ch_ms}
-        else:
-            result["clickhouse"] = {"status": "error", "latency_ms": ch_ms, "error": f"HTTP {resp.status_code}"}
-    except Exception as exc:
-        ch_ms = int((time.monotonic() - ch_start) * 1000)
-        result["clickhouse"] = {"status": "error", "latency_ms": ch_ms, "error": type(exc).__name__}
+    # Telemetry store health
+    t_start = time.monotonic()
+    status = await telemetry_health()
+    t_ms = int((time.monotonic() - t_start) * 1000)
+    if status is None:
+        result["telemetry"] = {"status": "error", "latency_ms": t_ms, "error": "unreachable"}
+    else:
+        result["telemetry"] = {
+            "status": "ok",
+            "latency_ms": t_ms,
+            "file_bytes": status.get("file_bytes"),
+            "wal_bytes": status.get("wal_bytes"),
+            "writer_paused": status.get("writer_paused"),
+        }
 
     # Redis health
     redis_start = time.monotonic()
@@ -190,7 +182,7 @@ async def _collect_health(db: AsyncSession) -> dict:
 CONFIG_ALLOWLIST = frozenset(
     {
         "DATABASE_URL",
-        "CLICKHOUSE_URL",
+        "TELEMETRY_URL",
         "REDIS_URL",
         "JWT_SIGNING_ALGORITHM",
     }
@@ -234,12 +226,12 @@ async def _collect_config() -> dict:
 
 
 async def _collect_aggregates(db: AsyncSession) -> dict:
-    """Collect row counts per PG and CH table.
+    """Collect row counts per PG and telemetry table.
 
     Only counts are returned - never row contents.
     """
     optic.debug("_collect_aggregates called")
-    result: dict[str, Any] = {"pg_table_counts": {}, "ch_table_counts": {}}
+    result: dict[str, Any] = {"pg_table_counts": {}, "telemetry_table_counts": {}}
 
     # PostgreSQL table counts
     try:
@@ -256,34 +248,11 @@ async def _collect_aggregates(db: AsyncSession) -> dict:
     except Exception as exc:
         result["pg_table_counts"] = {"error": type(exc).__name__}
 
-    # ClickHouse table counts (no FINAL - fast approximate counts)
+    # Telemetry store table counts
     try:
-        resp = await _query(
-            "SELECT name FROM system.tables WHERE database = {db:String} FORMAT JSON",
-            {"param_db": CLICKHOUSE_DB},
-        )
-        if resp.status_code == 200:
-            ch_tables = [r["name"] for r in resp.json().get("data", [])]
-            for table_name in ch_tables:
-                if not _SAFE_TABLE_NAME_RE.match(table_name):
-                    result["ch_table_counts"][table_name] = "error: unsafe table name, skipped"
-                    continue
-                try:
-                    count_resp = await _query(f"SELECT count() FROM `{table_name}` FORMAT JSON")
-                    if count_resp.status_code == 200:
-                        count_data = count_resp.json().get("data", [])
-                        if count_data:
-                            result["ch_table_counts"][table_name] = count_data[0].get("count()", 0)
-                        else:
-                            result["ch_table_counts"][table_name] = 0
-                    else:
-                        result["ch_table_counts"][table_name] = f"error: HTTP {count_resp.status_code}"
-                except Exception as exc:
-                    result["ch_table_counts"][table_name] = f"error: {type(exc).__name__}"
-        else:
-            result["ch_table_counts"] = {"error": f"HTTP {resp.status_code}"}
-    except Exception as exc:
-        result["ch_table_counts"] = {"error": type(exc).__name__}
+        result["telemetry_table_counts"] = await table_counts()
+    except TelemetryError as exc:
+        result["telemetry_table_counts"] = {"error": type(exc).__name__}
 
     return result
 

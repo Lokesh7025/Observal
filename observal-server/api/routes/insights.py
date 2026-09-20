@@ -145,49 +145,41 @@ async def _count_insight_sessions(
     agent_version: str | None = None,
 ) -> int:
     """Count sessions for an agent, optionally scoped to telemetry agent_version."""
-    from services.clickhouse import _query
+    from services.telemetry import TelemetryError, tq
 
     base_where = (
-        "WHERE (agent_id = {agent_id:String} OR agent_id = {agent_name:String}) "
-        "AND last_event_time >= {t_start:String} "
-        "AND last_event_time <= {t_end:String} "
+        "WHERE (agent_id = $agent_id OR agent_id = $agent_name) "
+        "AND last_event_time >= $t_start "
+        "AND last_event_time <= $t_end "
     )
     params = {
-        "param_agent_id": str(agent.id),
-        "param_agent_name": agent.name,
-        "param_t_start": period_start.strftime("%Y-%m-%d %H:%M:%S"),
-        "param_t_end": period_end.strftime("%Y-%m-%d %H:%M:%S"),
+        "agent_id": str(agent.id),
+        "agent_name": agent.name,
+        "t_start": period_start.strftime("%Y-%m-%d %H:%M:%S"),
+        "t_end": period_end.strftime("%Y-%m-%d %H:%M:%S"),
     }
     if agent_version:
         base_where += f"AND {agent_version_filter()} "
-        params["param_agent_version"] = agent_version
+        params["agent_version"] = agent_version
 
-    count_sql = "SELECT count() AS cnt FROM session_stats_agg FINAL " + base_where + "FORMAT JSON"
+    count_sql = "SELECT count(*) AS cnt FROM session_stats_agg " + base_where
     try:
-        r = await _query(count_sql, params)
-        count_data = r.json().get("data", []) if r.status_code == 200 else []
+        count_data = await tq(count_sql, params)
         return int(count_data[0]["cnt"]) if count_data else 0
-    except Exception as e:
-        optic.warning("insight_session_count_agg_failed", agent=str(agent.id), version=agent_version, error=str(e))
+    except TelemetryError as e:
+        optic.warning(
+            "insight session count via summaries failed (agent={}, version={}): {}", agent.id, agent_version, e
+        )
 
-    # Safe fallback for older ClickHouse aggregates that do not yet expose agent_version.
+    # Fallback when summaries are still being rebuilt after a backfill.
     fallback_where = (
-        "WHERE (agent_id = {agent_id:String} OR agent_id = {agent_name:String}) "
-        "AND timestamp >= {t_start:String} "
-        "AND timestamp <= {t_end:String} "
+        "WHERE (agent_id = $agent_id OR agent_id = $agent_name) AND timestamp >= $t_start AND timestamp <= $t_end "
     )
     if agent_version:
         fallback_where += f"AND {agent_version_filter(nullable=True)} "
-    fallback_sql = (
-        "SELECT count(DISTINCT session_id) AS cnt FROM session_events FINAL " + fallback_where + "FORMAT JSON"
-    )
-    try:
-        r = await _query(fallback_sql, params)
-        count_data = r.json().get("data", []) if r.status_code == 200 else []
-        return int(count_data[0]["cnt"]) if count_data else 0
-    except Exception as e:
-        optic.warning("insight_session_count_fallback_failed", agent=str(agent.id), version=agent_version, error=str(e))
-        return 0
+    fallback_sql = "SELECT count(DISTINCT session_id) AS cnt FROM session_events " + fallback_where
+    count_data = await tq(fallback_sql, params)
+    return int(count_data[0]["cnt"]) if count_data else 0
 
 
 @router.get("/status")
