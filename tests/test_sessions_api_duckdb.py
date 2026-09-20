@@ -169,6 +169,51 @@ async def test_detail_with_subagents_incremental_and_isolation(telemetry):
     assert admin["max_offset"] == 3 and admin["events"]
 
 
+async def test_detail_paginates_parent_and_subagent_events(telemetry, monkeypatch):
+    """Session detail must read past the store row cap without gaps or duplicates."""
+    monkeypatch.setattr(sessions, "_DETAIL_PAGE_SIZE", 2)
+    # Match the store cap to the page size: any unbounded query in this test
+    # returns 413 instead of silently passing against the fixture's 100k cap.
+    telemetry._transport.app.state.telemetry.reader._max_rows = 2
+    monkeypatch.setattr(
+        "services.session_parsers.parse_raw_events",
+        lambda rows: [{"line_offset": int(row["line_offset"])} for row in rows],
+    )
+
+    await _seed_session(telemetry, "parent-paged", USER, "2026-05-01 10:00:00.000", n=5)
+    await _seed_session(
+        telemetry,
+        "child-a",
+        USER,
+        "2026-05-01 10:00:01.000",
+        n=3,
+        parent="parent-paged",
+    )
+    await _seed_session(
+        telemetry,
+        "child-b",
+        USER,
+        "2026-05-01 10:00:02.000",
+        n=3,
+        parent="parent-paged",
+    )
+
+    result = await sessions.get_session("parent-paged", after_offset=None, current_user=_user())
+
+    assert [event["line_offset"] for event in result["events"]] == [0, 1, 2, 3, 4]
+    assert result["max_offset"] == 4
+    assert [child["session_id"] for child in result["subagent_sessions"]] == ["child-a", "child-b"]
+    assert [event["line_offset"] for event in result["subagent_sessions"][0]["events"]] == [0, 1, 2]
+    assert [event["line_offset"] for event in result["subagent_sessions"][1]["events"]] == [0, 1, 2]
+
+    incremental = await sessions.get_session("parent-paged", after_offset=0, current_user=_user())
+    assert [event["line_offset"] for event in incremental["events"]] == [1, 2, 3, 4]
+    assert [child["session_id"] for child in incremental["subagent_sessions"]] == ["child-a", "child-b"]
+    assert [event["line_offset"] for event in incremental["subagent_sessions"][0]["events"]] == [1, 2]
+    assert [event["line_offset"] for event in incremental["subagent_sessions"][1]["events"]] == [1, 2]
+    assert incremental["max_offset"] == 4
+
+
 async def test_store_outage_raises_instead_of_returning_empty(telemetry):
     import httpx
 

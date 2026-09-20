@@ -23,14 +23,14 @@ Source: `ea133b52` (`fix(api): stop reporting unreadable sessions as empty`)
 
 Current PR #1748 gap: `api/routes/sessions.py` issues one unbounded main-session query and one unbounded subagent query, while the telemetry store enforces `TELEMETRY_MAX_RESULT_ROWS=200000` by default.
 
-- [ ] Port stable keyset pagination for main-session events.
-- [ ] Port stable keyset pagination for subagent events using `(session_id, line_offset)`.
-- [ ] Keep every page below the telemetry result-row cap.
-- [ ] Preserve deterministic event ordering across page boundaries.
-- [ ] Ensure a telemetry outage or result-limit failure becomes an explicit API error, never a valid empty session.
-- [ ] Test sessions below, at, and above the configured result cap.
-- [ ] Test a parent session whose combined subagent events exceed the result cap.
-- [ ] Test incremental `after_offset` reads across multiple pages.
+- [x] Port stable keyset pagination for main-session events.
+- [x] Port stable keyset pagination for subagent events using `(session_id, line_offset)`.
+- [x] Keep every page below the default telemetry result-row cap.
+- [x] Preserve deterministic event ordering across page boundaries.
+- [x] Ensure a telemetry outage or result-limit failure becomes an explicit API error, never a valid empty session.
+- [x] Test sessions below, at, and above the configured result cap.
+- [x] Test a parent session whose combined subagent events exceed the configured result cap.
+- [x] Test incremental `after_offset` reads across multiple pages.
 
 Evidence required:
 

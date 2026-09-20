@@ -33,6 +33,24 @@ from services.user_search import resolve_user_filter_values
 
 router = APIRouter(prefix="/api/v1/sessions", tags=["sessions"])
 
+# Session detail reads in windows below the telemetry store's result cap. The
+# API response remains unchanged: pagination is internal and all events are
+# returned to the caller.
+_DETAIL_PAGE_SIZE = 20_000
+
+
+async def _telemetry_pages(build_page, page_size: int = _DETAIL_PAGE_SIZE) -> list[dict]:
+    """Read every page of a query ordered by a stable forward cursor."""
+    rows: list[dict] = []
+    cursor: dict | None = None
+    while True:
+        sql, params = build_page(cursor)
+        page = await tq(sql, params)
+        rows.extend(page)
+        if len(page) < page_size:
+            return rows
+        cursor = page[-1]
+
 
 def _is_admin_user(user: User) -> bool:
     optic.trace("user_id={}", user.id)
@@ -338,25 +356,46 @@ async def get_session(
         _offset_filter = "AND line_offset::BIGINT > $offset "
         params["offset"] = int(after_offset)
 
-    _main_sql = (
+    _main_base = (
         "SELECT "
         "line_offset, timestamp, event_type, content_preview, tool_name, tool_id, "
         "uuid, parent_uuid, content_length, harness, agent_id, agent_version, raw_line, raw_line_truncated, "
         "credits, ingested_at "
         "FROM session_events "
-        "WHERE session_key = $key AND session_id = $sid AND rendered " + _offset_filter + "ORDER BY line_offset ASC"
+        "WHERE session_key = $key AND session_id = $sid AND rendered " + _offset_filter
     )
-    _sub_sql = (
+    _sub_base = (
         "SELECT session_id, timestamp, event_type, content_preview, "
         "tool_name, tool_id, uuid, parent_uuid, content_length, harness, "
         "raw_line, raw_line_truncated, credits, ingested_at, line_offset "
         "FROM session_events "
         "WHERE parent_session_key = $key AND parent_session_id = $sid AND project_id = $pid "
-        "AND user_id = $uid AND harness = $harness AND rendered "
-        + _offset_filter
-        + "ORDER BY session_id, line_offset ASC"
+        "AND user_id = $uid AND harness = $harness AND rendered " + _offset_filter
     )
-    rows, sub_rows_all = await asyncio.gather(tq(_main_sql, params), tq(_sub_sql, params))
+
+    def _main_page(cursor: dict | None) -> tuple[str, dict]:
+        page_params = dict(params)
+        cursor_filter = ""
+        if cursor is not None:
+            cursor_filter = "AND line_offset::BIGINT > $cursor "
+            page_params["cursor"] = int(cursor["line_offset"])
+        return f"{_main_base}{cursor_filter}ORDER BY line_offset ASC LIMIT {_DETAIL_PAGE_SIZE}", page_params
+
+    def _sub_page(cursor: dict | None) -> tuple[str, dict]:
+        page_params = dict(params)
+        cursor_filter = ""
+        if cursor is not None:
+            cursor_filter = (
+                "AND (session_id > $cursor_sid OR (session_id = $cursor_sid AND line_offset::BIGINT > $cursor_offset)) "
+            )
+            page_params["cursor_sid"] = str(cursor["session_id"])
+            page_params["cursor_offset"] = int(cursor["line_offset"])
+        return f"{_sub_base}{cursor_filter}ORDER BY session_id, line_offset ASC LIMIT {_DETAIL_PAGE_SIZE}", page_params
+
+    rows, sub_rows_all = await asyncio.gather(
+        _telemetry_pages(_main_page, _DETAIL_PAGE_SIZE),
+        _telemetry_pages(_sub_page, _DETAIL_PAGE_SIZE),
+    )
 
     if not rows:
         if after_offset is not None:
