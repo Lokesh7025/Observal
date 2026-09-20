@@ -12,23 +12,55 @@ write_files:
   - path: /opt/observal/docker-compose.yml
     content: |
       services:
+        telemetry:
+          # Single-writer DuckDB telemetry store (same image as the API, one process).
+          image: ${telemetry_image}
+          container_name: observal-telemetry
+          command: ["/app/.venv/bin/python", "-m", "telemetry_store"]
+          restart: unless-stopped
+          ports:
+            - "8125:8125"
+          environment:
+            TELEMETRY_DB_PATH: /data/telemetry/observal.duckdb
+            TELEMETRY_TEMP_DIR: /data/telemetry/tmp
+            TELEMETRY_EXPORT_DIR: /data/telemetry/exports
+            TELEMETRY_BIND: 0.0.0.0:8125
+            TELEMETRY_TOKEN: ${telemetry_token}
+            TELEMETRY_MEMORY_LIMIT: 1536MB
+            TELEMETRY_THREADS: "4"
+          volumes:
+            - /data/telemetry:/data/telemetry
+          healthcheck:
+            test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8125/v1/health')\""]
+            interval: 10s
+            timeout: 5s
+            retries: 10
+            start_period: 30s
+          deploy:
+            resources:
+              limits:
+                memory: 2G
+%{ if enable_legacy_clickhouse }
+
         clickhouse:
+          # Legacy ClickHouse for the one-time cutover. Remove enable_legacy_clickhouse afterwards.
           image: clickhouse/clickhouse-server:25.6
+          container_name: observal-clickhouse
           restart: unless-stopped
           ports:
             - "8123:8123"
-            - "9000:9000"
           environment:
             CLICKHOUSE_DB: ${clickhouse_db}
             CLICKHOUSE_USER: default
             CLICKHOUSE_PASSWORD: ${clickhouse_password}
-            MAX_SERVER_MEMORY_USAGE_RATIO: "0.8"
+            MAX_SERVER_MEMORY_USAGE_RATIO: "0.5"
           volumes:
             - /data/clickhouse:/var/lib/clickhouse
           deploy:
             resources:
               limits:
-                memory: 4G
+                memory: 3G
+%{ endif }
 
         redis:
           image: redis:7-alpine
@@ -64,10 +96,13 @@ write_files:
       global:
         scrape_interval: 15s
       scrape_configs:
-        - job_name: observal-api
+        - job_name: observal-telemetry
           metrics_path: /metrics
+          authorization:
+            type: Bearer
+            credentials: ${telemetry_token}
           static_configs:
-            - targets: []
+            - targets: ["telemetry:8125"]
 %{ endif }
 
 runcmd:
@@ -79,10 +114,13 @@ runcmd:
     mkdir -p /data
     mount /dev/sdc /data
     echo '/dev/sdc /data ext4 defaults,nofail 0 2' >> /etc/fstab
+  - mkdir -p /data/telemetry /data/telemetry/backups /data/redis
+  - chown -R 1001:1001 /data/telemetry
+%{ if enable_legacy_clickhouse }
+  - mkdir -p /data/clickhouse
+%{ endif }
 %{ if observability_prometheus_enabled }
-  - mkdir -p /data/clickhouse /data/prometheus /data/redis
-%{ else }
-  - mkdir -p /data/clickhouse /data/redis
+  - mkdir -p /data/prometheus
 %{ endif }
   - systemctl enable docker
   - systemctl start docker

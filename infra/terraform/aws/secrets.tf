@@ -8,6 +8,12 @@ resource "random_password" "db" {
   special = false
 }
 
+resource "random_password" "telemetry_token" {
+  length  = 40
+  special = false
+}
+
+# Only used while enable_legacy_clickhouse = true (cutover window).
 resource "random_password" "clickhouse" {
   length  = 32
   special = false
@@ -33,18 +39,24 @@ resource "random_password" "grafana_admin" {
 locals {
   raw_secrets = merge(
     {
-      "DB_PASSWORD"         = random_password.db.result
-      "CLICKHOUSE_PASSWORD" = local.clickhouse_self_hosted ? random_password.clickhouse.result : var.clickhouse_cloud_password
-      "SECRET_KEY"          = random_password.secret_key.result
+      "DB_PASSWORD"     = random_password.db.result
+      "TELEMETRY_TOKEN" = random_password.telemetry_token.result
+      "SECRET_KEY"      = random_password.secret_key.result
     },
-    local.observability_grafana_enabled ? { "GRAFANA_ADMIN_PASSWORD" = random_password.grafana_admin.result } : {}
+    local.observability_grafana_enabled ? { "GRAFANA_ADMIN_PASSWORD" = random_password.grafana_admin.result } : {},
+    var.enable_legacy_clickhouse ? { "CLICKHOUSE_PASSWORD" = random_password.clickhouse.result } : {}
   )
 
-  derived_urls = {
-    "DATABASE_URL"   = "postgresql+asyncpg://observal:${random_password.db.result}@${aws_db_instance.postgres.address}:${aws_db_instance.postgres.port}/observal"
-    "REDIS_URL"      = "redis://${aws_elasticache_replication_group.redis.primary_endpoint_address}:${aws_elasticache_replication_group.redis.port}"
-    "CLICKHOUSE_URL" = local.clickhouse_self_hosted ? "clickhouse://default:${random_password.clickhouse.result}@${local.clickhouse_host_internal}:8123/observal" : var.clickhouse_cloud_url
-  }
+  derived_urls = merge(
+    {
+      "DATABASE_URL"  = "postgresql+asyncpg://observal:${random_password.db.result}@${aws_db_instance.postgres.address}:${aws_db_instance.postgres.port}/observal"
+      "REDIS_URL"     = "redis://${aws_elasticache_replication_group.redis.primary_endpoint_address}:${aws_elasticache_replication_group.redis.port}"
+      "TELEMETRY_URL" = local.telemetry_url_internal
+    },
+    var.enable_legacy_clickhouse ? {
+      "CLICKHOUSE_URL" = "clickhouse://default:${random_password.clickhouse.result}@${local.clickhouse_host_internal}:8123/observal"
+    } : {}
+  )
 }
 
 resource "aws_ssm_parameter" "app" {

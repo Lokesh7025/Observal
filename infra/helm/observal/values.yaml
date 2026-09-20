@@ -67,9 +67,35 @@ postgresql:
     size: 10Gi
     storageClassName: ""
 
-clickhouse:
+# Single-writer DuckDB telemetry store (same image as the API). One replica only.
+telemetry:
   enabled: true
   externalUrl: ""
+  image:
+    repository: ghcr.io/observal/observal-api
+    tag: ""
+    pullPolicy: IfNotPresent
+  # DuckDB memory ceiling; keep ~25% headroom below resources.limits.memory.
+  memoryLimit: "1536MB"
+  threads: 4
+  readThreads: 4
+  queryTimeoutMs: 30000
+  resources:
+    limits:
+      memory: 2Gi
+    requests:
+      memory: 512Mi
+      cpu: 250m
+  storage:
+    size: 50Gi
+    storageClassName: ""
+
+# Legacy ClickHouse. Only for existing installs during the one-time cutover:
+# set legacy.enabled=true, run 'observal server migrate telemetry-cutover',
+# then set it back to false. The chdata PVC is never deleted by the chart.
+clickhouse:
+  legacy:
+    enabled: false
   image:
     repository: clickhouse/clickhouse-server
     tag: "26.3"
@@ -117,11 +143,13 @@ ingress:
 
 secrets:
   # Use a pre-existing Secret instead of creating one. Secret must contain all
-  # keys: SECRET_KEY, POSTGRES_PASSWORD, CLICKHOUSE_PASSWORD, DATABASE_URL,
-  # CLICKHOUSE_URL, REDIS_URL
+  # keys: SECRET_KEY, POSTGRES_PASSWORD, TELEMETRY_TOKEN, DATABASE_URL,
+  # TELEMETRY_URL, REDIS_URL (plus CLICKHOUSE_PASSWORD/CLICKHOUSE_URL while
+  # clickhouse.legacy.enabled=true)
   existingSecret: ""
   secretKey: ""
   postgresPassword: ""
+  telemetryToken: ""
   clickhousePassword: ""
 
 config:

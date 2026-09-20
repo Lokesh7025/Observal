@@ -117,7 +117,7 @@ variable "worker_desired_count" {
 # ── Data tier EC2 ─────────────────────────────────────────────────────────────
 
 variable "data_instance_type" {
-  description = "EC2 instance type for the data host (Postgres + Redis + ClickHouse)."
+  description = "EC2 instance type for the data host (Postgres + Redis + telemetry store)."
   type        = string
   default     = "t3.medium"
 }
@@ -236,4 +236,10 @@ variable "run_init_on_apply" {
   description = "Run migrations task when image_tag changes."
   type        = bool
   default     = true
+}
+
+variable "enable_legacy_clickhouse" {
+  description = "Also run the legacy ClickHouse container on the data host so an existing install can back-fill history with 'observal server migrate telemetry-cutover'. Set back to false afterwards; /data/clickhouse is never deleted by this module."
+  type        = bool
+  default     = false
 }

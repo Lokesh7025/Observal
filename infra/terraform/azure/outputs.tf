@@ -26,9 +26,9 @@ output "redis_hostname" {
   value       = var.redis_mode == "enterprise" ? azurerm_redis_enterprise_cluster.main[0].hostname : "${azurerm_network_interface.clickhouse[0].private_ip_address}:6379"
 }
 
-output "clickhouse_private_ip" {
-  description = "ClickHouse VM private IP (VNet only)."
-  value       = local.clickhouse_self_hosted ? azurerm_network_interface.clickhouse[0].private_ip_address : "using ClickHouse Cloud"
+output "data_host_private_ip" {
+  description = "Data VM private IP (telemetry store on :8125, VNet only)."
+  value       = azurerm_network_interface.clickhouse[0].private_ip_address
 }
 
 output "acr_login_server" {

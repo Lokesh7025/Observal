@@ -7,20 +7,30 @@ resource "random_password" "secret_key" {
   special = false
 }
 
+resource "random_password" "telemetry_token" {
+  length  = 40
+  special = false
+}
+
+# Only used while enable_legacy_clickhouse = true (cutover window).
 resource "random_password" "clickhouse" {
   length  = 32
   special = false
 }
 
 locals {
-  secrets = {
-    DATABASE_URL               = local.database_url
-    REDIS_URL                  = local.redis_url
-    SECRET_KEY                 = random_password.secret_key.result
-    CLICKHOUSE_URL             = local.clickhouse_url
-    GOOGLE_OAUTH_CLIENT_ID     = var.google_oauth_client_id
-    GOOGLE_OAUTH_CLIENT_SECRET = var.google_oauth_client_secret
-  }
+  secrets = merge(
+    {
+      DATABASE_URL               = local.database_url
+      REDIS_URL                  = local.redis_url
+      SECRET_KEY                 = random_password.secret_key.result
+      TELEMETRY_URL              = local.telemetry_url
+      TELEMETRY_TOKEN            = random_password.telemetry_token.result
+      GOOGLE_OAUTH_CLIENT_ID     = var.google_oauth_client_id
+      GOOGLE_OAUTH_CLIENT_SECRET = var.google_oauth_client_secret
+    },
+    var.enable_legacy_clickhouse ? { CLICKHOUSE_URL = local.clickhouse_url } : {}
+  )
 }
 
 resource "google_secret_manager_secret" "app" {

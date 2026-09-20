@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: 2026 Ravi Chopra <shivamchopra1234567890@gmail.com>
 # SPDX-License-Identifier: Apache-2.0
-{{- if .Values.clickhouse.enabled }}
+# Legacy ClickHouse: only rendered while an existing install runs the one-time
+# cutover (observal server migrate telemetry-cutover). Keeps the chdata PVC.
+{{- if .Values.clickhouse.legacy.enabled }}
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:

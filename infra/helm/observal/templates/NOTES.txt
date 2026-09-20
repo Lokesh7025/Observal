@@ -34,9 +34,17 @@ Observal has been installed! 🎉
    See: docs/self-hosting/kubernetes-helm.md
 {{- end }}
 
-{{- if .Values.clickhouse.enabled }}
+{{- if .Values.telemetry.enabled }}
 
-⚠️  WARNING: In-cluster ClickHouse is running (same caveat as above).
+ℹ️  The telemetry store (DuckDB, single writer) runs in-cluster on a
+   {{ .Values.telemetry.storage.size }} PVC. Back it up with
+   'kubectl exec ... -- python -m telemetry_store.backup /data/telemetry/backups/<name>.duckdb'.
+{{- end }}
+{{- if .Values.clickhouse.legacy.enabled }}
+
+⚠️  Legacy ClickHouse is still running for the telemetry cutover. When
+   'observal server migrate telemetry-cutover' has verified the backfill,
+   set clickhouse.legacy.enabled=false. The chdata PVC is retained.
 {{- end }}
 
   Useful commands:

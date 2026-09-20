@@ -73,8 +73,13 @@ resource "azurerm_container_app" "api" {
   }
 
   secret {
-    name  = "clickhouse-url"
-    value = local.clickhouse_url
+    name  = "telemetry-url"
+    value = local.telemetry_url
+  }
+
+  secret {
+    name  = "telemetry-token"
+    value = random_password.telemetry_token.result
   }
 
   secret {
@@ -119,8 +124,13 @@ resource "azurerm_container_app" "api" {
       }
 
       env {
-        name        = "CLICKHOUSE_URL"
-        secret_name = "clickhouse-url"
+        name        = "TELEMETRY_URL"
+        secret_name = "telemetry-url"
+      }
+
+      env {
+        name        = "TELEMETRY_TOKEN"
+        secret_name = "telemetry-token"
       }
 
       env {
@@ -254,8 +264,13 @@ resource "azurerm_container_app" "worker" {
   }
 
   secret {
-    name  = "clickhouse-url"
-    value = local.clickhouse_url
+    name  = "telemetry-url"
+    value = local.telemetry_url
+  }
+
+  secret {
+    name  = "telemetry-token"
+    value = random_password.telemetry_token.result
   }
 
   secret {
@@ -289,8 +304,13 @@ resource "azurerm_container_app" "worker" {
       }
 
       env {
-        name        = "CLICKHOUSE_URL"
-        secret_name = "clickhouse-url"
+        name        = "TELEMETRY_URL"
+        secret_name = "telemetry-url"
+      }
+
+      env {
+        name        = "TELEMETRY_TOKEN"
+        secret_name = "telemetry-token"
       }
 
       env {
@@ -345,8 +365,13 @@ resource "azurerm_container_app_job" "init" {
   }
 
   secret {
-    name  = "clickhouse-url"
-    value = local.clickhouse_url
+    name  = "telemetry-url"
+    value = local.telemetry_url
+  }
+
+  secret {
+    name  = "telemetry-token"
+    value = random_password.telemetry_token.result
   }
 
   secret {
@@ -374,8 +399,13 @@ resource "azurerm_container_app_job" "init" {
       }
 
       env {
-        name        = "CLICKHOUSE_URL"
-        secret_name = "clickhouse-url"
+        name        = "TELEMETRY_URL"
+        secret_name = "telemetry-url"
+      }
+
+      env {
+        name        = "TELEMETRY_TOKEN"
+        secret_name = "telemetry-token"
       }
 
       env {

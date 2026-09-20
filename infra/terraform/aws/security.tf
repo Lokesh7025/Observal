@@ -73,11 +73,10 @@ resource "aws_security_group" "ecs_tasks" {
   tags = { Name = "${local.name}-ecs-tasks-sg" }
 }
 
-# ── Data tier EC2 (ClickHouse plus optional observability) ─────────────────
+# ── Data tier EC2 (telemetry store plus optional observability) ────────────
 resource "aws_security_group" "data_host" {
-  count       = local.clickhouse_self_hosted ? 1 : 0
   name        = "${local.name}-data-host"
-  description = "ClickHouse EC2 with optional observability. Inbound from ALB and ECS tasks."
+  description = "Telemetry store EC2 with optional observability. Inbound from ALB and ECS tasks."
   vpc_id      = local.vpc_id
 
   dynamic "ingress" {
@@ -92,11 +91,22 @@ resource "aws_security_group" "data_host" {
   }
 
   ingress {
-    description     = "ClickHouse HTTP from ECS tasks"
-    from_port       = 8123
-    to_port         = 8123
+    description     = "Telemetry store HTTP from ECS tasks"
+    from_port       = 8125
+    to_port         = 8125
     protocol        = "tcp"
     security_groups = [local.ecs_sg_id]
+  }
+
+  dynamic "ingress" {
+    for_each = var.enable_legacy_clickhouse ? [1] : []
+    content {
+      description     = "Legacy ClickHouse HTTP from ECS tasks (cutover window)"
+      from_port       = 8123
+      to_port         = 8123
+      protocol        = "tcp"
+      security_groups = [local.ecs_sg_id]
+    }
   }
 
   ingress {
@@ -167,4 +177,9 @@ resource "aws_security_group" "redis" {
   }
 
   tags = { Name = "${local.name}-redis-sg" }
+}
+
+moved {
+  from = aws_security_group.data_host[0]
+  to   = aws_security_group.data_host
 }

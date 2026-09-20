@@ -13,7 +13,11 @@ mkdir -p "$${DATA_DIR}"
 mount -o discard,defaults "$${DATA_DEVICE}" "$${DATA_DIR}"
 echo "UUID=$(blkid -s UUID -o value $${DATA_DEVICE}) $${DATA_DIR} ext4 discard,defaults,nofail 0 2" >> /etc/fstab
 
+mkdir -p "$${DATA_DIR}/telemetry" "$${DATA_DIR}/telemetry/backups"
+chown -R 1001:1001 "$${DATA_DIR}/telemetry" || true   # appuser inside the observal-api image
+%{ if enable_legacy_clickhouse }
 mkdir -p "$${DATA_DIR}/clickhouse"
+%{ endif }
 %{ if observability_grafana_enabled }
 mkdir -p "$${DATA_DIR}/grafana"
 %{ endif }
@@ -31,16 +35,43 @@ chmod +x /usr/libexec/docker/cli-plugins/docker-compose
 # Write docker-compose for the data stack
 cat > "$${DATA_DIR}/docker-compose.yml" <<'COMPOSE'
 services:
+  telemetry:
+    # Single-writer DuckDB telemetry store (same image as the API, one process).
+    image: ${telemetry_image}
+    container_name: observal-telemetry
+    command: ["/app/.venv/bin/python", "-m", "telemetry_store"]
+    restart: unless-stopped
+    ports:
+      - "8125:8125"
+    environment:
+      TELEMETRY_DB_PATH: /data/telemetry/observal.duckdb
+      TELEMETRY_TEMP_DIR: /data/telemetry/tmp
+      TELEMETRY_EXPORT_DIR: /data/telemetry/exports
+      TELEMETRY_BIND: 0.0.0.0:8125
+      TELEMETRY_TOKEN: ${telemetry_token}
+      TELEMETRY_MEMORY_LIMIT: 1536MB
+      TELEMETRY_THREADS: "4"
+    volumes:
+      - /data/telemetry:/data/telemetry
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8125/v1/health')\""]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+%{ if enable_legacy_clickhouse }
   clickhouse:
+    # Legacy ClickHouse for the one-time cutover. Remove enable_legacy_clickhouse afterwards.
     image: clickhouse/clickhouse-server:26.5
+    container_name: observal-clickhouse
     restart: unless-stopped
     ports:
       - "8123:8123"
-      - "9000:9000"
     environment:
       CLICKHOUSE_DB: ${clickhouse_db}
       CLICKHOUSE_PASSWORD: ${clickhouse_password}
-      MAX_SERVER_MEMORY_USAGE_RATIO: "0.7"
+      MAX_SERVER_MEMORY_USAGE_RATIO: "0.5"
     volumes:
       - /data/clickhouse:/var/lib/clickhouse
     healthcheck:
@@ -48,6 +79,7 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+%{ endif }
 
 %{ if observability_grafana_enabled }
   grafana:
@@ -57,14 +89,16 @@ services:
       - "3000:3000"
     environment:
       GF_SECURITY_ADMIN_USER: ${grafana_admin_user}
-      GF_SECURITY_ADMIN_PASSWORD: ${clickhouse_password}
+      GF_SECURITY_ADMIN_PASSWORD: ${telemetry_token}
       GF_SERVER_ROOT_URL: "${grafana_root_url}/grafana"
       GF_SERVER_SERVE_FROM_SUB_PATH: "true"
-      GF_INSTALL_PLUGINS: grafana-clickhouse-datasource
+      GF_INSTALL_PLUGINS: yesoreyeram-infinity-datasource
+      TELEMETRY_URL: http://telemetry:8125
+      TELEMETRY_TOKEN: ${telemetry_token}
     volumes:
       - /data/grafana:/var/lib/grafana
     depends_on:
-      clickhouse:
+      telemetry:
         condition: service_healthy
 %{ endif }
 %{ if observability_prometheus_enabled }
@@ -87,9 +121,12 @@ global:
   evaluation_interval: 30s
 
 scrape_configs:
-  - job_name: clickhouse
+  - job_name: telemetry
     static_configs:
-      - targets: ["clickhouse:8123"]
+      - targets: ["telemetry:8125"]
+    authorization:
+      type: Bearer
+      credentials: ${telemetry_token}
 PROM
 
 %{ endif }
@@ -97,14 +134,15 @@ PROM
 cd "$${DATA_DIR}"
 docker compose up -d
 
-# Set up daily ClickHouse backup to GCS
-cat > /etc/cron.daily/clickhouse-backup <<'CRON'
+# Set up daily telemetry store snapshot to GCS. The store copies its database
+# online (snapshot-consistent) through its own backup job.
+cat > /etc/cron.daily/telemetry-backup <<'CRON'
 #!/bin/bash
-BACKUP_FILE="/tmp/clickhouse-backup-$(date +%Y%m%d).tar.gz"
-docker exec $(docker ps -q -f name=clickhouse) clickhouse-client \
-  --password "${clickhouse_password}" \
-  --query "BACKUP DATABASE ${clickhouse_db} TO Disk('backups', 'daily-$(date +%Y%m%d)')"
-gsutil -m rsync -r /data/clickhouse/backups/ gs://${backups_bucket}/clickhouse/
-find /data/clickhouse/backups/ -mtime +${data_retention_days} -delete
+set -euo pipefail
+TS=$(date -u +%Y%m%dT%H%M%SZ)
+SNAPSHOT="/data/telemetry/backups/$TS.duckdb"
+docker exec observal-telemetry /app/.venv/bin/python -m telemetry_store.backup "$SNAPSHOT"
+gsutil -q cp "$SNAPSHOT" "gs://${backups_bucket}/telemetry/$TS.duckdb"
+find /data/telemetry/backups/ -name '*.duckdb' -mtime +${data_retention_days} -delete
 CRON
-chmod +x /etc/cron.daily/clickhouse-backup
+chmod +x /etc/cron.daily/telemetry-backup

@@ -25,7 +25,8 @@ locals {
   app_secrets = [
     { name = "DATABASE_URL", valueFrom = aws_ssm_parameter.urls["DATABASE_URL"].arn },
     { name = "REDIS_URL", valueFrom = aws_ssm_parameter.urls["REDIS_URL"].arn },
-    { name = "CLICKHOUSE_URL", valueFrom = aws_ssm_parameter.urls["CLICKHOUSE_URL"].arn },
+    { name = "TELEMETRY_URL", valueFrom = aws_ssm_parameter.urls["TELEMETRY_URL"].arn },
+    { name = "TELEMETRY_TOKEN", valueFrom = aws_ssm_parameter.telemetry_token.arn },
     { name = "SECRET_KEY", valueFrom = aws_ssm_parameter.secret_key.arn },
   ]
 }

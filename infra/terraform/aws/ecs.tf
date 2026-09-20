@@ -54,7 +54,8 @@ locals {
   app_secrets = [
     { name = "DATABASE_URL", valueFrom = aws_ssm_parameter.urls["DATABASE_URL"].arn },
     { name = "REDIS_URL", valueFrom = aws_ssm_parameter.urls["REDIS_URL"].arn },
-    { name = "CLICKHOUSE_URL", valueFrom = aws_ssm_parameter.urls["CLICKHOUSE_URL"].arn },
+    { name = "TELEMETRY_URL", valueFrom = aws_ssm_parameter.urls["TELEMETRY_URL"].arn },
+    { name = "TELEMETRY_TOKEN", valueFrom = aws_ssm_parameter.app["TELEMETRY_TOKEN"].arn },
     { name = "SECRET_KEY", valueFrom = aws_ssm_parameter.app["SECRET_KEY"].arn },
   ]
 }
@@ -396,7 +397,7 @@ resource "null_resource" "run_init" {
     aws_iam_role_policy_attachment.ecs_execution_managed,
     aws_iam_role_policy_attachment.ecs_execution_secrets,
     aws_instance.data_host,
-    aws_route53_record.clickhouse_internal,
+    aws_route53_record.telemetry_internal,
   ]
 }
 

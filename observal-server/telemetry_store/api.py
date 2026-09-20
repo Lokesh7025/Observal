@@ -248,6 +248,7 @@ def create_app(settings: TelemetrySettings | None = None) -> FastAPI:
             "memory_limit": settings.memory_limit,
             "writer_paused": state.writer.paused,
             "read_pending": state.reader.pending,
+            "read_active": state.reader.active,
             "write_inflight": state.writer.inflight,
             "duckdb_version": duckdb.__version__,
         }

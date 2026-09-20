@@ -41,7 +41,7 @@ resource "azurerm_subnet" "data" {
   }
 }
 
-# VM subnet for ClickHouse host
+# VM subnet for the data host (telemetry store, Redis)
 resource "azurerm_subnet" "vm" {
   name                 = "${local.name}-vm"
   resource_group_name  = azurerm_resource_group.main.name
@@ -57,15 +57,30 @@ resource "azurerm_network_security_group" "vm" {
   tags                = local.tags
 
   security_rule {
-    name                       = "AllowClickHouseFromVNet"
+    name                       = "AllowTelemetryFromVNet"
     priority                   = 100
     direction                  = "Inbound"
     access                     = "Allow"
     protocol                   = "Tcp"
     source_port_range          = "*"
-    destination_port_range     = "8123"
+    destination_port_range     = "8125"
     source_address_prefix      = var.vnet_cidr
     destination_address_prefix = "*"
+  }
+
+  dynamic "security_rule" {
+    for_each = var.enable_legacy_clickhouse ? [1] : []
+    content {
+      name                       = "AllowLegacyClickHouseFromVNet"
+      priority                   = 101
+      direction                  = "Inbound"
+      access                     = "Allow"
+      protocol                   = "Tcp"
+      source_port_range          = "*"
+      destination_port_range     = "8123"
+      source_address_prefix      = var.vnet_cidr
+      destination_address_prefix = "*"
+    }
   }
 
   security_rule {

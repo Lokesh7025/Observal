@@ -46,8 +46,9 @@ def _full_server_response() -> dict:
                     "app_version": "0.9.5",
                     "build_hash": "abc123def456",
                     "alembic_revision": "a1b2c3d4e5f6",
-                    "clickhouse_version": "24.3.1.2672",
-                    "clickhouse_tables": ["traces", "spans", "scores"],
+                    "telemetry_version": "duckdb 1.5.5",
+                    "telemetry_schema_version": "001_baseline",
+                    "telemetry_tables": ["audit_log", "session_events", "session_stats_agg"],
                 },
             },
             "health": {
@@ -55,7 +56,7 @@ def _full_server_response() -> dict:
                 "duration_ms": 28,
                 "data": {
                     "postgres": {"status": "ok", "latency_ms": 3},
-                    "clickhouse": {"status": "ok", "latency_ms": 7},
+                    "telemetry": {"status": "ok", "latency_ms": 7},
                     "redis": {"status": "ok", "latency_ms": 1},
                     "otel_collector": {"status": "ok", "latency_ms": 12},
                 },
@@ -65,7 +66,7 @@ def _full_server_response() -> dict:
                 "duration_ms": 5,
                 "data": {
                     "DATABASE_URL": "postgresql+asyncpg://admin:s3cret@localhost:5432/observal",
-                    "CLICKHOUSE_URL": "clickhouse://default:pass@localhost:8123/observal",
+                    "TELEMETRY_URL": "http://localhost:8125",
                     "REDIS_URL": "redis://localhost:6379",
                     "REDIS_SOCKET_TIMEOUT": 5,
                     "EVAL_MODEL_NAME": "gpt-4",
@@ -95,7 +96,7 @@ def _full_server_response() -> dict:
                         "mcp_listings": 8,
                         "feedback": 200,
                     },
-                    "ch_table_counts": {
+                    "telemetry_table_counts": {
                         "traces": 1000000,
                         "spans": 5000000,
                         "scores": 50000,
@@ -112,7 +113,7 @@ def _full_server_response() -> dict:
                             "count": 12,
                             "first_seen": "2025-07-14T10:00:00Z",
                             "last_seen": "2025-07-15T08:30:00Z",
-                            "stack_template": "api/routes/telemetry.py:ingest -> services/clickhouse.py:insert_batch",
+                            "stack_template": "api/routes/telemetry.py:ingest -> services/telemetry/events.py:insert_session_batch",
                         }
                     ]
                 },
@@ -219,13 +220,13 @@ class TestSupportBundleIntegration:
             )
 
     def test_versions_directory_files(self, bundle_path):
-        """versions/ should contain app.json, alembic.json, clickhouse.json."""
+        """versions/ should contain app.json, alembic.json, telemetry.json."""
         with tarfile.open(bundle_path, "r:gz") as tar:
             names = tar.getnames()
 
         assert "versions/app.json" in names
         assert "versions/alembic.json" in names
-        assert "versions/clickhouse.json" in names
+        assert "versions/telemetry.json" in names
 
     def test_health_directory_files(self, bundle_path):
         """health/ should contain per-service JSON files."""
@@ -234,17 +235,17 @@ class TestSupportBundleIntegration:
 
         health_files = [n for n in names if n.startswith("health/")]
         assert "health/postgres.json" in names
-        assert "health/clickhouse.json" in names
+        assert "health/telemetry.json" in names
         assert "health/redis.json" in names
         assert "health/otel_collector.json" in names
 
     def test_aggregates_directory_files(self, bundle_path):
-        """aggregates/ should contain pg_table_counts.json and ch_table_counts.json."""
+        """aggregates/ should contain pg_table_counts.json and telemetry_table_counts.json."""
         with tarfile.open(bundle_path, "r:gz") as tar:
             names = tar.getnames()
 
         assert "aggregates/pg_table_counts.json" in names
-        assert "aggregates/ch_table_counts.json" in names
+        assert "aggregates/telemetry_table_counts.json" in names
 
     def test_errors_directory_files(self, bundle_path):
         """errors/ should contain recent_errors.json."""
@@ -419,14 +420,13 @@ class TestSupportBundleIntegration:
         assert "current_revision" in data
         assert data["current_revision"] == "a1b2c3d4e5f6"
 
-    def test_versions_clickhouse_json_content(self, bundle_path):
-        """versions/clickhouse.json should contain server_version and tables."""
+    def test_versions_telemetry_json_content(self, bundle_path):
+        """versions/telemetry.json should contain server_version, schema_version and tables."""
         with tarfile.open(bundle_path, "r:gz") as tar:
-            data = json.loads(tar.extractfile(tar.getmember("versions/clickhouse.json")).read())
+            data = json.loads(tar.extractfile(tar.getmember("versions/telemetry.json")).read())
 
-        assert "server_version" in data
-        assert "tables" in data
-        assert data["server_version"] == "24.3.1.2672"
+        assert data["server_version"] == "duckdb 1.5.5"
+        assert data["schema_version"] == "001_baseline"
         assert isinstance(data["tables"], list)
 
     def test_config_excludes_secrets(self, bundle_path):
@@ -450,7 +450,7 @@ class TestSupportBundleIntegration:
         """Aggregate files should contain table count data."""
         with tarfile.open(bundle_path, "r:gz") as tar:
             pg_data = json.loads(tar.extractfile(tar.getmember("aggregates/pg_table_counts.json")).read())
-            ch_data = json.loads(tar.extractfile(tar.getmember("aggregates/ch_table_counts.json")).read())
+            ch_data = json.loads(tar.extractfile(tar.getmember("aggregates/telemetry_table_counts.json")).read())
 
         assert isinstance(pg_data, dict)
         assert isinstance(ch_data, dict)

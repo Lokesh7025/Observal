@@ -217,30 +217,12 @@ variable "run_init_on_apply" {
   default     = true
 }
 
-# ── Data tier (ClickHouse plus optional observability on EC2) ───────────────
+# ── Data tier (DuckDB telemetry store plus optional observability on EC2) ──
 
-variable "clickhouse_mode" {
-  description = "Where ClickHouse lives. 'self_hosted' = EC2 + EBS managed by this module. 'cloud' = ClickHouse Cloud, supply clickhouse_cloud_url + clickhouse_cloud_password."
-  type        = string
-  default     = "self_hosted"
-  validation {
-    condition     = contains(["self_hosted", "cloud"], var.clickhouse_mode)
-    error_message = "clickhouse_mode must be 'self_hosted' or 'cloud'."
-  }
-}
-
-variable "clickhouse_cloud_url" {
-  description = "ClickHouse Cloud DSN (e.g. https://abc123.us-east-1.aws.clickhouse.cloud:8443). Required when clickhouse_mode = 'cloud'."
-  type        = string
-  default     = ""
-  sensitive   = true
-}
-
-variable "clickhouse_cloud_password" {
-  description = "ClickHouse Cloud password. Required when clickhouse_mode = 'cloud'."
-  type        = string
-  default     = ""
-  sensitive   = true
+variable "enable_legacy_clickhouse" {
+  description = "Also run the legacy ClickHouse container on the data host so an existing install can back-fill history with 'observal server migrate telemetry-cutover'. Set back to false afterwards; /data/clickhouse on the EBS volume is never deleted by this module."
+  type        = bool
+  default     = false
 }
 
 variable "data_instance_type" {

@@ -99,10 +99,20 @@ resource "google_cloud_run_v2_service" "api" {
       }
 
       env {
-        name = "CLICKHOUSE_URL"
+        name = "TELEMETRY_URL"
         value_source {
           secret_key_ref {
-            secret  = google_secret_manager_secret.app["CLICKHOUSE_URL"].secret_id
+            secret  = google_secret_manager_secret.app["TELEMETRY_URL"].secret_id
+            version = "latest"
+          }
+        }
+      }
+
+      env {
+        name = "TELEMETRY_TOKEN"
+        value_source {
+          secret_key_ref {
+            secret  = google_secret_manager_secret.app["TELEMETRY_TOKEN"].secret_id
             version = "latest"
           }
         }
@@ -277,10 +287,20 @@ resource "google_cloud_run_v2_service" "worker" {
       }
 
       env {
-        name = "CLICKHOUSE_URL"
+        name = "TELEMETRY_URL"
         value_source {
           secret_key_ref {
-            secret  = google_secret_manager_secret.app["CLICKHOUSE_URL"].secret_id
+            secret  = google_secret_manager_secret.app["TELEMETRY_URL"].secret_id
+            version = "latest"
+          }
+        }
+      }
+
+      env {
+        name = "TELEMETRY_TOKEN"
+        value_source {
+          secret_key_ref {
+            secret  = google_secret_manager_secret.app["TELEMETRY_TOKEN"].secret_id
             version = "latest"
           }
         }
@@ -354,10 +374,20 @@ resource "google_cloud_run_v2_job" "init" {
         }
 
         env {
-          name = "CLICKHOUSE_URL"
+          name = "TELEMETRY_URL"
           value_source {
             secret_key_ref {
-              secret  = google_secret_manager_secret.app["CLICKHOUSE_URL"].secret_id
+              secret  = google_secret_manager_secret.app["TELEMETRY_URL"].secret_id
+              version = "latest"
+            }
+          }
+        }
+
+        env {
+          name = "TELEMETRY_TOKEN"
+          value_source {
+            secret_key_ref {
+              secret  = google_secret_manager_secret.app["TELEMETRY_TOKEN"].secret_id
               version = "latest"
             }
           }

@@ -108,7 +108,8 @@ SECRET_GID=$(id -g)
 # Existing installs upgraded from ClickHouse keep their ClickHouse secrets and
 # users.d config so the legacy-clickhouse profile can start for the cutover.
 LEGACY_CLICKHOUSE=0
-if [ -s "$SECRETS_DIR/clickhouse/clickhouse_password" ] || docker volume inspect "$(basename "$INSTALL_DIR")_chdata" >/dev/null 2>&1; then
+if [ -s "$SECRETS_DIR/clickhouse/clickhouse_password" ] || [ -n "$(env_value CLICKHOUSE_PASSWORD)" ] \
+    || docker volume inspect "$(basename "$INSTALL_DIR")_chdata" >/dev/null 2>&1; then
     LEGACY_CLICKHOUSE=1
     mkdir -p "$SECRETS_DIR/clickhouse" "$INSTALL_DIR/clickhouse/users.d"
     chmod 750 "$SECRETS_DIR/clickhouse"

@@ -449,14 +449,16 @@ def bundle(
             continue
 
         if result.name == "aggregates":
-            # Split aggregates into PG and CH count files
+            # Split aggregates into PG and telemetry count files
             if isinstance(result.data, dict):
                 redacted_agg, agg_count = redact_value(result.data)
                 redaction_stats.record("aggregates/aggregates.json", agg_count)
                 pg_counts = redacted_agg.get("pg_table_counts", {})
-                ch_counts = redacted_agg.get("ch_table_counts", {})
+                telemetry_counts = redacted_agg.get("telemetry_table_counts", {})
                 files["aggregates/pg_table_counts.json"] = json.dumps(pg_counts, indent=2, default=str).encode("utf-8")
-                files["aggregates/ch_table_counts.json"] = json.dumps(ch_counts, indent=2, default=str).encode("utf-8")
+                files["aggregates/telemetry_table_counts.json"] = json.dumps(
+                    telemetry_counts, indent=2, default=str
+                ).encode("utf-8")
             continue
 
         if result.name == "logs":

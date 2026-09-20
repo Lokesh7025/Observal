@@ -1,8 +1,9 @@
 # SPDX-FileCopyrightText: 2026 Tanvi Reddy
 # SPDX-License-Identifier: Apache-2.0
 
-# Data tier: Azure VM running ClickHouse + Redis + Prometheus via docker-compose.
-# The VM is created when clickhouse_mode = "self_hosted" OR redis_mode = "self_hosted".
+# Data tier: Azure VM running the DuckDB telemetry store + Redis + Prometheus via
+# docker-compose. Resource names keep their historical "clickhouse" labels so
+# existing Terraform state is untouched by the DuckDB migration.
 
 resource "azurerm_network_interface" "clickhouse" {
   count               = local.needs_vm ? 1 : 0
@@ -60,6 +61,9 @@ resource "azurerm_linux_virtual_machine" "clickhouse" {
   }
 
   custom_data = base64encode(templatefile("${path.module}/cloud-init.yaml.tftpl", {
+    telemetry_image                  = "${var.image_repo_api}:${var.image_tag}"
+    telemetry_token                  = random_password.telemetry_token.result
+    enable_legacy_clickhouse         = var.enable_legacy_clickhouse
     clickhouse_password              = random_password.clickhouse.result
     clickhouse_db                    = "observal"
     observability_prometheus_enabled = local.observability_prometheus_enabled

@@ -175,10 +175,13 @@ async def test_backpressure_returns_429_not_hang(store):
     assert 429 in codes
     assert set(codes) <= {429, 504}
     # Interrupted workers unwind asynchronously; wait for the pool to drain, then prove it is usable.
-    for _ in range(100):
-        if (await store.get("/v1/health")).json()["read_pending"] == 0:
+    for _ in range(600):
+        health = (await store.get("/v1/health")).json()
+        if health["read_pending"] == 0 and health["read_active"] == 0:
             break
         await asyncio.sleep(0.1)
+    else:
+        raise AssertionError(f"reader pool did not drain: {health}")
     assert await _q(store, "SELECT 1 AS one") == [{"one": 1}]
 
 

@@ -65,11 +65,11 @@ terraform output web_url
 | `staging.tfvars` | Cost-optimized, single replicas, smaller SKUs |
 | `prod.tfvars` | Zone-redundant PostgreSQL, HA Redis, autoscaling, larger VMs |
 
-## ClickHouse Modes
+## Telemetry store
 
-Set `clickhouse_mode`:
-- `"self_hosted"` (default) - Azure VM with managed disk. Cheapest option.
-- `"cloud"` - ClickHouse Cloud. Supply `clickhouse_cloud_url` and `clickhouse_cloud_password`.
+The data VM (sized by `clickhouse_vm_size` / `clickhouse_disk_size_gb`, names kept for tfvars compatibility) runs the single-writer DuckDB telemetry store on a managed disk, plus Redis when `redis_mode = "self_hosted"`.
+
+Upgrading an install that used ClickHouse: set `enable_legacy_clickhouse = true`, apply, run `observal server migrate telemetry-cutover` against the `CLICKHOUSE-URL` Key Vault secret and the `TELEMETRY-URL` / `TELEMETRY-TOKEN` secrets, then set it back to `false`. `/data/clickhouse` on the managed disk is never deleted by Terraform.
 
 ## Estimated Monthly Cost (Staging)
 

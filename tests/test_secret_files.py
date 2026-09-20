@@ -165,15 +165,20 @@ def test_server_package_uses_secret_files_and_loopback_defaults():
     assert "OBSERVAL_SECRET_GID" in compose
     assert "openssl rand -hex" in setup
     assert "docker-compose.tls.yml" not in setup
-    db_service = compose[compose.index("\n  observal-db:\n") : compose.index("\n  observal-clickhouse:\n")]
+    db_service = compose[compose.index("\n  observal-db:\n") : compose.index("\n  observal-telemetry:\n")]
     assert "env_file:" not in db_service
     assert "./secrets/postgres:/run/secrets:ro" in db_service
     assert "./secrets:/run/secrets:ro" not in db_service
 
+    telemetry_service = compose[compose.index("\n  observal-telemetry:\n") : compose.index("\n  # Legacy ClickHouse")]
+    assert "env_file:" not in telemetry_service
+    assert "./secrets/telemetry:/run/secrets:ro" in telemetry_service
+    assert "TELEMETRY_TOKEN_FILE=/run/secrets/telemetry_token" in telemetry_service
+
     clickhouse_service = compose[compose.index("\n  observal-clickhouse:\n") : compose.index("\n  observal-redis:\n")]
+    assert 'profiles: ["legacy-clickhouse"]' in clickhouse_service
     assert "env_file:" not in clickhouse_service
     assert "./secrets/clickhouse:/run/secrets:ro" in clickhouse_service
-    assert "cat /run/secrets/clickhouse_password" in clickhouse_service
 
     observability = (root / "docker/server-package/docker-compose.observability.yml").read_text()
     grafana = observability[observability.index("  observal-grafana:") :]
@@ -212,7 +217,10 @@ def test_server_package_new_install_generates_restricted_secrets(tmp_path):
     assert stat.S_IMODE(secret.stat().st_mode) == 0o640
     assert "SECRET_KEY=" not in (install / ".env").read_text()
     assert "OBSERVAL_BIND_ADDRESS=127.0.0.1" in (install / ".env").read_text()
-    assert "password_sha256_hex" in (install / "clickhouse/users.d/generated-password.xml").read_text()
+    token = install / "secrets/telemetry/telemetry_token"
+    assert token.read_text() and stat.S_IMODE(token.stat().st_mode) == 0o640
+    assert (install / "secrets/telemetry_token").read_text() == token.read_text()
+    assert (install / "secrets/grafana/telemetry_token").read_text() == token.read_text()
     assert "Grafana administrator" in result.stdout
     assert (install / "secrets/grafana/grafana_admin_password").read_text() in result.stdout
     assert "Password file:" in result.stdout
@@ -284,8 +292,11 @@ def test_server_package_replacement_preserves_existing_credentials(tmp_path):
 
     assert (install / "secrets/secret_key").read_text() == "existing-secret"
     assert (install / "secrets/postgres/postgres_password").read_text() == "existing-postgres"
+    # A CLICKHOUSE_PASSWORD in the old .env marks a legacy install: its secrets and
+    # users.d config are kept so the legacy-clickhouse profile can start for the cutover.
     assert (install / "secrets/clickhouse/clickhouse_password").read_text() == "existing-clickhouse"
-    assert (install / "secrets/grafana/clickhouse_password").read_text() == "existing-clickhouse"
+    assert "password_sha256_hex" in (install / "clickhouse/users.d/generated-password.xml").read_text()
+    assert (install / "secrets/telemetry/telemetry_token").read_text()
     assert (install / "secrets/grafana/grafana_admin_password").read_text() == "existing-grafana"
     assert "existing-postgres" in (install / "secrets/database_url").read_text()
     assert "DEMO_SUPER_ADMIN_EMAIL=owner@example.com" in (install / ".env").read_text()

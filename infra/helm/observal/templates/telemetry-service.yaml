@@ -1,0 +1,21 @@
+# SPDX-FileCopyrightText: 2026 Lokesh Selvam <lokeshselvam7025@gmail.com>
+# SPDX-License-Identifier: Apache-2.0
+{{- if .Values.telemetry.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "observal.fullname" . }}-telemetry
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "observal.labels" . | nindent 4 }}
+    app.kubernetes.io/component: telemetry
+spec:
+  type: ClusterIP
+  ports:
+    - port: 8125
+      targetPort: 8125
+      name: http
+  selector:
+    {{- include "observal.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: telemetry
+{{- end }}

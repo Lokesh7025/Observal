@@ -151,27 +151,16 @@ variable "worker_max_instances" {
   default     = 5
 }
 
-# ── Data tier (ClickHouse on GCE) ─────────────────────────────────────────
+# ── Data tier (DuckDB telemetry store on GCE) ─────────────────────────────
 
-variable "clickhouse_mode" {
-  description = "'self_hosted' = GCE instance. 'cloud' = ClickHouse Cloud (supply clickhouse_cloud_url)."
-  type        = string
-  default     = "self_hosted"
-  validation {
-    condition     = contains(["self_hosted", "cloud"], var.clickhouse_mode)
-    error_message = "clickhouse_mode must be 'self_hosted' or 'cloud'."
-  }
-}
-
-variable "clickhouse_cloud_url" {
-  description = "ClickHouse Cloud DSN. Required when clickhouse_mode = 'cloud'."
-  type        = string
-  default     = ""
-  sensitive   = true
+variable "enable_legacy_clickhouse" {
+  description = "Also run the legacy ClickHouse container on the data host so an existing install can back-fill history with 'observal server migrate telemetry-cutover'. Set back to false afterwards; /data/clickhouse is never deleted by this module."
+  type        = bool
+  default     = false
 }
 
 variable "data_machine_type" {
-  description = "Machine type for the ClickHouse data host."
+  description = "Machine type for the telemetry data host."
   type        = string
   default     = "e2-standard-2"
 }
@@ -238,7 +227,7 @@ variable "observability_stack" {
 }
 
 variable "data_retention_days" {
-  description = "ClickHouse data retention in days."
+  description = "Local telemetry snapshot retention in days (snapshots older than this are pruned from the data disk; GCS keeps its own copies)."
   type        = number
   default     = 90
 }

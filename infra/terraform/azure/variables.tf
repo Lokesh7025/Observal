@@ -43,13 +43,13 @@ variable "subnet_container_apps_cidr" {
 }
 
 variable "subnet_data_cidr" {
-  description = "CIDR for the data tier subnet (PostgreSQL, Redis, ClickHouse VM)."
+  description = "CIDR for the data tier subnet (PostgreSQL, Redis, data VM)."
   type        = string
   default     = "10.42.4.0/24"
 }
 
 variable "subnet_vm_cidr" {
-  description = "CIDR for the ClickHouse VM subnet."
+  description = "CIDR for the data VM subnet."
   type        = string
   default     = "10.42.5.0/24"
 }
@@ -156,40 +156,24 @@ variable "worker_max_replicas" {
   default     = 5
 }
 
-# -- Data tier (ClickHouse) --------------------------------------------------
+# -- Data tier (DuckDB telemetry store on an Azure VM) -----------------------
 
-variable "clickhouse_mode" {
-  description = "Where ClickHouse lives. 'self_hosted' = Azure VM. 'cloud' = ClickHouse Cloud (supply clickhouse_cloud_url + clickhouse_cloud_password)."
-  type        = string
-  default     = "self_hosted"
-  validation {
-    condition     = contains(["self_hosted", "cloud"], var.clickhouse_mode)
-    error_message = "clickhouse_mode must be 'self_hosted' or 'cloud'."
-  }
+variable "enable_legacy_clickhouse" {
+  description = "Also run the legacy ClickHouse container on the data VM so an existing install can back-fill history with 'observal server migrate telemetry-cutover'. Set back to false afterwards; /data/clickhouse on the managed disk is never deleted by this module."
+  type        = bool
+  default     = false
 }
 
-variable "clickhouse_cloud_url" {
-  description = "ClickHouse Cloud DSN. Required when clickhouse_mode = 'cloud'."
-  type        = string
-  default     = ""
-  sensitive   = true
-}
-
-variable "clickhouse_cloud_password" {
-  description = "ClickHouse Cloud password. Required when clickhouse_mode = 'cloud'."
-  type        = string
-  default     = ""
-  sensitive   = true
-}
-
+# Variable names keep the historical clickhouse_ prefix so existing tfvars
+# files stay valid; they size the shared data VM (telemetry store + Redis).
 variable "clickhouse_vm_size" {
-  description = "Azure VM size for the ClickHouse host."
+  description = "Azure VM size for the data host (telemetry store + Redis)."
   type        = string
   default     = "Standard_D2ads_v7"
 }
 
 variable "clickhouse_disk_size_gb" {
-  description = "Size of the managed disk for ClickHouse data."
+  description = "Size of the managed disk for the data host (/data: telemetry store, Redis, Prometheus)."
   type        = number
   default     = 100
 }
@@ -209,7 +193,7 @@ variable "postgresql_storage_gb" {
 }
 
 variable "redis_mode" {
-  description = "Where Redis lives. 'self_hosted' = on ClickHouse VM via Docker. 'enterprise' = Azure Managed Redis (requires Enterprise quota)."
+  description = "Where Redis lives. 'self_hosted' = on the data VM via Docker. 'enterprise' = Azure Managed Redis (requires Enterprise quota)."
   type        = string
   default     = "self_hosted"
   validation {

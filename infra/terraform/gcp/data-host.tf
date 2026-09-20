@@ -2,42 +2,36 @@
 # SPDX-License-Identifier: Apache-2.0
 
 resource "google_service_account" "data_host" {
-  count        = local.clickhouse_self_hosted ? 1 : 0
   account_id   = "${var.name_prefix}-data"
   display_name = "Observal data host"
 }
 
 resource "google_project_iam_member" "data_host_log_writer" {
-  count   = local.clickhouse_self_hosted ? 1 : 0
   project = var.project_id
   role    = "roles/logging.logWriter"
-  member  = "serviceAccount:${google_service_account.data_host[0].email}"
+  member  = "serviceAccount:${google_service_account.data_host.email}"
 }
 
 resource "google_project_iam_member" "data_host_metric_writer" {
-  count   = local.clickhouse_self_hosted ? 1 : 0
   project = var.project_id
   role    = "roles/monitoring.metricWriter"
-  member  = "serviceAccount:${google_service_account.data_host[0].email}"
+  member  = "serviceAccount:${google_service_account.data_host.email}"
 }
 
 resource "google_project_iam_member" "data_host_storage_admin" {
-  count   = local.clickhouse_self_hosted ? 1 : 0
   project = var.project_id
   role    = "roles/storage.objectAdmin"
-  member  = "serviceAccount:${google_service_account.data_host[0].email}"
+  member  = "serviceAccount:${google_service_account.data_host.email}"
 }
 
 resource "google_compute_disk" "data" {
-  count = local.clickhouse_self_hosted ? 1 : 0
-  name  = "${local.name}-data-disk"
-  type  = "pd-ssd"
-  size  = var.data_disk_size_gb
-  zone  = "${var.region}-a"
+  name = "${local.name}-data-disk"
+  type = "pd-ssd"
+  size = var.data_disk_size_gb
+  zone = "${var.region}-a"
 }
 
 resource "google_compute_instance" "data_host" {
-  count        = local.clickhouse_self_hosted ? 1 : 0
   name         = "${local.name}-data"
   machine_type = var.data_machine_type
   zone         = "${var.region}-a"
@@ -52,7 +46,7 @@ resource "google_compute_instance" "data_host" {
   }
 
   attached_disk {
-    source      = google_compute_disk.data[0].self_link
+    source      = google_compute_disk.data.self_link
     device_name = "data-disk"
   }
 
@@ -61,7 +55,7 @@ resource "google_compute_instance" "data_host" {
   }
 
   service_account {
-    email  = google_service_account.data_host[0].email
+    email  = google_service_account.data_host.email
     scopes = ["cloud-platform"]
   }
 
@@ -70,6 +64,9 @@ resource "google_compute_instance" "data_host" {
   }
 
   metadata_startup_script = templatefile("${path.module}/user-data.sh.tftpl", {
+    telemetry_image                  = local.image_api
+    telemetry_token                  = random_password.telemetry_token.result
+    enable_legacy_clickhouse         = var.enable_legacy_clickhouse
     clickhouse_password              = random_password.clickhouse.result
     clickhouse_db                    = "observal"
     data_retention_days              = var.data_retention_days
@@ -81,4 +78,33 @@ resource "google_compute_instance" "data_host" {
   })
 
   allow_stopping_for_update = true
+}
+
+# ── State moves ─────────────────────────────────────────────────────────────
+# The data host used to be conditional on clickhouse_mode = "self_hosted"
+# (count = 1). Keep existing state addresses so an upgrade never destroys the
+# instance or its persistent disk.
+moved {
+  from = google_service_account.data_host[0]
+  to   = google_service_account.data_host
+}
+moved {
+  from = google_project_iam_member.data_host_log_writer[0]
+  to   = google_project_iam_member.data_host_log_writer
+}
+moved {
+  from = google_project_iam_member.data_host_metric_writer[0]
+  to   = google_project_iam_member.data_host_metric_writer
+}
+moved {
+  from = google_project_iam_member.data_host_storage_admin[0]
+  to   = google_project_iam_member.data_host_storage_admin
+}
+moved {
+  from = google_compute_disk.data[0]
+  to   = google_compute_disk.data
+}
+moved {
+  from = google_compute_instance.data_host[0]
+  to   = google_compute_instance.data_host
 }

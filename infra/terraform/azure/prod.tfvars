@@ -24,7 +24,7 @@ web_max_replicas    = 6
 worker_min_replicas = 1
 worker_max_replicas = 5
 
-# Larger ClickHouse VM for production workloads
+# Larger data VM for production workloads
 clickhouse_vm_size      = "Standard_D4ads_v7"
 clickhouse_disk_size_gb = 200
 

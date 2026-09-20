@@ -84,6 +84,7 @@ class Reader:
         self._default_timeout = default_timeout_ms
         self._max_rows = max_rows
         self._pending = 0
+        self._active = 0  # worker threads currently executing (includes ones unwinding after interrupt)
         self._pending_lock = threading.Lock()
         self.query_count = 0
         self.timeout_count = 0
@@ -93,7 +94,13 @@ class Reader:
     def pending(self) -> int:
         return self._pending
 
+    @property
+    def active(self) -> int:
+        return self._active
+
     def _execute(self, sql: str, params: dict[str, Any], cursor_box: dict[str, Any]) -> tuple[list[str], list[tuple]]:
+        with self._pending_lock:
+            self._active += 1
         cursor = self._conn.cursor()
         cursor_box["cursor"] = cursor
         params = prune_params(sql, params)
@@ -104,6 +111,8 @@ class Reader:
             return columns, rows
         finally:
             cursor.close()
+            with self._pending_lock:
+                self._active -= 1
 
     async def query(self, sql: str, params: dict[str, Any] | None, timeout_ms: int | None) -> dict[str, Any]:
         assert_read_only(sql)
@@ -121,17 +130,22 @@ class Reader:
             columns, rows = await asyncio.wait_for(asyncio.shield(future), timeout=budget)
         except TimeoutError as exc:
             self.timeout_count += 1
-            cursor = cursor_box.get("cursor")
-            if cursor is not None:
+            # An interrupt issued before the cursor has actually started executing is
+            # lost, so keep re-issuing it until the worker unwinds (bounded wait).
+            deadline = time.perf_counter() + 30
+            while not future.done() and time.perf_counter() < deadline:
+                cursor = cursor_box.get("cursor")
+                if cursor is not None:
+                    try:
+                        cursor.interrupt()
+                    except duckdb.Error:
+                        pass
                 try:
-                    cursor.interrupt()
-                except duckdb.Error:
+                    await asyncio.wait_for(asyncio.shield(future), timeout=0.1)
+                except (TimeoutError, Exception):
                     pass
-            # Let the worker unwind before releasing the slot.
-            try:
-                await asyncio.wait_for(future, timeout=5)
-            except (TimeoutError, Exception):
-                pass
+            if not future.done():
+                optic.error("telemetry query did not stop after interrupt: {}", sql[:120])
             optic.warning("telemetry query interrupted after {:.0f}ms: {}", budget * 1000, sql[:120])
             raise QueryTimeoutError(f"query exceeded {int(budget * 1000)}ms") from exc
         finally:

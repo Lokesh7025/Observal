@@ -8,6 +8,12 @@ resource "random_password" "db" {
   special = false
 }
 
+resource "random_password" "telemetry_token" {
+  length  = 40
+  special = false
+}
+
+# Only used while enable_legacy_clickhouse = true (cutover window).
 resource "random_password" "clickhouse" {
   length  = 32
   special = false
@@ -22,11 +28,16 @@ resource "random_password" "secret_key" {
 # Connection URLs reference internal DNS names resolved via the private Route53 zone.
 
 locals {
-  connection_urls = {
-    "DATABASE_URL"   = "postgresql+asyncpg://observal:${random_password.db.result}@postgres.${var.internal_dns_zone}:5432/observal"
-    "REDIS_URL"      = "redis://redis.${var.internal_dns_zone}:6379"
-    "CLICKHOUSE_URL" = "clickhouse://default:${random_password.clickhouse.result}@clickhouse.${var.internal_dns_zone}:8123/observal"
-  }
+  connection_urls = merge(
+    {
+      "DATABASE_URL"  = "postgresql+asyncpg://observal:${random_password.db.result}@postgres.${var.internal_dns_zone}:5432/observal"
+      "REDIS_URL"     = "redis://redis.${var.internal_dns_zone}:6379"
+      "TELEMETRY_URL" = "http://telemetry.${var.internal_dns_zone}:8125"
+    },
+    var.enable_legacy_clickhouse ? {
+      "CLICKHOUSE_URL" = "clickhouse://default:${random_password.clickhouse.result}@clickhouse.${var.internal_dns_zone}:8123/observal"
+    } : {}
+  )
 }
 
 resource "aws_ssm_parameter" "urls" {
@@ -55,7 +66,16 @@ resource "aws_ssm_parameter" "db_password" {
   tags = { Name = "${local.name}-db-password" }
 }
 
+resource "aws_ssm_parameter" "telemetry_token" {
+  name  = "${local.ssm_prefix}/TELEMETRY_TOKEN"
+  type  = "SecureString"
+  value = random_password.telemetry_token.result
+
+  tags = { Name = "${local.name}-telemetry-token" }
+}
+
 resource "aws_ssm_parameter" "clickhouse_password" {
+  count = var.enable_legacy_clickhouse ? 1 : 0
   name  = "${local.ssm_prefix}/CLICKHOUSE_PASSWORD"
   type  = "SecureString"
   value = random_password.clickhouse.result

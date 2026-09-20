@@ -130,19 +130,19 @@ Standard initContainer: wait for Postgres readiness.
 {{- end }}
 
 {{/*
-Standard initContainer: wait for ClickHouse readiness.
+Standard initContainer: wait for the telemetry store readiness.
 */}}
-{{- define "observal.initWaitClickhouse" -}}
-{{- if .Values.clickhouse.enabled }}
-- name: wait-for-clickhouse
+{{- define "observal.initWaitTelemetry" -}}
+{{- if .Values.telemetry.enabled }}
+- name: wait-for-telemetry
   image: curlimages/curl:8.8.0
   imagePullPolicy: IfNotPresent
   command:
     - sh
     - -c
     - |
-      until curl -sf http://{{ include "observal.fullname" . }}-clickhouse:8123/ping; do
-        echo "Waiting for ClickHouse..."; sleep 2;
+      until curl -sf http://{{ include "observal.fullname" . }}-telemetry:8125/v1/health; do
+        echo "Waiting for telemetry store..."; sleep 2;
       done
 {{- end }}
 {{- end }}

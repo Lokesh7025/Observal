@@ -61,10 +61,11 @@ After apply:
 
 Set `domain_name` and `dns_managed_zone_name` to enable the Global HTTPS Load Balancer with a managed SSL certificate. The module creates a DNS A record pointing to the LB IP.
 
-## ClickHouse Modes
+## Telemetry store
 
-- **self_hosted** (default): Deploys a GCE instance running ClickHouse, Grafana, and Prometheus via Docker Compose. Access via IAP SSH tunnel.
-- **cloud**: Supply `clickhouse_cloud_url` and `clickhouse_cloud_password` to use ClickHouse Cloud. No GCE instance is created.
+A GCE instance runs the single-writer DuckDB telemetry store (plus Grafana and Prometheus when `observability_stack` is set) via Docker Compose on a persistent disk. Daily snapshots go to the backups bucket. Access the host via IAP SSH tunnel.
+
+Upgrading an install that used ClickHouse: set `enable_legacy_clickhouse = true`, apply, run `observal server migrate telemetry-cutover` against the `CLICKHOUSE_URL` secret and the `telemetry_endpoint` output, then set it back to `false`. `/data/clickhouse` on the data disk is never deleted by Terraform.
 
 ## Accessing the Data Host
 

@@ -67,10 +67,10 @@ resource "aws_security_group" "ecs_instances" {
   tags = { Name = "${local.name}-ecs-instances-sg" }
 }
 
-# ── Data host (Postgres, Redis, ClickHouse, optional observability) ───────
+# ── Data host (Postgres, Redis, telemetry store, optional observability) ──
 resource "aws_security_group" "data_host" {
   name        = "${local.name}-data-host"
-  description = "Data tier EC2: Postgres, Redis, ClickHouse, Grafana, Prometheus."
+  description = "Data tier EC2: Postgres, Redis, telemetry store, Grafana, Prometheus."
   vpc_id      = local.vpc_id
 
   ingress {
@@ -90,19 +90,22 @@ resource "aws_security_group" "data_host" {
   }
 
   ingress {
-    description     = "ClickHouse HTTP from ECS instances"
-    from_port       = 8123
-    to_port         = 8123
+    description     = "Telemetry store HTTP from ECS instances"
+    from_port       = 8125
+    to_port         = 8125
     protocol        = "tcp"
     security_groups = [aws_security_group.ecs_instances.id]
   }
 
-  ingress {
-    description     = "ClickHouse native protocol from ECS instances"
-    from_port       = 9000
-    to_port         = 9000
-    protocol        = "tcp"
-    security_groups = [aws_security_group.ecs_instances.id]
+  dynamic "ingress" {
+    for_each = var.enable_legacy_clickhouse ? [1] : []
+    content {
+      description     = "Legacy ClickHouse HTTP from ECS instances (cutover window)"
+      from_port       = 8123
+      to_port         = 8123
+      protocol        = "tcp"
+      security_groups = [aws_security_group.ecs_instances.id]
+    }
   }
 
   dynamic "ingress" {

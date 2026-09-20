@@ -4,7 +4,8 @@
 
 set -eo pipefail
 
-# Bootstrap the data tier host: Postgres, Redis, ClickHouse, and optional observability via Docker Compose.
+# Bootstrap the data tier host: Postgres, Redis, the DuckDB telemetry store, and optional observability via Docker Compose.
+# Legacy ClickHouse also runs here while enable_legacy_clickhouse = true (cutover window).
 
 exec > >(tee /var/log/observal-bootstrap.log | logger -t observal-bootstrap -s 2>/dev/console) 2>&1
 echo "Observal data-host bootstrap starting at $(date -u)"
@@ -36,7 +37,10 @@ mkdir -p /data
 UUID=$(blkid -s UUID -o value "$DEVICE")
 grep -q "$UUID" /etc/fstab || echo "UUID=$UUID /data ext4 defaults,nofail 0 2" >> /etc/fstab
 mount -a
-mkdir -p /data/postgres /data/redis /data/clickhouse
+mkdir -p /data/postgres /data/redis /data/telemetry
+%{ if enable_legacy_clickhouse }
+mkdir -p /data/clickhouse
+%{ endif }
 %{ if observability_grafana_enabled }
 mkdir -p /data/grafana
 %{ endif }
@@ -45,7 +49,10 @@ mkdir -p /data/prometheus
 %{ endif }
 chown -R 999:999 /data/postgres      || true   # postgres user
 chown -R 999:1000 /data/redis        || true   # redis user
+chown -R 1001:1001 /data/telemetry   || true   # appuser inside the observal-api image
+%{ if enable_legacy_clickhouse }
 chown -R 101:101 /data/clickhouse    || true   # clickhouse user
+%{ endif }
 %{ if observability_grafana_enabled }
 chown -R 472:472 /data/grafana       || true   # grafana user
 %{ endif }
@@ -58,7 +65,10 @@ set +x
 fetch() { aws ssm get-parameter --with-decryption --name "$1" --region "${region}" --query Parameter.Value --output text; }
 
 DB_PASSWORD=$(fetch "${ssm_prefix}/DB_PASSWORD")
+TELEMETRY_TOKEN=$(fetch "${ssm_prefix}/TELEMETRY_TOKEN")
+%{ if enable_legacy_clickhouse }
 CLICKHOUSE_PASSWORD=$(fetch "${ssm_prefix}/CLICKHOUSE_PASSWORD")
+%{ endif }
 set -x
 
 # ── Render docker-compose.yml ────────────────────────────────────
@@ -66,6 +76,7 @@ INSTALL_DIR=/opt/observal
 mkdir -p "$INSTALL_DIR"
 cd "$INSTALL_DIR"
 
+%{ if enable_legacy_clickhouse }
 # ClickHouse config
 mkdir -p "$INSTALL_DIR/clickhouse/config.d" "$INSTALL_DIR/clickhouse/users.d"
 
@@ -96,22 +107,27 @@ cat > "$INSTALL_DIR/clickhouse/users.d/default-user.xml" <<CHUSER
   </users>
 </clickhouse>
 CHUSER
-
+%{ endif }
 %{ if observability_prometheus_enabled }
 # Prometheus config
 cat > "$INSTALL_DIR/prometheus.yml" <<'PROM'
 global:
   scrape_interval: 30s
 scrape_configs:
-  - job_name: observal-clickhouse
+  - job_name: observal-telemetry
     static_configs:
-      - targets: ['clickhouse:9363']
+      - targets: ['telemetry:8125']
+    authorization:
+      type: Bearer
+      credentials: $${TELEMETRY_TOKEN}
   - job_name: observal-postgres
     static_configs:
       - targets: ['localhost:9187']
 PROM
 
 %{ endif }
+TOTAL_MEM_MB=$(awk '/MemTotal/ {printf "%d", $2/1024}' /proc/meminfo)
+TELEMETRY_MEMORY_LIMIT="$(( TOTAL_MEM_MB * 4 / 10 ))MB"
 cat > "$INSTALL_DIR/docker-compose.yml" <<COMPOSE
 services:
   postgres:
@@ -147,13 +163,39 @@ services:
       timeout: 5s
       retries: 5
 
+  telemetry:
+    # Single-writer DuckDB telemetry store (same image as the API, one process).
+    image: ${telemetry_image}
+    container_name: observal-telemetry
+    command: ["/app/.venv/bin/python", "-m", "telemetry_store"]
+    restart: unless-stopped
+    ports:
+      - "8125:8125"
+    environment:
+      TELEMETRY_DB_PATH: /data/telemetry/observal.duckdb
+      TELEMETRY_TEMP_DIR: /data/telemetry/tmp
+      TELEMETRY_EXPORT_DIR: /data/telemetry/exports
+      TELEMETRY_BIND: 0.0.0.0:8125
+      TELEMETRY_TOKEN: "$${TELEMETRY_TOKEN}"
+      TELEMETRY_MEMORY_LIMIT: "$${TELEMETRY_MEMORY_LIMIT}"
+      TELEMETRY_THREADS: "4"
+    volumes:
+      - /data/telemetry:/data/telemetry
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8125/v1/health')\""]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+%{ if enable_legacy_clickhouse }
   clickhouse:
+    # Legacy ClickHouse for the one-time cutover. Remove enable_legacy_clickhouse afterwards.
     image: clickhouse/clickhouse-server:26.6
     container_name: observal-clickhouse
     restart: unless-stopped
     ports:
       - "8123:8123"
-      - "9000:9000"
     environment:
       CLICKHOUSE_DB: observal
       CLICKHOUSE_USER: default
@@ -167,6 +209,7 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+%{ endif }
 
 %{ if observability_grafana_enabled }
   grafana:
@@ -177,14 +220,16 @@ services:
       - "3001:3000"
     environment:
       GF_SECURITY_ADMIN_USER: admin
-      GF_SECURITY_ADMIN_PASSWORD: "$${CLICKHOUSE_PASSWORD}"
-      GF_INSTALL_PLUGINS: grafana-clickhouse-datasource
+      GF_SECURITY_ADMIN_PASSWORD: "$${TELEMETRY_TOKEN}"
+      GF_INSTALL_PLUGINS: yesoreyeram-infinity-datasource
       GF_SERVER_ROOT_URL: "${grafana_root_url}/grafana"
       GF_SERVER_SERVE_FROM_SUB_PATH: "true"
+      TELEMETRY_URL: http://telemetry:8125
+      TELEMETRY_TOKEN: "$${TELEMETRY_TOKEN}"
     volumes:
       - /data/grafana:/var/lib/grafana
     depends_on:
-      clickhouse:
+      telemetry:
         condition: service_healthy
 %{ endif }
 %{ if observability_prometheus_enabled }
@@ -223,16 +268,16 @@ for i in $(seq 1 30); do
   sleep 10
 done
 
-# Wait for ClickHouse
-echo "Waiting for ClickHouse..."
+# Wait for the telemetry store
+echo "Waiting for telemetry store..."
 for i in $(seq 1 30); do
-  if wget -q --spider http://localhost:8123/ping 2>/dev/null; then
-    echo "ClickHouse healthy after $i attempts"
+  if curl -fsS http://localhost:8125/v1/health >/dev/null 2>&1; then
+    echo "Telemetry store healthy after $i attempts"
     break
   fi
   if [ "$i" -eq 30 ]; then
-    echo "ERROR: ClickHouse did not become healthy within 5 minutes"
-    docker compose -f "$INSTALL_DIR/docker-compose.yml" logs clickhouse | tail -30
+    echo "ERROR: telemetry store did not become healthy within 5 minutes"
+    docker compose -f "$INSTALL_DIR/docker-compose.yml" logs telemetry | tail -30
     exit 1
   fi
   sleep 10

@@ -8,6 +8,12 @@ resource "random_password" "db" {
   special = false
 }
 
+resource "random_password" "telemetry_token" {
+  length  = 40
+  special = false
+}
+
+# Only used while enable_legacy_clickhouse = true (cutover window).
 resource "random_password" "clickhouse" {
   length  = 32
   special = false
@@ -53,7 +59,20 @@ resource "azurerm_key_vault_secret" "redis_url" {
   key_vault_id = azurerm_key_vault.main.id
 }
 
+resource "azurerm_key_vault_secret" "telemetry_url" {
+  name         = "TELEMETRY-URL"
+  value        = local.telemetry_url
+  key_vault_id = azurerm_key_vault.main.id
+}
+
+resource "azurerm_key_vault_secret" "telemetry_token" {
+  name         = "TELEMETRY-TOKEN"
+  value        = random_password.telemetry_token.result
+  key_vault_id = azurerm_key_vault.main.id
+}
+
 resource "azurerm_key_vault_secret" "clickhouse_url" {
+  count        = var.enable_legacy_clickhouse ? 1 : 0
   name         = "CLICKHOUSE-URL"
   value        = local.clickhouse_url
   key_vault_id = azurerm_key_vault.main.id

@@ -1,0 +1,104 @@
+# SPDX-FileCopyrightText: 2026 Lokesh Selvam <lokeshselvam7025@gmail.com>
+# SPDX-License-Identifier: Apache-2.0
+{{- if .Values.telemetry.enabled }}
+# Single-writer DuckDB telemetry store. Exactly one replica: the store owns
+# its database file and refuses to start with more than one worker.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "observal.fullname" . }}-telemetry
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "observal.labels" . | nindent 4 }}
+    app.kubernetes.io/component: telemetry
+spec:
+  serviceName: {{ include "observal.fullname" . }}-telemetry
+  replicas: 1
+  podManagementPolicy: OrderedReady
+  updateStrategy:
+    type: RollingUpdate
+  selector:
+    matchLabels:
+      {{- include "observal.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: telemetry
+  template:
+    metadata:
+      labels:
+        {{- include "observal.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: telemetry
+    spec:
+      {{- include "observal.podSecurityContext" . | nindent 6 }}
+      securityContext:
+        fsGroup: 1001
+        seccompProfile:
+          type: RuntimeDefault
+      terminationGracePeriodSeconds: 60
+      containers:
+        - name: telemetry
+          image: {{ include "observal.image" (dict "global" .Values.global "image" .Values.telemetry.image "appVersion" .Chart.AppVersion) }}
+          imagePullPolicy: {{ .Values.telemetry.image.pullPolicy }}
+          {{- include "observal.securityContext" . | nindent 10 }}
+          command:
+            - /app/.venv/bin/python
+            - -m
+            - telemetry_store
+          env:
+            - name: TELEMETRY_DB_PATH
+              value: /data/telemetry/observal.duckdb
+            - name: TELEMETRY_TEMP_DIR
+              value: /data/telemetry/tmp
+            - name: TELEMETRY_EXPORT_DIR
+              value: /data/telemetry/exports
+            - name: TELEMETRY_BIND
+              value: 0.0.0.0:8125
+            - name: TELEMETRY_MEMORY_LIMIT
+              value: {{ .Values.telemetry.memoryLimit | quote }}
+            - name: TELEMETRY_THREADS
+              value: {{ .Values.telemetry.threads | quote }}
+            - name: TELEMETRY_READ_THREADS
+              value: {{ .Values.telemetry.readThreads | quote }}
+            - name: TELEMETRY_QUERY_TIMEOUT_MS
+              value: {{ .Values.telemetry.queryTimeoutMs | quote }}
+            - name: TELEMETRY_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "observal.secretName" . }}
+                  key: TELEMETRY_TOKEN
+          ports:
+            - containerPort: 8125
+              name: http
+          readinessProbe:
+            httpGet:
+              path: /v1/health
+              port: 8125
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /v1/health
+              port: 8125
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            timeoutSeconds: 5
+          resources:
+            {{- toYaml .Values.telemetry.resources | nindent 12 }}
+          volumeMounts:
+            - mountPath: /data/telemetry
+              name: tdata
+            - mountPath: /tmp
+              name: tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+  volumeClaimTemplates:
+    - metadata:
+        name: tdata
+      spec:
+        accessModes: [ "ReadWriteOnce" ]
+        {{- if .Values.telemetry.storage.storageClassName }}
+        storageClassName: {{ .Values.telemetry.storage.storageClassName | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.telemetry.storage.size | quote }}
+{{- end }}
