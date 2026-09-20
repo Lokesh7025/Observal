@@ -5,7 +5,7 @@
 
 Supports:
   - PostgreSQL: pg_dump (custom format) via Docker exec
-  - ClickHouse: schema export via HTTP
+  - Telemetry store: online DuckDB snapshot copied out of the telemetry container
   - Backup retention pruning
 """
 
@@ -25,7 +25,7 @@ DEFAULT_RETENTION = 3  # Keep last N backups
 
 
 def create_backup(compose_dir: Path, from_version: str) -> Path:
-    """Create a pre-upgrade backup of PostgreSQL + ClickHouse.
+    """Create a pre-upgrade backup of PostgreSQL + the telemetry store.
 
     Args:
         compose_dir: Directory containing docker-compose.yml.
@@ -75,34 +75,52 @@ def create_backup(compose_dir: Path, from_version: str) -> Path:
     pg_size_mb = pg_dump_path.stat().st_size / (1024 * 1024)
     rprint(f"[dim]  PostgreSQL: {pg_size_mb:.1f} MB[/dim]")
 
-    # ClickHouse schema export
-    ch_schema_path = backup_dir / "clickhouse_schema.sql"
-    rprint("[dim]  Backing up ClickHouse schema...[/dim]")
+    # Telemetry store snapshot: the store copies its database while online
+    # (snapshot-consistent), then we pull the file out of the container.
+    telemetry_path = backup_dir / "telemetry.duckdb"
+    rprint("[dim]  Backing up telemetry store...[/dim]")
     try:
+        snapshot = f"/data/telemetry/backups/pre-upgrade-{ts}.duckdb"
         result = subprocess.run(
             [
                 "docker",
                 "compose",
                 "exec",
                 "-T",
-                "observal-clickhouse",
-                "clickhouse-client",
-                "--query",
-                "SELECT name, create_table_query FROM system.tables WHERE database = 'observal'",
+                "observal-telemetry",
+                "/app/.venv/bin/python",
+                "-m",
+                "telemetry_store.backup",
+                snapshot,
             ],
             capture_output=True,
             text=True,
             cwd=compose_dir,
-            timeout=60,
+            timeout=1800,
         )
         if result.returncode == 0:
-            ch_schema_path.write_text(result.stdout)
-            ch_schema_path.chmod(0o600)
-            rprint(f"[dim]  ClickHouse schema: {len(result.stdout)} bytes[/dim]")
+            copy = subprocess.run(
+                ["docker", "compose", "cp", f"observal-telemetry:{snapshot}", str(telemetry_path)],
+                capture_output=True,
+                text=True,
+                cwd=compose_dir,
+                timeout=1800,
+            )
+            subprocess.run(
+                ["docker", "compose", "exec", "-T", "observal-telemetry", "rm", "-f", snapshot],
+                capture_output=True,
+                cwd=compose_dir,
+                timeout=60,
+            )
+            if copy.returncode == 0 and telemetry_path.exists():
+                telemetry_path.chmod(0o600)
+                rprint(f"[dim]  Telemetry store: {telemetry_path.stat().st_size / (1024 * 1024):.1f} MB[/dim]")
+            else:
+                rprint("[yellow]  Telemetry snapshot copy failed (non-critical)[/yellow]")
         else:
-            rprint("[yellow]  ClickHouse schema export failed (non-critical)[/yellow]")
+            rprint("[yellow]  Telemetry snapshot failed (non-critical)[/yellow]")
     except (subprocess.TimeoutExpired, OSError):
-        rprint("[yellow]  ClickHouse schema export timed out (non-critical)[/yellow]")
+        rprint("[yellow]  Telemetry snapshot timed out (non-critical)[/yellow]")
 
     return backup_dir
 
@@ -189,7 +207,7 @@ def list_backups() -> list[dict]:
                 "size_bytes": size_bytes,
                 "size_mb": round(size_bytes / (1024 * 1024), 1),
                 "has_pg": pg_dump.exists(),
-                "has_ch": (path / "clickhouse_schema.sql").exists(),
+                "has_telemetry": (path / "telemetry.duckdb").exists(),
             }
         )
     return results

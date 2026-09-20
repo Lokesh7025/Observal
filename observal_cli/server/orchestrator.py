@@ -3,7 +3,7 @@
 
 """Process orchestrator for embedded Observal services.
 
-Manages PostgreSQL, ClickHouse, and Redis as local subprocesses, then
+Manages PostgreSQL, the DuckDB telemetry store, and Redis as local subprocesses, then
 starts the FastAPI application server. Handles startup ordering,
 health checks, initialization, and graceful shutdown.
 """
@@ -11,6 +11,7 @@ health checks, initialization, and graceful shutdown.
 from __future__ import annotations
 
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -24,20 +25,22 @@ from rich.console import Console
 from observal_cli.server.config_gen import (
     ensure_dirs,
     generate_all_configs,
+    generate_legacy_clickhouse_config,
     generate_pg_hba_conf,
     generate_secret,
 )
 from observal_cli.server.constants import (
     API_PORT,
-    CLICKHOUSE_HTTP_PORT,
     CONFIG_DIR,
     DATA_DIR,
     KEYS_DIR,
+    LEGACY_CLICKHOUSE_HTTP_PORT,
     LOG_DIR,
     OBSERVAL_HOME,
     POSTGRES_PORT,
     REDIS_PORT,
     RUN_DIR,
+    TELEMETRY_PORT,
     get_bin_paths,
     get_data_paths,
     get_pid_paths,
@@ -89,6 +92,7 @@ class Orchestrator:
         for key, length in [
             ("POSTGRES_PASSWORD", 24),
             ("SECRET_KEY", 32),
+            ("TELEMETRY_TOKEN", 32),
         ]:
             if key not in secrets:
                 secrets[key] = generate_secret(length)
@@ -121,7 +125,8 @@ class Orchestrator:
         env.update(
             {
                 "DATABASE_URL": f"postgresql+asyncpg://observal@127.0.0.1:{POSTGRES_PORT}/observal",
-                "CLICKHOUSE_URL": f"clickhouse://default@127.0.0.1:{CLICKHOUSE_HTTP_PORT}/observal",
+                "TELEMETRY_URL": f"http://127.0.0.1:{TELEMETRY_PORT}",
+                "TELEMETRY_TOKEN": self._secrets["TELEMETRY_TOKEN"],
                 "REDIS_URL": f"redis://127.0.0.1:{REDIS_PORT}",
                 "SECRET_KEY": self._secrets["SECRET_KEY"],
                 "JWT_KEY_DIR": str(KEYS_DIR),
@@ -163,7 +168,7 @@ class Orchestrator:
             raise ServiceError(f"initdb failed:\n{result.stderr}")
 
         # Write our custom postgresql.conf
-        generate_all_configs()
+        generate_all_configs(self._telemetry_token())
         # Copy the generated conf into the data dir
         custom_conf = CONFIG_DIR / "postgresql.conf"
         target_conf = data_dir / "postgresql.conf"
@@ -276,72 +281,55 @@ class Orchestrator:
             capture_output=True,
         )
 
-    # ── ClickHouse ─────────────────────────────────────────────
+    # ── Telemetry store (DuckDB) ───────────────────────────────
 
-    def start_clickhouse(self) -> None:
-        """Start ClickHouse server."""
-        config_path = CONFIG_DIR / "clickhouse-config.xml"
-        if not config_path.exists():
-            generate_all_configs()
+    def _telemetry_token(self) -> str:
+        if self._secrets is None:
+            self._secrets = self._load_or_create_secrets()
+        return self._secrets["TELEMETRY_TOKEN"]
 
-        # Ensure data subdirs exist
-        ch_data = self.data["clickhouse"]
-        for subdir in ("tmp", "user_files", "format_schemas"):
-            (ch_data / subdir).mkdir(parents=True, exist_ok=True)
+    def _telemetry_env(self) -> dict[str, str]:
+        env_path = CONFIG_DIR / "telemetry.env"
+        if not env_path.exists():
+            generate_all_configs(self._telemetry_token())
+        env = os.environ.copy()
+        for line in env_path.read_text().splitlines():
+            if "=" in line and not line.startswith("#"):
+                key, value = line.split("=", 1)
+                env[key.strip()] = value.strip()
+        return env
 
-        console.print("[blue]==>[/blue] Starting ClickHouse...")
-        optic.info("starting ClickHouse")
+    def start_telemetry(self) -> None:
+        """Start the single-writer DuckDB telemetry store."""
+        self.data["telemetry"].mkdir(parents=True, exist_ok=True)
+        env = self._telemetry_env()
+        server_dir = self._find_server_dir()
+        python = self._find_python()
 
-        log_handle = (LOG_DIR / "clickhouse-startup.log").open("w")
+        console.print("[blue]==>[/blue] Starting telemetry store...")
+        optic.info("starting telemetry store")
+
+        log_handle = (LOG_DIR / "telemetry-startup.log").open("w")
         self._log_handles.append(log_handle)
         proc = subprocess.Popen(
-            [
-                str(self.bins["clickhouse"]),
-                "server",
-                "--config-file",
-                str(config_path),
-                "--pid-file",
-                str(self.pids["clickhouse"]),
-            ],
+            [python, "-m", "telemetry_store"],
+            cwd=str(server_dir),
+            env=env,
             stdout=log_handle,
             stderr=subprocess.STDOUT,
             start_new_session=True,
         )
-        self._processes["clickhouse"] = proc
+        self._processes["telemetry"] = proc
+        self.pids["telemetry"].write_text(str(proc.pid))
+        self._check_immediate_death(proc, "telemetry")
+        self._wait_for_telemetry()
+        console.print("[green]\u2713[/green] Telemetry store ready")
+        optic.info("telemetry store is ready")
 
-        # Write PID
-        self.pids["clickhouse"].write_text(str(proc.pid))
-
-        # Fail fast if process died on launch
-        self._check_immediate_death(proc, "clickhouse")
-
-        # Wait for healthy
-        self._wait_for_clickhouse()
-
-        # Create the 'observal' database (required before app can connect)
-        self._ensure_clickhouse_database()
-
-        console.print("[green]\u2713[/green] ClickHouse ready")
-        optic.info("ClickHouse is ready")
-
-    def _ensure_clickhouse_database(self) -> None:
-        """Create the 'observal' database in ClickHouse if it doesn't exist."""
-        url = f"http://127.0.0.1:{CLICKHOUSE_HTTP_PORT}/"
-        try:
-            resp = httpx.post(
-                url,
-                content="CREATE DATABASE IF NOT EXISTS observal",
-                timeout=10,
-            )
-            if resp.status_code != 200:
-                console.print(f"[yellow]Warning:[/yellow] ClickHouse CREATE DATABASE returned {resp.status_code}")
-        except httpx.ConnectError:
-            raise ServiceError("ClickHouse became unreachable while creating database")
-
-    def _wait_for_clickhouse(self, timeout: int = 30) -> None:
-        """Wait for ClickHouse HTTP endpoint to respond."""
+    def _wait_for_telemetry(self, timeout: int = 60) -> None:
+        """Wait for the telemetry store health endpoint to respond."""
         deadline = time.time() + timeout
-        url = f"http://127.0.0.1:{CLICKHOUSE_HTTP_PORT}/ping"
+        url = f"http://127.0.0.1:{TELEMETRY_PORT}/v1/health"
         while time.time() < deadline:
             try:
                 resp = httpx.get(url, timeout=2)
@@ -351,18 +339,16 @@ class Orchestrator:
                 pass
             time.sleep(0.5)
         raise ServiceError(
-            f"ClickHouse did not become ready within {timeout}s. Check logs: {LOG_DIR / 'clickhouse-startup.log'}"
+            f"Telemetry store did not become ready within {timeout}s. Check logs: {LOG_DIR / 'telemetry-startup.log'}"
         )
 
-    def stop_clickhouse(self) -> None:
-        """Stop ClickHouse server."""
-        pid_file = self.pids["clickhouse"]
+    def _stop_pid(self, service: str) -> None:
+        pid_file = self.pids[service]
         if pid_file.exists():
             try:
                 pid = int(pid_file.read_text().strip())
                 os.kill(pid, signal.SIGTERM)
-                # Wait for exit
-                for _ in range(20):
+                for _ in range(40):
                     try:
                         os.kill(pid, 0)
                         time.sleep(0.5)
@@ -374,13 +360,90 @@ class Orchestrator:
                 pass
             pid_file.unlink(missing_ok=True)
 
-        if "clickhouse" in self._processes:
-            proc = self._processes.pop("clickhouse")
+        if service in self._processes:
+            proc = self._processes.pop(service)
             proc.terminate()
             try:
-                proc.wait(timeout=10)
+                proc.wait(timeout=20)
             except subprocess.TimeoutExpired:
                 proc.kill()
+
+    def stop_telemetry(self) -> None:
+        """Stop the telemetry store (it checkpoints on shutdown)."""
+        self._stop_pid("telemetry")
+
+    # ── Legacy ClickHouse (cutover only) ───────────────────────
+
+    def has_legacy_clickhouse_data(self) -> bool:
+        data = self.data["legacy_clickhouse"]
+        return data.exists() and any(data.iterdir())
+
+    def start_legacy_clickhouse(self) -> str:
+        """Start the legacy ClickHouse data directory for the one-time cutover.
+
+        Returns the ClickHouse URL to pass to ``migrate telemetry-cutover``.
+        """
+        if not self.has_legacy_clickhouse_data():
+            raise ServiceError(f"No legacy ClickHouse data found at {self.data['legacy_clickhouse']}")
+        if not self.bins["legacy_clickhouse"].exists():
+            from observal_cli.server.deps import install_single
+
+            install_single("legacy_clickhouse")
+        config_path = generate_legacy_clickhouse_config()
+        ch_data = self.data["legacy_clickhouse"]
+        for subdir in ("tmp", "user_files", "format_schemas"):
+            (ch_data / subdir).mkdir(parents=True, exist_ok=True)
+
+        console.print("[blue]==>[/blue] Starting legacy ClickHouse for cutover...")
+        log_handle = (LOG_DIR / "clickhouse-startup.log").open("w")
+        self._log_handles.append(log_handle)
+        proc = subprocess.Popen(
+            [
+                str(self.bins["legacy_clickhouse"]),
+                "server",
+                "--config-file",
+                str(config_path),
+                "--pid-file",
+                str(self.pids["legacy_clickhouse"]),
+            ],
+            stdout=log_handle,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+        self._processes["legacy_clickhouse"] = proc
+        self.pids["legacy_clickhouse"].write_text(str(proc.pid))
+        self._check_immediate_death(proc, "clickhouse")
+
+        deadline = time.time() + 30
+        url = f"http://127.0.0.1:{LEGACY_CLICKHOUSE_HTTP_PORT}/ping"
+        while time.time() < deadline:
+            try:
+                if httpx.get(url, timeout=2).status_code == 200:
+                    break
+            except httpx.ConnectError:
+                pass
+            time.sleep(0.5)
+        else:
+            raise ServiceError("Legacy ClickHouse did not become ready within 30s")
+        console.print("[green]\u2713[/green] Legacy ClickHouse ready")
+        return f"clickhouse://default@127.0.0.1:{LEGACY_CLICKHOUSE_HTTP_PORT}/observal"
+
+    def stop_legacy_clickhouse(self) -> None:
+        self._stop_pid("legacy_clickhouse")
+
+    def retire_legacy_clickhouse(self, *, delete_volume: bool = False) -> dict[str, object]:
+        """Stop legacy ClickHouse and optionally delete its data directory and binary."""
+        self.stop_legacy_clickhouse()
+        data = self.data["legacy_clickhouse"]
+        result: dict[str, object] = {"stopped": True, "data_dir": str(data), "deleted": False}
+        if delete_volume and data.exists():
+            resolved = data.resolve()
+            if resolved.is_relative_to(DATA_DIR.resolve()):
+                shutil.rmtree(data)
+                result["deleted"] = True
+            self.bins["legacy_clickhouse"].unlink(missing_ok=True)
+            (CONFIG_DIR / "clickhouse-config.xml").unlink(missing_ok=True)
+        return result
 
     # ── Redis ──────────────────────────────────────────────────
 
@@ -388,7 +451,7 @@ class Orchestrator:
         """Start Redis server."""
         config_path = CONFIG_DIR / "redis.conf"
         if not config_path.exists():
-            generate_all_configs()
+            generate_all_configs(self._telemetry_token())
 
         console.print("[blue]==>[/blue] Starting Redis...")
         optic.info("starting Redis")
@@ -592,17 +655,14 @@ class Orchestrator:
         return not self._pg_is_initialized()
 
     def run_migrations(self) -> None:
-        """Apply PostgreSQL and ClickHouse migrations before API startup."""
+        """Apply PostgreSQL migrations before API startup (the telemetry store applies its own schema)."""
         env = self._build_env()
         server_dir = self._find_server_dir()
         python = self._find_python()
         if not (server_dir / "alembic.ini").exists():
             raise ServiceError(f"Cannot find Alembic configuration in {server_dir}")
 
-        commands = (
-            ([python, "-m", "alembic", "upgrade", "head"], "PostgreSQL"),
-            ([python, "-m", "services.clickhouse.migrations"], "ClickHouse"),
-        )
+        commands = (([python, "-m", "alembic", "upgrade", "head"], "PostgreSQL"),)
         for command, database in commands:
             console.print(f"[blue]==>[/blue] Running {database} migrations...")
             result = subprocess.run(
@@ -727,7 +787,7 @@ class Orchestrator:
 
         try:
             self.start_postgres()
-            self.start_clickhouse()
+            self.start_telemetry()
             self.start_redis()
 
             if first_run:
@@ -780,7 +840,8 @@ class Orchestrator:
         """Stop all services in reverse order."""
         self.stop_api()
         self.stop_redis()
-        self.stop_clickhouse()
+        self.stop_telemetry()
+        self.stop_legacy_clickhouse()
         self.stop_postgres()
 
         # Close any open log file handles
@@ -818,15 +879,20 @@ class Orchestrator:
         else:
             statuses["postgres"] = "not initialized"
 
-        # ClickHouse
+        # Telemetry store
         try:
-            resp = httpx.get(
-                f"http://127.0.0.1:{CLICKHOUSE_HTTP_PORT}/ping",
-                timeout=2,
-            )
-            statuses["clickhouse"] = "running" if resp.status_code == 200 else "stopped"
+            resp = httpx.get(f"http://127.0.0.1:{TELEMETRY_PORT}/v1/health", timeout=2)
+            statuses["telemetry"] = "running" if resp.status_code == 200 else "stopped"
         except httpx.ConnectError:
-            statuses["clickhouse"] = "stopped"
+            statuses["telemetry"] = "stopped"
+
+        # Legacy ClickHouse data awaiting cutover (informational)
+        if self.has_legacy_clickhouse_data():
+            try:
+                resp = httpx.get(f"http://127.0.0.1:{LEGACY_CLICKHOUSE_HTTP_PORT}/ping", timeout=2)
+                statuses["legacy_clickhouse"] = "running" if resp.status_code == 200 else "data present"
+            except httpx.ConnectError:
+                statuses["legacy_clickhouse"] = "data present"
 
         # Redis
         if self.bins["redis_cli"].exists():
@@ -866,8 +932,6 @@ class Orchestrator:
             self.stop_all()
 
         console.print("[yellow]==>[/yellow] Wiping data directories...")
-        import shutil
-
         data_root = DATA_DIR.resolve()
         for path in self.data.values():
             resolved = path.resolve()

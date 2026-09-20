@@ -22,7 +22,7 @@ class MigrationOperation(str, enum.Enum):
 
 class MigrationScope(str, enum.Enum):
     postgres = "postgres"
-    clickhouse = "clickhouse"
+    telemetry = "telemetry"
     both = "both"
 
 

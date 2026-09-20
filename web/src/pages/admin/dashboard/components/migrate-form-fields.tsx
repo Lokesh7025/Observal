@@ -21,9 +21,9 @@ export const ALL_SCOPE_OPTIONS: ScopeOption[] = [
 		description: "Users, agents, components, settings, reviews, and metadata.",
 	},
 	{
-		value: "clickhouse",
+		value: "telemetry",
 		title: "Telemetry data",
-		description: "Trace and span history stored in ClickHouse.",
+		description: "Session and trace history stored in the telemetry store.",
 	},
 	{
 		value: "both",
@@ -89,7 +89,7 @@ export function artifactSelectionError(files: File[], scope: MigrationScope): st
 	const hasRegistry = files.some((file) => isArchive(file) && !isTelemetryArtifact(file));
 	const hasTelemetry = files.some(isTelemetryArtifact);
 	if (scope === "postgres" && (!hasRegistry || hasTelemetry)) return "Select the PostgreSQL registry archive only.";
-	if (scope === "clickhouse" && (!hasTelemetry || hasRegistry)) return "Select telemetry artifacts only.";
+	if (scope === "telemetry" && (!hasTelemetry || hasRegistry)) return "Select telemetry artifacts only.";
 	if (scope === "both" && (!hasRegistry || !hasTelemetry)) {
 		return "Select both the PostgreSQL registry archive and the telemetry archive.";
 	}

@@ -73,11 +73,11 @@ def telemetry_export_result(path: Path) -> TelemetryExportResult:
 def telemetry_import_result() -> TelemetryImportResult:
     return TelemetryImportResult(
         migration_id="migration-ch",
-        tables_imported=2,
-        tables_skipped=["audit_log"],
-        rows_imported={"session_events": 1200, "security_events": 34},
+        tables_imported={"session_events": 1200, "security_events": 34},
+        rows_imported=1234,
+        failed_files=[],
         duration_seconds=5.25,
-        warnings=["partition already present"],
+        derived_rebuild={"sessions": 12},
     )
 
 
@@ -326,7 +326,7 @@ def test_postgres_validation_rejects_bad_checksums(tmp_path: Path, monkeypatch: 
     assert result.stdout == ""
 
 
-def test_clickhouse_url_requires_hostname(tmp_path: Path) -> None:
+def test_telemetry_url_requires_http_scheme(tmp_path: Path) -> None:
     source = tmp_path / "telemetry"
     source.mkdir()
 
@@ -336,8 +336,8 @@ def test_clickhouse_url_requires_hostname(tmp_path: Path) -> None:
             "server",
             "migrate",
             "import-telemetry",
-            "--clickhouse-url",
-            "clickhouse://",
+            "--telemetry-url",
+            "telemetry:8125",
             "--input-dir",
             str(source),
             "--output",
@@ -353,8 +353,9 @@ def test_clickhouse_url_requires_hostname(tmp_path: Path) -> None:
 def test_telemetry_export_requires_new_directory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     destination = tmp_path / "telemetry"
     destination.mkdir()
+    (destination / "stale.parquet").write_bytes(b"x")
     operation = AsyncMock()
-    monkeypatch.setattr(migrate, "export_ch", operation)
+    monkeypatch.setattr(migrate, "export_telemetry", operation)
 
     result = runner.invoke(
         app,
@@ -362,10 +363,8 @@ def test_telemetry_export_requires_new_directory(tmp_path: Path, monkeypatch: py
             "server",
             "migrate",
             "export-telemetry",
-            "--clickhouse-url",
-            "clickhouses://source/observal",
-            "--manifest",
-            str(tmp_path / "manifest.json"),
+            "--telemetry-url",
+            "http://telemetry:8125",
             "--output-dir",
             str(destination),
             "--output",
@@ -380,7 +379,7 @@ def test_telemetry_export_requires_new_directory(tmp_path: Path, monkeypatch: py
 def test_telemetry_export_json(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     destination = tmp_path / "telemetry"
     operation = AsyncMock(return_value=telemetry_export_result(destination))
-    monkeypatch.setattr(migrate, "export_ch", operation)
+    monkeypatch.setattr(migrate, "export_telemetry", operation)
 
     result = runner.invoke(
         app,
@@ -388,10 +387,8 @@ def test_telemetry_export_json(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
             "server",
             "migrate",
             "export-telemetry",
-            "--clickhouse-url",
-            "clickhouses://source/observal",
-            "--manifest",
-            str(tmp_path / "manifest.json"),
+            "--telemetry-url",
+            "http://telemetry:8125",
             "--output-dir",
             str(destination),
             "--output",
@@ -400,16 +397,17 @@ def test_telemetry_export_json(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
     )
 
     assert json.loads(result.stdout)["total_rows"] == 2500
-    assert isinstance(operation.await_args.args[3], migrate.NullProgressReporter)
+    assert isinstance(operation.await_args.args[2], migrate.NullProgressReporter)
+    assert operation.await_args.kwargs["migration_id"].startswith("export-")
 
 
 def test_telemetry_import_and_validation_json(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     source = tmp_path / "telemetry"
     source.mkdir()
-    monkeypatch.setattr(migrate, "import_ch", AsyncMock(return_value=telemetry_import_result()))
+    monkeypatch.setattr(migrate, "import_telemetry", AsyncMock(return_value=telemetry_import_result()))
     monkeypatch.setattr(
         migrate,
-        "validate_ch",
+        "validate_telemetry",
         AsyncMock(
             return_value=TelemetryValidationResult(
                 checksums_valid=True,
@@ -426,8 +424,8 @@ def test_telemetry_import_and_validation_json(tmp_path: Path, monkeypatch: pytes
             "server",
             "migrate",
             "import-telemetry",
-            "--clickhouse-url",
-            "clickhouses://target/observal",
+            "--telemetry-url",
+            "http://telemetry:8125",
             "--input-dir",
             str(source),
             "--output",
@@ -439,7 +437,7 @@ def test_telemetry_import_and_validation_json(tmp_path: Path, monkeypatch: pytes
         ["server", "migrate", "validate-telemetry", "--input-dir", str(source), "--output", "json"],
     )
 
-    assert json.loads(imported.stdout)["total_rows"] == 1234
+    assert json.loads(imported.stdout)["rows_imported"] == 1234
     validation = json.loads(validated.stdout)
     assert validation["row_count_mismatches"] == 1
     assert validation["orphan_groups"] == 1

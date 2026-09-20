@@ -3,8 +3,10 @@
 
 """Generate service configuration files for embedded mode.
 
-Creates minimal, locally-tuned configs for PostgreSQL, ClickHouse, and Redis
-that bind to 127.0.0.1 on non-standard ports.
+Creates minimal, locally-tuned configs for PostgreSQL, the telemetry store,
+and Redis that bind to 127.0.0.1 on non-standard ports. A legacy ClickHouse
+config is still generated on demand so the one-time cutover can start the old
+data directory.
 """
 
 from __future__ import annotations
@@ -17,13 +19,14 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 from observal_cli.server.constants import (
-    CLICKHOUSE_HTTP_PORT,
-    CLICKHOUSE_TCP_PORT,
     CONFIG_DIR,
+    LEGACY_CLICKHOUSE_HTTP_PORT,
+    LEGACY_CLICKHOUSE_TCP_PORT,
     LOG_DIR,
     POSTGRES_PORT,
     REDIS_PORT,
     RUN_DIR,
+    TELEMETRY_PORT,
     get_data_paths,
 )
 
@@ -100,13 +103,36 @@ def generate_pg_hba_conf() -> Path:
     return hba_path
 
 
-def generate_clickhouse_config() -> Path:
-    """Generate ClickHouse config for embedded mode.
+def generate_telemetry_env(token: str) -> Path:
+    """Write the telemetry store environment file for embedded mode.
+
+    Returns path to the generated env file. The store binds to loopback only.
+    """
+    env_path = CONFIG_DIR / "telemetry.env"
+    data_path = get_data_paths()["telemetry"]
+    content = dedent(f"""\
+        TELEMETRY_DB_PATH={data_path}/observal.duckdb
+        TELEMETRY_TEMP_DIR={data_path}/tmp
+        TELEMETRY_EXPORT_DIR={data_path}/exports
+        TELEMETRY_BIND=127.0.0.1:{TELEMETRY_PORT}
+        TELEMETRY_TOKEN={token}
+        TELEMETRY_MEMORY_LIMIT=1536MB
+        TELEMETRY_THREADS=4
+        TELEMETRY_READ_THREADS=4
+        TELEMETRY_QUERY_TIMEOUT_MS=30000
+    """)
+    env_path.write_text(content)
+    env_path.chmod(0o600)
+    return env_path
+
+
+def generate_legacy_clickhouse_config() -> Path:
+    """Generate the legacy ClickHouse config used only by the cutover.
 
     Returns path to the generated config file.
     """
     conf_path = CONFIG_DIR / "clickhouse-config.xml"
-    data_path = get_data_paths()["clickhouse"]
+    data_path = get_data_paths()["legacy_clickhouse"]
     log_path = LOG_DIR / "clickhouse.log"
     error_log_path = LOG_DIR / "clickhouse-error.log"
 
@@ -121,8 +147,8 @@ def generate_clickhouse_config() -> Path:
                 <count>3</count>
             </logger>
 
-            <http_port>{CLICKHOUSE_HTTP_PORT}</http_port>
-            <tcp_port>{CLICKHOUSE_TCP_PORT}</tcp_port>
+            <http_port>{LEGACY_CLICKHOUSE_HTTP_PORT}</http_port>
+            <tcp_port>{LEGACY_CLICKHOUSE_TCP_PORT}</tcp_port>
             <listen_host>127.0.0.1</listen_host>
 
             <path>{data_path}/</path>
@@ -217,7 +243,7 @@ def generate_redis_conf() -> Path:
     return conf_path
 
 
-def generate_all_configs() -> dict[str, Path]:
+def generate_all_configs(telemetry_token: str) -> dict[str, Path]:
     """Generate all service configurations.
 
     Returns dict mapping service name to config file path.
@@ -225,6 +251,6 @@ def generate_all_configs() -> dict[str, Path]:
     ensure_dirs()
     return {
         "postgres": generate_postgres_conf(),
-        "clickhouse": generate_clickhouse_config(),
+        "telemetry": generate_telemetry_env(telemetry_token),
         "redis": generate_redis_conf(),
     }

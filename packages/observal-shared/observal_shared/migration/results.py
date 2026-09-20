@@ -56,11 +56,11 @@ class TelemetryExportResult:
 @dataclass
 class TelemetryImportResult:
     migration_id: str
-    tables_imported: int
-    tables_skipped: list[str]
-    rows_imported: dict[str, int]
+    tables_imported: dict[str, int]
+    rows_imported: int
+    failed_files: list[str]
     duration_seconds: float
-    warnings: list[str] = field(default_factory=list)
+    derived_rebuild: dict = field(default_factory=dict)
 
 
 @dataclass

@@ -277,7 +277,7 @@ function fmtDuration(first?: string, last?: string): string {
 
 function toDate(ts: string): Date {
 	if (ts.endsWith("Z") || /[+-]\d{2}:\d{2}$/.test(ts)) return new Date(ts);
-	// ClickHouse returns DateTime64 as "YYYY-MM-DD HH:MM:SS.mmm" (space, no Z).
+	// The telemetry store returns timestamps as "YYYY-MM-DD HH:MM:SS.mmm" (space, no Z).
 	// Replace the space with T and append Z for valid ISO 8601 UTC parsing.
 	return new Date(ts.replace(" ", "T") + "Z");
 }

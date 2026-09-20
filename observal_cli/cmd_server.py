@@ -32,7 +32,7 @@ from observal_cli.server.constants import API_PORT, CONFIG_DIR, LOG_DIR, OBSERVA
 server_app = typer.Typer(
     name="server",
     help=(
-        "Manage the embedded Observal server (PostgreSQL + ClickHouse + Redis + API).\n\n"
+        "Manage the embedded Observal server (PostgreSQL + DuckDB telemetry store + Redis + API).\n\n"
         "Examples:\n"
         "  observal server status\n"
         "  observal server start\n"
@@ -237,19 +237,20 @@ def status(
         observal server status
         observal server status --output json
     """
-    from observal_cli.server.constants import CLICKHOUSE_HTTP_PORT, POSTGRES_PORT, REDIS_PORT
+    from observal_cli.server.constants import LEGACY_CLICKHOUSE_HTTP_PORT, POSTGRES_PORT, REDIS_PORT, TELEMETRY_PORT
     from observal_cli.server.orchestrator import Orchestrator
 
     orchestrator = Orchestrator()
     statuses = orchestrator.status()
     ports = {
         "postgres": POSTGRES_PORT,
-        "clickhouse": CLICKHOUSE_HTTP_PORT,
+        "telemetry": TELEMETRY_PORT,
         "redis": REDIS_PORT,
         "api": orchestrator.port,
+        "legacy_clickhouse": LEGACY_CLICKHOUSE_HTTP_PORT,
     }
     payload = {
-        "healthy": all(state == "running" for state in statuses.values()),
+        "healthy": all(state == "running" for service, state in statuses.items() if service != "legacy_clickhouse"),
         "services": [
             {"service": service, "status": state, "port": ports.get(service)} for service, state in statuses.items()
         ],
@@ -266,6 +267,7 @@ def status(
         "running": "[green]running[/green]",
         "stopped": "[red]stopped[/red]",
         "not initialized": "[dim]not initialized[/dim]",
+        "data present": "[yellow]data present (run: observal server migrate telemetry-cutover)[/yellow]",
     }
     for item in payload["services"]:
         table.add_row(
@@ -280,7 +282,7 @@ def status(
 def logs(
     service: str = typer.Argument(
         None,
-        help="Service to show logs for (postgres, clickhouse, redis, api). Default: all.",
+        help="Service to show logs for (postgres, telemetry, redis, api). Default: all.",
     ),
     follow: bool = typer.Option(False, "--follow", "-f", help="Follow log output"),
     lines: int = typer.Option(50, "--lines", "-n", min=1, help="Number of lines to show"),
@@ -299,7 +301,7 @@ def logs(
     """
     log_files = {
         "postgres": LOG_DIR / "postgres.log",
-        "clickhouse": LOG_DIR / "clickhouse-startup.log",
+        "telemetry": LOG_DIR / "telemetry-startup.log",
         "redis": LOG_DIR / "redis.log",
         "api": LOG_DIR / "api.log",
     }
@@ -317,7 +319,7 @@ def logs(
             "JSON log following requires one service.",
             operation="Follow embedded server logs",
             resource="service filter",
-            remediation="Provide postgres, clickhouse, redis, or api.",
+            remediation="Provide postgres, telemetry, redis, or api.",
         )
 
     selected = [log_files[service]] if service else [path for path in log_files.values() if path.exists()]
@@ -403,7 +405,7 @@ def install(
             detail=repr(error),
         )
     if _is_json(output):
-        output_json({"status": "installed", "services": ["postgres", "clickhouse", "redis"], "refreshed": upgrade})
+        output_json({"status": "installed", "services": ["postgres", "redis"], "refreshed": upgrade})
     else:
         console.print("\n[green]✓[/green] All dependencies installed")
         console.print("  Run [cyan]observal server start[/cyan] to start the server")
@@ -438,7 +440,53 @@ def reset(
     with _quiet_output(output):
         Orchestrator().reset()
     if _is_json(output):
-        output_json({"status": "reset", "deleted": ["postgres", "clickhouse", "redis", "generated secrets"]})
+        output_json({"status": "reset", "deleted": ["postgres", "telemetry", "redis", "generated secrets"]})
+
+
+@server_app.command(name="retire-clickhouse")
+def retire_clickhouse(
+    delete_volume: bool = typer.Option(
+        False, "--delete-volume", help="Also delete the legacy ClickHouse data directory (irreversible)"
+    ),
+    force: bool = typer.Option(False, "--force", "-f", help="Skip confirmation prompt"),
+    output: Annotated[
+        OutputMode, typer.Option("--output", "-o", help="Output format: table or json")
+    ] = OutputMode.table,
+) -> None:
+    """Stop the legacy ClickHouse process after a verified telemetry cutover.
+
+    The ClickHouse data directory is kept unless --delete-volume is given, so a
+    rollback to a pre-DuckDB release stays possible until you decide otherwise.
+
+    Examples:
+        observal server retire-clickhouse
+        observal server retire-clickhouse --delete-volume --force --output json
+    """
+    from observal_cli.server.orchestrator import Orchestrator
+
+    orchestrator = Orchestrator()
+    if delete_volume:
+        if _is_json(output) and not force:
+            fail(
+                ErrorCategory.VALIDATION,
+                "JSON volume deletion requires explicit confirmation.",
+                operation="Retire legacy ClickHouse",
+                resource=str(orchestrator.data["legacy_clickhouse"]),
+                remediation="Pass --force and retry.",
+            )
+        if not force and not typer.confirm("Delete the legacy ClickHouse data directory? This cannot be undone."):
+            raise typer.Abort()
+
+    with _quiet_output(output):
+        result = orchestrator.retire_legacy_clickhouse(delete_volume=delete_volume)
+    if _is_json(output):
+        output_json({"status": "retired", **result})
+        return
+    console.print("[green]✓[/green] Legacy ClickHouse stopped")
+    if result["deleted"]:
+        console.print(f"[yellow]Deleted[/yellow] {result['data_dir']}")
+    else:
+        console.print(f"[dim]Data kept at {result['data_dir']} (delete with --delete-volume)[/dim]")
 
 
 @server_app.command()
@@ -453,7 +501,7 @@ def config(
         observal server config
         observal server config --output json
     """
-    from observal_cli.server.constants import CLICKHOUSE_HTTP_PORT, POSTGRES_PORT, REDIS_PORT
+    from observal_cli.server.constants import POSTGRES_PORT, REDIS_PORT, TELEMETRY_PORT
 
     config_file = OBSERVAL_HOME / "observal.yaml"
     payload = {
@@ -462,7 +510,7 @@ def config(
         "ports": {
             "api": API_PORT,
             "postgres": POSTGRES_PORT,
-            "clickhouse": CLICKHOUSE_HTTP_PORT,
+            "telemetry": TELEMETRY_PORT,
             "redis": REDIS_PORT,
         },
         "config_directory": str(CONFIG_DIR),
@@ -955,14 +1003,14 @@ def _server_rollback(from_backup: str | None, force: bool) -> dict:
                 remediation="Inspect Docker Compose logs before taking further action.",
             )
         console.print(f"[green]✓ Rolled back to v{prev_version}[/green]")
-        console.print("[yellow]ClickHouse telemetry was not restored.[/yellow]")
+        console.print("[yellow]The telemetry store was not restored; use its backup file if needed.[/yellow]")
         return {
             "status": "rolled_back",
             "from_version": current,
             "to_version": prev_version,
             "backup": str(backup_dir),
             "postgres_restored": True,
-            "clickhouse_restored": False,
+            "telemetry_restored": False,
             "healthy": True,
         }
     finally:

@@ -621,7 +621,7 @@ export interface ExecAIInsightsResponse {
 // ── Migration ───────────────────────────────────────────────────────
 
 export type MigrationOperation = "export" | "import" | "validate";
-export type MigrationScope = "postgres" | "clickhouse" | "both";
+export type MigrationScope = "postgres" | "telemetry" | "both";
 export type MigrationStatus = "queued" | "running" | "completed" | "failed";
 
 export interface MigrationArtifactMeta {

@@ -24,6 +24,7 @@ def make_settings(tmp_path: Path, **overrides) -> TelemetrySettings:
     base = dict(
         db_path=tmp_path / "telemetry.duckdb",
         temp_dir=tmp_path / "tmp",
+        export_dir=tmp_path / "exports",
         token=TOKEN,
         memory_limit="512MB",
         threads=2,

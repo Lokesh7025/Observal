@@ -31,6 +31,7 @@ async def telemetry(tmp_path):
     settings = TelemetrySettings(
         db_path=tmp_path / "telemetry.duckdb",
         temp_dir=tmp_path / "tmp",
+        export_dir=tmp_path / "exports",
         token="test-token",
         memory_limit="512MB",
         threads=2,

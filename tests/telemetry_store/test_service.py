@@ -518,7 +518,7 @@ async def test_export_parquet_with_manifest(store, event_row, tmp_path: Path):
     assert r.status_code == 202
     job = await _wait_job(store, r.json()["id"])
     assert job["state"] == "done", job
-    manifest = (dest / "manifest.json").read_text()
+    manifest = (dest / "telemetry_manifest.json").read_text()
     assert '"session_events-00000"' in manifest
     files = list((dest / "session_events").glob("*.parquet"))
     assert len(files) == 1

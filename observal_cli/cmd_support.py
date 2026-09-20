@@ -427,11 +427,12 @@ def bundle(
                 alembic_data = {"current_revision": redacted_versions.get("alembic_revision", "unknown")}
                 files["versions/alembic.json"] = json.dumps(alembic_data, indent=2).encode("utf-8")
 
-                ch_data = {
-                    "server_version": redacted_versions.get("clickhouse_version", "unknown"),
-                    "tables": redacted_versions.get("clickhouse_tables", []),
+                telemetry_data = {
+                    "server_version": redacted_versions.get("telemetry_version", "unknown"),
+                    "schema_version": redacted_versions.get("telemetry_schema_version", "unknown"),
+                    "tables": redacted_versions.get("telemetry_tables", []),
                 }
-                files["versions/clickhouse.json"] = json.dumps(ch_data, indent=2).encode("utf-8")
+                files["versions/telemetry.json"] = json.dumps(telemetry_data, indent=2).encode("utf-8")
             continue
 
         if result.name == "health":

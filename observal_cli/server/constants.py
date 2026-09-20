@@ -24,16 +24,21 @@ KEYS_DIR = OBSERVAL_HOME / "keys"
 # ── Service ports (non-standard to avoid conflicts) ─────────────
 
 POSTGRES_PORT = 5480
-CLICKHOUSE_HTTP_PORT = 8124
-CLICKHOUSE_TCP_PORT = 9100
+TELEMETRY_PORT = 8125
 REDIS_PORT = 6380
 API_PORT = 8000
+
+# Legacy ClickHouse ports: only used to start the old data directory for the
+# one-time cutover (``observal server migrate telemetry-cutover``).
+LEGACY_CLICKHOUSE_HTTP_PORT = 8124
+LEGACY_CLICKHOUSE_TCP_PORT = 9100
 
 # ── Dependency versions ────────────────────────────────────────
 
 POSTGRES_VERSION = "18"
-CLICKHOUSE_VERSION = "26.4"
 REDIS_VERSION = "8.0"
+#: Only downloaded on demand for the legacy cutover.
+LEGACY_CLICKHOUSE_VERSION = "26.4"
 
 # ── GitHub repo for downloads ──────────────────────────────────
 
@@ -78,15 +83,19 @@ def get_dep_urls() -> dict[str, str]:
 
     base = f"https://github.com/{GITHUB_REPO}/releases/download/{DEPS_RELEASE_TAG}"
 
-    # ClickHouse uses different naming
-    ch_arch = "amd64" if arch == "x64" else "aarch64"
-    ch_os = "linux" if os_name == "linux" else "macos"
-
     return {
         "postgres": f"{base}/pg-{os_name}-{arch}.tar.gz",
-        "clickhouse": f"{base}/clickhouse-{ch_os}-{ch_arch}.tar.gz",
         "redis": f"{base}/redis-{os_name}-{arch}.tar.gz",
     }
+
+
+def get_legacy_clickhouse_url() -> str:
+    """Download URL for the legacy ClickHouse binary (cutover only)."""
+    os_name, arch = detect_platform()
+    base = f"https://github.com/{GITHUB_REPO}/releases/download/{DEPS_RELEASE_TAG}"
+    ch_arch = "amd64" if arch == "x64" else "aarch64"
+    ch_os = "linux" if os_name == "linux" else "macos"
+    return f"{base}/clickhouse-{ch_os}-{ch_arch}.tar.gz"
 
 
 # ── Service binary paths ──────────────────────────────────────
@@ -100,8 +109,9 @@ def get_bin_paths() -> dict[str, Path]:
         "pg_ctl": BIN_DIR / "pg_ctl",
         "pg_isready": BIN_DIR / "pg_isready",
         "createdb": BIN_DIR / "createdb",
-        "clickhouse": BIN_DIR / "clickhouse",
         "redis_server": BIN_DIR / "redis-server",
+        # Present only when a legacy install downloaded it for the cutover.
+        "legacy_clickhouse": BIN_DIR / "clickhouse",
         "redis_cli": BIN_DIR / "redis-cli",
     }
 
@@ -113,9 +123,10 @@ def get_pid_paths() -> dict[str, Path]:
     """Get PID file paths for each service."""
     return {
         "postgres": RUN_DIR / "postgres.pid",
-        "clickhouse": RUN_DIR / "clickhouse.pid",
+        "telemetry": RUN_DIR / "telemetry.pid",
         "redis": RUN_DIR / "redis.pid",
         "api": RUN_DIR / "api.pid",
+        "legacy_clickhouse": RUN_DIR / "clickhouse.pid",
     }
 
 
@@ -126,6 +137,8 @@ def get_data_paths() -> dict[str, Path]:
     """Get data directory paths for each service."""
     return {
         "postgres": DATA_DIR / "pg",
-        "clickhouse": DATA_DIR / "ch",
+        "telemetry": DATA_DIR / "telemetry",
         "redis": DATA_DIR / "redis",
+        # Legacy ClickHouse data directory; kept until ``retire-clickhouse --delete-volume``.
+        "legacy_clickhouse": DATA_DIR / "ch",
     }

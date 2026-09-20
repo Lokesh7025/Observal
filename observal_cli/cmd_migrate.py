@@ -5,7 +5,7 @@
 # SPDX-FileCopyrightText: 2026 Shaan Narendran <shaannaren06@gmail.com>
 # SPDX-License-Identifier: Apache-2.0
 
-"""Portable PostgreSQL and ClickHouse migration commands.
+"""Portable PostgreSQL and telemetry migration commands.
 
 This module provides the CLI commands for data migration. All core logic is
 delegated to the shared `observal_shared.migration` package. This module handles
@@ -38,16 +38,19 @@ from observal_shared.migration import (
     MigrationError,
     PgConnParams,
     PrerequisiteError,
+    TelemetryConnParams,
     TelemetryExportResult,
     TelemetryImportResult,
     TelemetryValidationResult,
     ValidationResult,
-    export_ch,
     export_pg,
-    import_ch,
+    export_telemetry,
     import_pg,
-    validate_ch,
+    import_telemetry,
+    reverse_cutover,
+    run_cutover,
     validate_pg,
+    validate_telemetry,
 )
 from observal_shared.migration.connections import parse_clickhouse_url
 from observal_shared.migration.constants import _UUID_RE  # noqa: F401, re-exported for backward compat
@@ -162,14 +165,34 @@ def _warn_clickhouse_cleartext(url: str, output: OutputMode) -> None:
 
 migrate_app = typer.Typer(
     help=(
-        "Portable PostgreSQL and ClickHouse migration tools\n\n"
+        "Portable PostgreSQL and telemetry migration tools\n\n"
         "Examples:\n"
         "  observal server migrate export --db-url postgresql://localhost/observal --file backup.tar.gz\n"
         "  observal server migrate validate --archive backup.tar.gz --output json\n"
-        "  observal server migrate export-telemetry "
-        "--clickhouse-url clickhouses://localhost/observal "
-        "--manifest ./migration_manifest.json --output-dir ./telemetry-export"
+        "  observal server migrate export-telemetry --telemetry-url http://localhost:8125 --output-dir ./telemetry\n"
+        "  observal server migrate telemetry-cutover --clickhouse-url clickhouse://localhost:8123/observal "
+        "--telemetry-url http://localhost:8125 --artifact-dir ./cutover"
     )
+)
+
+
+def _telemetry_params(url: str, token: str | None) -> TelemetryConnParams:
+    if not url.startswith(("http://", "https://")):
+        fail(
+            ErrorCategory.VALIDATION,
+            "The telemetry store URL is invalid.",
+            operation="Validate telemetry connection",
+            resource="Telemetry URL",
+            remediation="Provide an http:// or https:// URL for the telemetry store and retry.",
+        )
+    return TelemetryConnParams(url=url, token=token or "")
+
+
+_TELEMETRY_URL_OPTION = typer.Option(
+    ..., "--telemetry-url", envvar="TELEMETRY_URL", show_envvar=True, help="Telemetry store base URL"
+)
+_TELEMETRY_TOKEN_OPTION = typer.Option(
+    None, "--telemetry-token", envvar="TELEMETRY_TOKEN", show_envvar=True, help="Telemetry store bearer token"
 )
 
 
@@ -424,46 +447,50 @@ def validate_cmd(
 
 @migrate_app.command("export-telemetry")
 def export_telemetry_cmd(
-    clickhouse_url: str = typer.Option(
-        ..., "--clickhouse-url", envvar="CLICKHOUSE_URL", show_envvar=True, help="Source ClickHouse connection string"
-    ),
-    manifest: str = typer.Option(..., "--manifest", help="Path to Phase 1 migration_manifest.json"),
+    telemetry_url: str = _TELEMETRY_URL_OPTION,
+    telemetry_token: str | None = _TELEMETRY_TOKEN_OPTION,
     output_dir: str = typer.Option(..., "--output-dir", help="New directory for exported Parquet files"),
+    migration_id: str | None = typer.Option(None, "--migration-id", help="Identifier recorded in the manifest"),
+    since: str | None = typer.Option(
+        None, "--since", help="Only export rows written after this UTC timestamp (YYYY-MM-DD HH:MM:SS)"
+    ),
     output: Annotated[
         OutputMode, typer.Option("--output", "-o", help="Output format: table or json")
     ] = OutputMode.table,
 ) -> None:
-    """Export ClickHouse telemetry data to Parquet files.
+    """Export telemetry store data to checksummed Parquet files.
 
-    Phase 2 of migration: exports session, audit, security, and webhook telemetry
-    tables as bounded, resumable Parquet chunks. Requires a completed Phase 1 export
-    (the migration_manifest.json produced by 'observal server migrate export').
-
-    Uses a time cutoff recorded at export start for consistency. The output
-    directory must not already exist.
+    The export runs as a job inside the telemetry store (no interactive
+    timeout); chunks are downloaded and verified against the manifest.
 
     Examples:
-        observal server migrate export-telemetry --clickhouse-url clickhouses://localhost/observal --manifest ./migration_manifest.json --output-dir ./telemetry-export
+        observal server migrate export-telemetry --telemetry-url http://localhost:8125 --output-dir ./telemetry-export
     """
     _require_pyarrow()
     destination = Path(output_dir).expanduser()
-    if destination.exists():
+    if destination.exists() and any(destination.iterdir()):
         fail(
             ErrorCategory.CONFLICT,
-            "The telemetry export directory already exists.",
-            operation="Export ClickHouse telemetry",
+            "The telemetry export directory already exists and is not empty.",
+            operation="Export telemetry",
             resource=str(destination),
             remediation="Choose a new --output-dir so failed exports can be cleaned safely.",
         )
-    _warn_clickhouse_cleartext(clickhouse_url, output)
+    params = _telemetry_params(telemetry_url, telemetry_token)
     if not _is_json(output):
         rprint(f"[bold]Exporting telemetry to:[/bold] {escape(str(destination))}")
     try:
         result: TelemetryExportResult = asyncio.run(
-            export_ch(ChConnParams(url=clickhouse_url), Path(manifest).expanduser(), destination, _reporter(output))
+            export_telemetry(
+                params,
+                destination,
+                _reporter(output),
+                migration_id=migration_id or f"export-{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}",
+                since=since,
+            )
         )
     except MigrationError as error:
-        _handle_migration_error(error, "Export ClickHouse telemetry")
+        _handle_migration_error(error, "Export telemetry")
 
     payload = {
         "directory": result.output_dir,
@@ -490,71 +517,62 @@ def export_telemetry_cmd(
 
 @migrate_app.command("import-telemetry")
 def import_telemetry_cmd(
-    clickhouse_url: str = typer.Option(
-        ...,
-        "--clickhouse-url",
-        envvar="TARGET_CLICKHOUSE_URL",
-        show_envvar=True,
-        help="Target ClickHouse connection string",
-    ),
-    input_dir: str = typer.Option(..., "--input-dir", help="Directory containing Parquet files"),
+    telemetry_url: str = _TELEMETRY_URL_OPTION,
+    telemetry_token: str | None = _TELEMETRY_TOKEN_OPTION,
+    input_dir: str = typer.Option(..., "--input-dir", help="Directory containing Parquet files and manifest"),
+    no_rebuild: bool = typer.Option(False, "--no-rebuild", help="Skip rebuilding session summaries and checkpoints"),
     output: Annotated[
         OutputMode, typer.Option("--output", "-o", help="Output format: table or json")
     ] = OutputMode.table,
 ) -> None:
-    """Import Parquet telemetry files into target ClickHouse.
+    """Import Parquet telemetry files into the telemetry store.
 
-    Phase 2 import: loads bounded Parquet chunks into the target ClickHouse.
-    Verifies checksums before importing and records completed chunk IDs and
-    checksums so interrupted imports can resume without skipping unrelated data.
+    Accepts exports from a telemetry store or from the legacy ClickHouse
+    exporter. Every chunk is verified and imported idempotently: re-running
+    after an interruption never duplicates rows. Derived tables (session
+    summaries and checkpoints) are rebuilt from the imported events.
 
     Examples:
-        observal server migrate import-telemetry --clickhouse-url clickhouses://localhost/observal --input-dir ./telemetry-export
-        observal server migrate import-telemetry --clickhouse-url clickhouses://localhost/observal --input-dir ./telemetry-export --output json
+        observal server migrate import-telemetry --telemetry-url http://localhost:8125 --input-dir ./telemetry-export
     """
     _require_pyarrow()
-    _warn_clickhouse_cleartext(clickhouse_url, output)
     input_path = Path(input_dir).expanduser()
     if not input_path.is_dir():
         fail(
             ErrorCategory.NOT_FOUND,
             "The telemetry migration directory was not found.",
-            operation="Import ClickHouse telemetry",
+            operation="Import telemetry",
             resource=str(input_path),
             remediation="Provide an existing telemetry export directory.",
         )
+    params = _telemetry_params(telemetry_url, telemetry_token)
     if not _is_json(output):
         rprint(f"[bold]Importing telemetry from:[/bold] {escape(str(input_path))}")
     try:
         result: TelemetryImportResult = asyncio.run(
-            import_ch(ChConnParams(url=clickhouse_url), input_path, _reporter(output))
+            import_telemetry(params, input_path, _reporter(output), rebuild=not no_rebuild)
         )
     except MigrationError as error:
-        _handle_migration_error(error, "Import ClickHouse telemetry")
+        _handle_migration_error(error, "Import telemetry")
 
     payload = {
         "migration_id": result.migration_id,
         "tables_imported": result.tables_imported,
-        "tables_skipped": result.tables_skipped,
         "rows_imported": result.rows_imported,
-        "total_rows": sum(result.rows_imported.values()),
+        "failed_files": result.failed_files,
+        "derived_rebuild": result.derived_rebuild,
         "duration_seconds": result.duration_seconds,
-        "warnings": result.warnings,
     }
     if _is_json(output):
         output_json(payload)
         return
     rprint("\n[bold green]✓ Telemetry import complete[/bold green]")
     rprint(f"  Migration:  {escape(result.migration_id)}")
-    rprint(f"  Tables:     {result.tables_imported}")
-    rprint(f"  Rows:       {payload['total_rows']:,}")
+    rprint(f"  Tables:     {', '.join(map(escape, sorted(result.tables_imported)))}")
+    rprint(f"  Rows:       {result.rows_imported:,}")
+    if result.derived_rebuild:
+        rprint(f"  Rebuilt:    {result.derived_rebuild.get('sessions', 0):,} session summaries")
     rprint(f"  Duration:   {result.duration_seconds:.1f}s")
-    if result.tables_skipped:
-        rprint(f"  Skipped:    {', '.join(map(escape, result.tables_skipped))}")
-    if result.warnings:
-        rprint("\n[yellow]Warnings:[/yellow]")
-        for warning in result.warnings:
-            rprint(f"  [yellow]⚠[/yellow]  {escape(warning)}")
 
 
 # ── Validate telemetry command ───────────────────────────
@@ -563,13 +581,14 @@ def import_telemetry_cmd(
 @migrate_app.command("validate-telemetry")
 def validate_telemetry_cmd(
     input_dir: str = typer.Option(..., "--input-dir", help="Directory containing Parquet files"),
-    clickhouse_url: str | None = typer.Option(
+    telemetry_url: str | None = typer.Option(
         None,
-        "--clickhouse-url",
-        envvar="TARGET_CLICKHOUSE_URL",
+        "--telemetry-url",
+        envvar="TELEMETRY_URL",
         show_envvar=True,
-        help="Target ClickHouse for row count comparison",
+        help="Telemetry store for row count comparison",
     ),
+    telemetry_token: str | None = _TELEMETRY_TOKEN_OPTION,
     target_db_url: str | None = typer.Option(
         None,
         "--target-db-url",
@@ -583,14 +602,13 @@ def validate_telemetry_cmd(
 ) -> None:
     """Validate telemetry Parquet files and optionally check FK references.
 
-    Verifies SHA-256 checksums for all Parquet files in the export directory.
-    Optionally compares row counts against a live ClickHouse instance and
-    checks foreign key references (agent_id, mcp_id, user_id) against
-    PostgreSQL to detect orphaned telemetry records.
+    Verifies SHA-256 checksums and row counts for every chunk. Optionally
+    compares table counts against a telemetry store and checks foreign key
+    references (agent_id, user_id) against PostgreSQL.
 
     Examples:
         observal server migrate validate-telemetry --input-dir ./telemetry-export
-        observal server migrate validate-telemetry --input-dir ./telemetry-export --output json
+        observal server migrate validate-telemetry --input-dir ./telemetry-export --telemetry-url http://localhost:8125
     """
     _require_pyarrow()
     input_path = Path(input_dir).expanduser()
@@ -598,36 +616,34 @@ def validate_telemetry_cmd(
         fail(
             ErrorCategory.NOT_FOUND,
             "The telemetry migration directory was not found.",
-            operation="Validate ClickHouse telemetry",
+            operation="Validate telemetry",
             resource=str(input_path),
             remediation="Provide an existing telemetry export directory.",
         )
-    if clickhouse_url:
-        _warn_clickhouse_cleartext(clickhouse_url, output)
     if not _is_json(output):
         rprint(f"[bold]Validating telemetry in:[/bold] {escape(str(input_path))}")
     try:
         result: TelemetryValidationResult = asyncio.run(
-            validate_ch(
-                ChConnParams(url=clickhouse_url) if clickhouse_url else None,
+            validate_telemetry(
+                _telemetry_params(telemetry_url, telemetry_token) if telemetry_url else None,
                 PgConnParams(dsn=target_db_url) if target_db_url else None,
                 input_path,
                 _reporter(output),
             )
         )
     except MigrationError as error:
-        _handle_migration_error(error, "Validate ClickHouse telemetry")
+        _handle_migration_error(error, "Validate telemetry")
 
     if not result.checksums_valid:
         fail(
             ErrorCategory.VALIDATION,
-            "ClickHouse telemetry checksum validation failed.",
-            operation="Validate ClickHouse telemetry",
+            "Telemetry checksum validation failed.",
+            operation="Validate telemetry",
             resource=str(input_path),
             remediation="Discard the export and create it again.",
         )
     row_counts = {
-        table: {"manifest_rows": counts[0], "database_rows": counts[1], "matches": counts[0] == counts[1]}
+        table: {"manifest_rows": counts[0], "database_rows": counts[1], "matches": counts[1] >= counts[0]}
         for table, counts in (result.row_count_results or {}).items()
     }
     orphan_groups = {
@@ -656,7 +672,7 @@ def validate_telemetry_cmd(
         rprint("\n[bold]Row count comparison:[/bold]")
         for table, item in row_counts.items():
             status = "[green]✓[/green]" if item["matches"] else "[yellow]≠[/yellow]"
-            rprint(f"  {status} {escape(table)}: manifest={item['manifest_rows']}, db={item['database_rows']}")
+            rprint(f"  {status} {escape(table)}: manifest={item['manifest_rows']}, store={item['database_rows']}")
     if result.fk_results:
         rprint("\n[bold]FK validation:[/bold]")
         for key, value in result.fk_results.items():
@@ -664,3 +680,108 @@ def validate_telemetry_cmd(
                 rprint(
                     f"  {'[yellow]⚠[/yellow]' if value else '[green]✓[/green]'} {escape(key)}: {len(value)} orphaned"
                 )
+
+
+# ── ClickHouse -> DuckDB cutover ─────────────────────────
+
+
+@migrate_app.command("telemetry-cutover")
+def telemetry_cutover_cmd(
+    clickhouse_url: str = typer.Option(
+        ...,
+        "--clickhouse-url",
+        envvar="CLICKHOUSE_URL",
+        show_envvar=True,
+        help="Legacy ClickHouse connection string (source)",
+    ),
+    telemetry_url: str = _TELEMETRY_URL_OPTION,
+    telemetry_token: str | None = _TELEMETRY_TOKEN_OPTION,
+    artifact_dir: str = typer.Option(..., "--artifact-dir", help="Directory for chunks, state, and verification"),
+    resume: bool = typer.Option(False, "--resume", help="Continue an interrupted cutover from its state file"),
+    verify_only: bool = typer.Option(False, "--verify-only", help="Re-run verification for a completed cutover"),
+    reverse: bool = typer.Option(
+        False, "--reverse", help="Export telemetry store rows (for loading back into ClickHouse on rollback)"
+    ),
+    since: str | None = typer.Option(None, "--since", help="With --reverse: only rows written after this timestamp"),
+    spot_check: int = typer.Option(100, "--spot-check", min=0, help="Sessions to compare event-by-event"),
+    output: Annotated[
+        OutputMode, typer.Option("--output", "-o", help="Output format: table or json")
+    ] = OutputMode.table,
+) -> None:
+    """Backfill a DuckDB telemetry store from a legacy ClickHouse installation.
+
+    Switch-then-backfill: the upgraded server already writes to the telemetry
+    store; this command copies ClickHouse history into it while ingest keeps
+    running. Steps: preflight, chunked export with checksums, idempotent import,
+    derived-table rebuild, then verification (row counts + per-session spot
+    checks). Nothing is deleted on either side; re-run with --resume after an
+    interruption. ClickHouse is retired separately with 'observal server
+    retire-clickhouse'.
+
+    Examples:
+        observal server migrate telemetry-cutover --clickhouse-url clickhouse://default:pw@localhost:8123/observal \\
+            --telemetry-url http://localhost:8125 --artifact-dir ./cutover
+        observal server migrate telemetry-cutover ... --artifact-dir ./cutover --resume
+        observal server migrate telemetry-cutover ... --artifact-dir ./cutover --reverse --since "2026-06-01 00:00:00"
+    """
+    _require_pyarrow()
+    _warn_clickhouse_cleartext(clickhouse_url, output)
+    params = _telemetry_params(telemetry_url, telemetry_token)
+    artifacts = Path(artifact_dir).expanduser()
+    ch = ChConnParams(url=clickhouse_url)
+
+    if reverse:
+        try:
+            result = asyncio.run(reverse_cutover(params, ch, artifacts, _reporter(output), since=since))
+        except MigrationError as error:
+            _handle_migration_error(error, "Reverse telemetry cutover")
+        if _is_json(output):
+            output_json(result)
+            return
+        rprint("\n[bold green]✓ Reverse export complete[/bold green]")
+        rprint(f"  Directory:  {escape(result['output_dir'])}")
+        rprint(f"  Rows:       {result['rows']:,}")
+        rprint(
+            "\nLoad the Parquet chunks into ClickHouse with "
+            "[bold]INSERT INTO <table> FORMAT Parquet[/bold] to complete the rollback."
+        )
+        return
+
+    if not _is_json(output):
+        rprint(f"[bold]Cutover artifacts:[/bold] {escape(str(artifacts))}")
+    try:
+        state = asyncio.run(
+            run_cutover(
+                ch,
+                params,
+                artifacts,
+                _reporter(output),
+                resume=resume,
+                verify_only=verify_only,
+                spot_check_sessions=spot_check,
+            )
+        )
+    except MigrationError as error:
+        _handle_migration_error(error, "Telemetry cutover")
+
+    payload = {
+        "migration_id": state.migration_id,
+        "phase": state.phase,
+        "source_counts": state.source_counts,
+        "verification": state.verification,
+        "verified_at": state.verified_at,
+    }
+    if _is_json(output):
+        output_json(payload)
+        return
+    rprint("\n[bold green]✓ Cutover complete and verified[/bold green]")
+    rprint(f"  Migration:  {escape(state.migration_id)}")
+    for table, count in state.source_counts.items():
+        target = state.verification.get("target_counts", {}).get(table, 0)
+        rprint(f"  {escape(table)}: source={count:,} store={target:,}")
+    spot = state.verification.get("spot_check", {})
+    rprint(f"  Spot check: {spot.get('sampled', 0)} sessions compared, {len(spot.get('mismatched', []))} mismatched")
+    rprint(
+        "\nClickHouse was not modified. When you are satisfied, run "
+        "[bold]observal server retire-clickhouse[/bold] to stop it."
+    )

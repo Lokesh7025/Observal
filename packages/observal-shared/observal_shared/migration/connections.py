@@ -25,8 +25,24 @@ class PgConnParams:
 
 
 @dataclass(frozen=True)
+class TelemetryConnParams:
+    """Telemetry store (DuckDB service) connection parameters."""
+
+    url: str
+    token: str = ""
+
+    @property
+    def base_url(self) -> str:
+        return self.url.rstrip("/")
+
+    @property
+    def headers(self) -> dict[str, str]:
+        return {"Authorization": f"Bearer {self.token}"} if self.token else {}
+
+
+@dataclass(frozen=True)
 class ChConnParams:
-    """ClickHouse connection parameters."""
+    """Legacy ClickHouse connection parameters (cutover source only)."""
 
     url: str  # original clickhouse:// or clickhouses:// URL
 
@@ -120,3 +136,19 @@ async def connect_ch(params: ChConnParams) -> None:
     except (httpx.HTTPStatusError, httpx.RequestError) as exc:
         optic.error("ClickHouse health check failed: {}", exc)
         raise ConnectionFailedError(f"ClickHouse connection failed: {exc}") from exc
+
+
+async def connect_telemetry(params: TelemetryConnParams) -> dict:
+    """Verify the telemetry store is reachable and return its health document."""
+    import httpx
+
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
+            resp = await client.get(f"{params.base_url}/v1/health", headers=params.headers)
+            resp.raise_for_status()
+            stats = await client.get(f"{params.base_url}/v1/stats", headers=params.headers)
+            stats.raise_for_status()
+            return {**resp.json(), "tables": stats.json().get("tables", {})}
+    except (httpx.HTTPStatusError, httpx.RequestError) as exc:
+        optic.error("telemetry store health check failed: {}", exc)
+        raise ConnectionFailedError(f"Telemetry store connection failed: {exc}") from exc

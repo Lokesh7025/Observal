@@ -21,7 +21,7 @@ const EXPORT_SCOPE_OPTIONS = [
 	{
 		value: "both" as const,
 		title: "Registry + telemetry",
-		description: "Full instance export with registry records and ClickHouse trace history.",
+		description: "Full instance export with registry records and telemetry trace history.",
 	},
 ];
 

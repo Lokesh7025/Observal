@@ -32,6 +32,7 @@ def _read_secret(name: str) -> str:
 class TelemetrySettings:
     db_path: Path
     temp_dir: Path
+    export_dir: Path
     token: str
     memory_limit: str
     threads: int
@@ -52,11 +53,13 @@ class TelemetrySettings:
     def from_env(cls) -> TelemetrySettings:
         db_path = Path(os.environ.get("TELEMETRY_DB_PATH", "/data/telemetry/observal.duckdb"))
         temp_dir = Path(os.environ.get("TELEMETRY_TEMP_DIR", str(db_path.parent / "tmp")))
+        export_dir = Path(os.environ.get("TELEMETRY_EXPORT_DIR", str(db_path.parent / "exports")))
         bind = os.environ.get("TELEMETRY_BIND", "0.0.0.0:8125")
         host, _, port = bind.rpartition(":")
         return cls(
             db_path=db_path,
             temp_dir=temp_dir,
+            export_dir=export_dir,
             token=_read_secret("TELEMETRY_TOKEN"),
             memory_limit=os.environ.get("TELEMETRY_MEMORY_LIMIT", "1536MB"),
             threads=_env_int("TELEMETRY_THREADS", 4),

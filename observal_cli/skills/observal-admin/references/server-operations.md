@@ -8,7 +8,7 @@
 - Service lifecycle
 - Upgrade and rollback
 - PostgreSQL migration
-- ClickHouse telemetry migration
+- Telemetry migration and ClickHouse cutover
 - Safety checks
 
 Local server commands use shell, filesystem, Docker, and database authority. API roles do not constrain that local authority.
@@ -41,7 +41,7 @@ observal server upgrade --version VERSION --force --output json
 observal server rollback --force --output json
 ```
 
-Rollback restores PostgreSQL and managed Docker image state, not ClickHouse telemetry. Verify service status and version after completion.
+Rollback restores PostgreSQL and managed Docker image state, not the telemetry store. Verify service status and version after completion.
 
 ## PostgreSQL migration
 
@@ -55,15 +55,29 @@ observal server migrate import --archive registry.tar.gz --output json
 
 Source commands read `DATABASE_URL`; target commands read `TARGET_DATABASE_URL`. Keep URLs out of output and logs. Never replace these commands with hand-written SQL.
 
-## ClickHouse telemetry migration
+## Telemetry migration
 
 ```bash
-observal server migrate export-telemetry --manifest registry.manifest.json --output-dir telemetry-export --output json
+observal server migrate export-telemetry --telemetry-url http://localhost:8125 --output-dir telemetry-export --output json
 observal server migrate validate-telemetry --input-dir telemetry-export --output json
-observal server migrate import-telemetry --input-dir telemetry-export --output json
+observal server migrate import-telemetry --telemetry-url http://localhost:8125 --input-dir telemetry-export --output json
 ```
 
-Source commands read `CLICKHOUSE_URL`; target commands read `TARGET_CLICKHOUSE_URL`. Export requires a new destination directory. Validate files and Registry references before import.
+Commands read `TELEMETRY_URL` and `TELEMETRY_TOKEN`. Export requires an empty destination directory. Import is idempotent and rebuilds session summaries afterwards. Validate files and Registry references before import.
+
+## ClickHouse cutover (existing installs)
+
+Upgraded servers write to the DuckDB telemetry store immediately; ClickHouse history is backfilled with:
+
+```bash
+observal server migrate telemetry-cutover --clickhouse-url clickhouse://default:PASSWORD@localhost:8123/observal \
+  --telemetry-url http://localhost:8125 --artifact-dir ./cutover --output json
+observal server migrate telemetry-cutover ... --artifact-dir ./cutover --resume     # continue after an interruption
+observal server migrate telemetry-cutover ... --artifact-dir ./cutover --verify-only
+observal server retire-clickhouse --output json                                     # stop ClickHouse, keep its volume
+```
+
+Nothing is deleted on either side. Run `retire-clickhouse --delete-volume` only after verification and an explicit operator confirmation.
 
 ## Safety checks
 

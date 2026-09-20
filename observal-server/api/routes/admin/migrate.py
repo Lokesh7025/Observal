@@ -109,7 +109,7 @@ async def _validate_upload_files(files: list[UploadFile], scope: MigrationScope)
 
     if scope == MigrationScope.postgres and (not has_pg_archive or has_telemetry):
         raise HTTPException(status_code=422, detail="Registry scope requires one PostgreSQL archive only")
-    if scope == MigrationScope.clickhouse and (not has_telemetry or has_pg_archive):
+    if scope == MigrationScope.telemetry and (not has_telemetry or has_pg_archive):
         raise HTTPException(status_code=422, detail="Telemetry scope requires telemetry artifacts only")
     if scope == MigrationScope.both and not (has_pg_archive and has_telemetry):
         raise HTTPException(
@@ -191,11 +191,11 @@ async def start_export(
     """Start a data export job."""
     optic.debug("migration export requested scope={}", body.scope.value)
 
-    # Reject clickhouse-only scope (Req 3.9)
-    if body.scope == MigrationScope.clickhouse:
+    # Reject telemetry-only export (Req 3.9): telemetry is exported alongside the registry.
+    if body.scope == MigrationScope.telemetry:
         raise HTTPException(
             status_code=422,
-            detail="Standalone ClickHouse export is not supported; use 'both' or 'postgres'",
+            detail="Standalone telemetry export is not supported; use 'both' or 'postgres'",
         )
 
     await _check_concurrency(db, MigrationOperation.export, body.scope)

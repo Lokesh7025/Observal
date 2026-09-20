@@ -84,11 +84,10 @@ def _make_telemetry_import_result():
 
     return TelemetryImportResult(
         migration_id="mig-456",
-        tables_imported=3,
-        tables_skipped=[],
-        rows_imported={"traces": 100, "spans": 200},
+        tables_imported={"session_events": 100, "audit_log": 200},
+        rows_imported=300,
+        failed_files=[],
         duration_seconds=4.0,
-        warnings=[],
     )
 
 
@@ -258,84 +257,66 @@ class TestValidateCommand:
 
 
 class TestExportTelemetryCommand:
-    """Verify export-telemetry passes correct args to export_ch."""
+    """Verify export-telemetry passes correct args to export_telemetry."""
 
-    @patch("observal_cli.cmd_migrate.export_ch", new_callable=AsyncMock)
-    def test_export_telemetry_passes_ch_params(self, mock_export_ch, tmp_path):
-        """export_ch receives ChConnParams, manifest path, output dir, and reporter."""
-        mock_export_ch.return_value = _make_telemetry_export_result()
-
-        manifest = tmp_path / "manifest.json"
-        manifest.write_text("{}")
+    @patch("observal_cli.cmd_migrate.export_telemetry", new_callable=AsyncMock)
+    def test_export_telemetry_passes_store_params(self, mock_export, tmp_path):
+        mock_export.return_value = _make_telemetry_export_result()
         output_dir = tmp_path / "out"
 
         result = runner.invoke(
             migrate_app,
             [
                 "export-telemetry",
-                "--clickhouse-url",
-                "clickhouse://default:pass@localhost:8123/observal",
-                "--manifest",
-                str(manifest),
+                "--telemetry-url",
+                "http://localhost:8125",
+                "--telemetry-token",
+                "secret",
                 "--output-dir",
                 str(output_dir),
+                "--migration-id",
+                "mig-1",
+                "--since",
+                "2026-06-01 00:00:00",
             ],
         )
 
         assert result.exit_code == 0, result.output
-        mock_export_ch.assert_called_once()
-        args = mock_export_ch.call_args[0]
-        # First arg: ChConnParams
-        assert args[0].url == "clickhouse://default:pass@localhost:8123/observal"
-        # Second arg: manifest path
-        assert args[1] == Path(str(manifest))
-        # Third arg: output dir
-        assert args[2] == Path(str(output_dir))
-        # Fourth arg: reporter
-        assert hasattr(args[3], "update")
+        mock_export.assert_called_once()
+        args, kwargs = mock_export.call_args
+        assert args[0].url == "http://localhost:8125" and args[0].token == "secret"
+        assert args[1] == Path(str(output_dir))
+        assert hasattr(args[2], "update")
+        assert kwargs == {"migration_id": "mig-1", "since": "2026-06-01 00:00:00"}
 
 
 # ── Import telemetry command tests ───────────────────────────
 
 
 class TestImportTelemetryCommand:
-    """Verify import-telemetry passes correct args to import_ch."""
+    """Verify import-telemetry passes correct args to import_telemetry."""
 
-    @patch("observal_cli.cmd_migrate.import_ch", new_callable=AsyncMock)
-    def test_import_telemetry_passes_ch_params(self, mock_import_ch, tmp_path):
-        """import_ch receives only the connection, input directory, and reporter."""
-        mock_import_ch.return_value = _make_telemetry_import_result()
-
+    @patch("observal_cli.cmd_migrate.import_telemetry", new_callable=AsyncMock)
+    def test_import_telemetry_passes_store_params(self, mock_import, tmp_path):
+        mock_import.return_value = _make_telemetry_import_result()
         input_dir = tmp_path / "telemetry"
         input_dir.mkdir()
 
         result = runner.invoke(
             migrate_app,
-            [
-                "import-telemetry",
-                "--clickhouse-url",
-                "clickhouse://default:@localhost:8123/observal",
-                "--input-dir",
-                str(input_dir),
-            ],
+            ["import-telemetry", "--telemetry-url", "http://localhost:8125", "--input-dir", str(input_dir)],
         )
 
         assert result.exit_code == 0, result.output
-        mock_import_ch.assert_called_once()
-        args, kwargs = mock_import_ch.call_args
-        # First arg: ChConnParams
-        assert args[0].url == "clickhouse://default:@localhost:8123/observal"
-        # Second arg: input dir
+        args, kwargs = mock_import.call_args
+        assert args[0].url == "http://localhost:8125"
         assert args[1] == input_dir
-        # Third arg: reporter
         assert hasattr(args[2], "update")
-        assert not kwargs
+        assert kwargs == {"rebuild": True}
 
-    @patch("observal_cli.cmd_migrate.import_ch", new_callable=AsyncMock)
-    def test_import_telemetry_without_target_identity_flags(self, mock_import_ch, tmp_path):
-        """The import command has no target identity options."""
-        mock_import_ch.return_value = _make_telemetry_import_result()
-
+    @patch("observal_cli.cmd_migrate.import_telemetry", new_callable=AsyncMock)
+    def test_import_telemetry_can_skip_rebuild(self, mock_import, tmp_path):
+        mock_import.return_value = _make_telemetry_import_result()
         input_dir = tmp_path / "telemetry"
         input_dir.mkdir()
 
@@ -343,29 +324,27 @@ class TestImportTelemetryCommand:
             migrate_app,
             [
                 "import-telemetry",
-                "--clickhouse-url",
-                "clickhouse://default:@localhost:8123/observal",
+                "--telemetry-url",
+                "http://localhost:8125",
                 "--input-dir",
                 str(input_dir),
+                "--no-rebuild",
             ],
         )
 
         assert result.exit_code == 0, result.output
-        _, kwargs = mock_import_ch.call_args
-        assert not kwargs
+        assert mock_import.call_args.kwargs == {"rebuild": False}
 
 
 # ── Validate telemetry command tests ─────────────────────────
 
 
 class TestValidateTelemetryCommand:
-    """Verify validate-telemetry passes correct args to validate_ch."""
+    """Verify validate-telemetry passes correct args to validate_telemetry."""
 
-    @patch("observal_cli.cmd_migrate.validate_ch", new_callable=AsyncMock)
-    def test_validate_telemetry_with_all_options(self, mock_validate_ch, tmp_path):
-        """validate_ch receives ch_params, pg_params, input dir, and reporter."""
-        mock_validate_ch.return_value = _make_telemetry_validation_result()
-
+    @patch("observal_cli.cmd_migrate.validate_telemetry", new_callable=AsyncMock)
+    def test_validate_telemetry_with_all_options(self, mock_validate, tmp_path):
+        mock_validate.return_value = _make_telemetry_validation_result()
         input_dir = tmp_path / "telemetry"
         input_dir.mkdir()
 
@@ -375,42 +354,97 @@ class TestValidateTelemetryCommand:
                 "validate-telemetry",
                 "--input-dir",
                 str(input_dir),
-                "--clickhouse-url",
-                "clickhouse://default:@localhost:8123/observal",
+                "--telemetry-url",
+                "http://localhost:8125",
                 "--target-db-url",
                 "postgresql://u:p@h/d",
             ],
         )
 
         assert result.exit_code == 0, result.output
-        mock_validate_ch.assert_called_once()
-        args = mock_validate_ch.call_args[0]
-        # First arg: ChConnParams
-        assert args[0].url == "clickhouse://default:@localhost:8123/observal"
-        # Second arg: PgConnParams
+        args = mock_validate.call_args[0]
+        assert args[0].url == "http://localhost:8125"
         assert args[1].dsn == "postgresql://u:p@h/d"
-        # Third arg: input dir
         assert args[2] == input_dir
-        # Fourth arg: reporter
         assert hasattr(args[3], "update")
 
-    @patch("observal_cli.cmd_migrate.validate_ch", new_callable=AsyncMock)
-    def test_validate_telemetry_without_optional_urls(self, mock_validate_ch, tmp_path):
-        """Without optional URLs, ch_params and pg_params should be None."""
-        mock_validate_ch.return_value = _make_telemetry_validation_result()
-
+    @patch("observal_cli.cmd_migrate.validate_telemetry", new_callable=AsyncMock)
+    def test_validate_telemetry_without_optional_urls(self, mock_validate, tmp_path):
+        mock_validate.return_value = _make_telemetry_validation_result()
         input_dir = tmp_path / "telemetry"
         input_dir.mkdir()
 
+        result = runner.invoke(migrate_app, ["validate-telemetry", "--input-dir", str(input_dir)])
+
+        assert result.exit_code == 0, result.output
+        args = mock_validate.call_args[0]
+        assert args[0] is None
+        assert args[1] is None
+
+
+# ── Cutover command tests ────────────────────────────────────
+
+
+class TestCutoverCommand:
+    @patch("observal_cli.cmd_migrate.run_cutover", new_callable=AsyncMock)
+    def test_cutover_passes_both_connections_and_flags(self, mock_cutover, tmp_path):
+        from observal_shared.migration import CutoverState
+
+        mock_cutover.return_value = CutoverState(
+            migration_id="cutover-1",
+            phase="done",
+            source_counts={"session_events": 3},
+            verification={"target_counts": {"session_events": 3}, "spot_check": {"sampled": 1, "mismatched": []}},
+            verified_at="2026-06-01T00:00:00+00:00",
+        )
+
         result = runner.invoke(
             migrate_app,
-            ["validate-telemetry", "--input-dir", str(input_dir)],
+            [
+                "telemetry-cutover",
+                "--clickhouse-url",
+                "clickhouses://default:pw@ch:8443/observal",
+                "--telemetry-url",
+                "http://localhost:8125",
+                "--artifact-dir",
+                str(tmp_path / "cutover"),
+                "--resume",
+                "--spot-check",
+                "5",
+            ],
         )
 
         assert result.exit_code == 0, result.output
-        args = mock_validate_ch.call_args[0]
-        assert args[0] is None  # No ch_params
-        assert args[1] is None  # No pg_params
+        args, kwargs = mock_cutover.call_args
+        assert args[0].url == "clickhouses://default:pw@ch:8443/observal"
+        assert args[1].url == "http://localhost:8125"
+        assert args[2] == tmp_path / "cutover"
+        assert kwargs == {"resume": True, "verify_only": False, "spot_check_sessions": 5}
+        assert "Cutover complete" in result.output
+
+    @patch("observal_cli.cmd_migrate.reverse_cutover", new_callable=AsyncMock)
+    def test_reverse_exports_store_rows(self, mock_reverse, tmp_path):
+        mock_reverse.return_value = {"migration_id": "reverse-1", "output_dir": str(tmp_path), "rows": 7}
+
+        result = runner.invoke(
+            migrate_app,
+            [
+                "telemetry-cutover",
+                "--clickhouse-url",
+                "clickhouses://default:pw@ch:8443/observal",
+                "--telemetry-url",
+                "http://localhost:8125",
+                "--artifact-dir",
+                str(tmp_path),
+                "--reverse",
+                "--since",
+                "2026-06-01 00:00:00",
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+        assert mock_reverse.call_args.kwargs == {"since": "2026-06-01 00:00:00"}
+        assert "Reverse export complete" in result.output
 
 
 # ── Error handling tests ─────────────────────────────────────

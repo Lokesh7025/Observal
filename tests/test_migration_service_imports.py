@@ -19,8 +19,8 @@ BLOCKED_MODULES = ("fastapi", "typer", "rich")
 MIGRATION_SUBMODULES = (
     "observal_shared.migration",
     "observal_shared.migration.archive",
-    "observal_shared.migration.ch_export",
-    "observal_shared.migration.ch_import",
+    "observal_shared.migration.cutover",
+    "observal_shared.migration.legacy_clickhouse_export",
     "observal_shared.migration.connections",
     "observal_shared.migration.constants",
     "observal_shared.migration.encoding",
@@ -28,6 +28,8 @@ MIGRATION_SUBMODULES = (
     "observal_shared.migration.pg_export",
     "observal_shared.migration.pg_import",
     "observal_shared.migration.progress",
+    "observal_shared.migration.telemetry_export",
+    "observal_shared.migration.telemetry_import",
     "observal_shared.migration.results",
     "observal_shared.migration.validation",
 )
@@ -86,11 +88,13 @@ class TestMigrationServiceImportsCleanly:
 
             # 4. Verify public entry points are accessible
             assert callable(mig.export_pg)
+            assert callable(mig.export_telemetry)
             assert callable(mig.export_ch)
             assert callable(mig.import_pg)
-            assert callable(mig.import_ch)
+            assert callable(mig.import_telemetry)
             assert callable(mig.validate_pg)
-            assert callable(mig.validate_ch)
+            assert callable(mig.validate_telemetry)
+            assert callable(mig.run_cutover)
 
             # 5. Verify exception classes are accessible
             assert issubclass(mig.MigrationError, Exception)

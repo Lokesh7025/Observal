@@ -15,7 +15,7 @@ from typing import Any
 
 import duckdb
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, Response, UploadFile
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from loguru import logger as optic
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from pydantic import BaseModel, Field
@@ -83,7 +83,9 @@ class RebuildRequest(BaseModel):
 
 class ExportRequest(BaseModel):
     tables: list[str]
-    dest_dir: str
+    #: Optional absolute path. When omitted the export lands under the store's own
+    #: export directory and chunks are fetched through ``GET /v1/export/{job_id}/files/{name}``.
+    dest_dir: str | None = None
     since: str | None = None
 
 
@@ -396,11 +398,23 @@ def create_app(settings: TelemetrySettings | None = None) -> FastAPI:
 
     @app.post("/v1/export", dependencies=[auth], status_code=202)
     async def export(req: ExportRequest):
+        dest = Path(req.dest_dir) if req.dest_dir else None
         try:
-            job = state.jobs.start_export(req.tables, Path(req.dest_dir), req.since)
+            job = state.jobs.start_export(req.tables, dest, req.since, export_root=settings.export_dir)
         except ValueError as exc:
             raise HTTPException(status_code=422, detail={"code": "bad_request", "message": str(exc)}) from exc
         return job.to_dict()
+
+    @app.get("/v1/export/{job_id}/files/{name:path}", dependencies=[auth])
+    async def export_file(job_id: str, name: str):
+        job = state.jobs.get(job_id)
+        if job is None or job.kind != "export" or job.state != "done":
+            raise HTTPException(status_code=404, detail={"code": "not_found", "message": job_id})
+        root = Path(job.result["dest_dir"]).resolve()
+        target = (root / name).resolve()
+        if root not in target.parents or not target.is_file():
+            raise HTTPException(status_code=404, detail={"code": "not_found", "message": name})
+        return FileResponse(target, media_type="application/octet-stream", filename=target.name)
 
     @app.post("/v1/admin/backup", dependencies=[auth], status_code=202)
     async def backup(req: BackupRequest):

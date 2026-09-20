@@ -186,7 +186,7 @@ def test_status_json_can_report_unhealthy(isolated, monkeypatch: pytest.MonkeyPa
     service = MagicMock(port=8123)
     service.status.return_value = {
         "postgres": "running",
-        "clickhouse": "stopped",
+        "telemetry": "stopped",
         "redis": "running",
         "api": "stopped",
     }
@@ -234,7 +234,7 @@ def test_reset_json_requires_force_and_reports_scope(isolated, monkeypatch: pyte
     accepted = runner.invoke(app, ["server", "reset", "--force", "--output", "json"])
 
     assert refused.exit_code == 7
-    assert json.loads(accepted.stdout)["deleted"] == ["postgres", "clickhouse", "redis", "generated secrets"]
+    assert json.loads(accepted.stdout)["deleted"] == ["postgres", "telemetry", "redis", "generated secrets"]
     service.reset.assert_called_once_with()
 
 
@@ -315,7 +315,7 @@ def test_upgrade_applies_backup_images_and_health_check(isolated, monkeypatch: p
     release.assert_called_once_with("lock")
 
 
-def test_rollback_is_confined_and_reports_clickhouse_unchanged(isolated, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_rollback_is_confined_and_reports_telemetry_unchanged(isolated, monkeypatch: pytest.MonkeyPatch) -> None:
     compose = prepare_compose(isolated, monkeypatch, "2.0.0")
     backup = isolated.root / "config/backups/v1.5.0-20260101T120000"
     backup.mkdir(parents=True)
@@ -332,7 +332,7 @@ def test_rollback_is_confined_and_reports_clickhouse_unchanged(isolated, monkeyp
     result = cmd_server._server_rollback(None, True)
 
     assert result["postgres_restored"] is True
-    assert result["clickhouse_restored"] is False
+    assert result["telemetry_restored"] is False
     restore.assert_called_once_with(backup, compose)
     assert (compose / ".env").read_text() == "OBSERVAL_VERSION=1.5.0\n"
 

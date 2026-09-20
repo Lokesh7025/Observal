@@ -439,11 +439,11 @@ def test_make_executable_preserves_permission_error(monkeypatch: pytest.MonkeyPa
         ("postgres", {"postgres", "initdb"}, True),
         ("postgres", {"postgres"}, False),
         ("postgres", {"initdb"}, False),
-        ("clickhouse", {"clickhouse"}, True),
-        ("clickhouse", set(), False),
+        ("legacy_clickhouse", {"legacy_clickhouse"}, True),
+        ("legacy_clickhouse", set(), False),
         ("redis", {"redis_server"}, True),
         ("redis", set(), False),
-        ("unknown", {"postgres", "initdb", "clickhouse", "redis_server"}, False),
+        ("unknown", {"postgres", "initdb", "legacy_clickhouse", "redis_server"}, False),
     ],
 )
 def test_is_installed_requires_service_files(
@@ -458,7 +458,7 @@ def test_is_installed_requires_service_files(
         for name, filename in {
             "postgres": "postgres",
             "initdb": "initdb",
-            "clickhouse": "clickhouse",
+            "legacy_clickhouse": "clickhouse",
             "redis_server": "redis-server",
         }.items()
     }
@@ -476,9 +476,9 @@ def test_is_installed_requires_service_files(
 @pytest.mark.parametrize(
     ("results", "expected", "calls"),
     [
-        ({"postgres": True, "clickhouse": True, "redis": True}, True, ["postgres", "clickhouse", "redis"]),
+        ({"postgres": True, "redis": True}, True, ["postgres", "redis"]),
         ({"postgres": False}, False, ["postgres"]),
-        ({"postgres": True, "clickhouse": False}, False, ["postgres", "clickhouse"]),
+        ({"postgres": True, "redis": False}, False, ["postgres", "redis"]),
     ],
 )
 def test_all_installed_checks_services_in_order_and_short_circuits(

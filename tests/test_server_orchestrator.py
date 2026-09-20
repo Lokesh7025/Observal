@@ -70,20 +70,22 @@ def isolated_runtime(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> SimpleN
         "pg_ctl": root / "bin/pg_ctl",
         "pg_isready": root / "bin/pg_isready",
         "createdb": root / "bin/createdb",
-        "clickhouse": root / "bin/clickhouse",
         "redis_server": root / "bin/redis-server",
         "redis_cli": root / "bin/redis-cli",
+        "legacy_clickhouse": root / "bin/clickhouse",
     }
     pids = {
         "postgres": root / "run/postgres.pid",
-        "clickhouse": root / "run/clickhouse.pid",
+        "telemetry": root / "run/telemetry.pid",
         "redis": root / "run/redis.pid",
         "api": root / "run/api.pid",
+        "legacy_clickhouse": root / "run/clickhouse.pid",
     }
     data = {
         "postgres": root / "data/pg",
-        "clickhouse": root / "data/ch",
+        "telemetry": root / "data/telemetry",
         "redis": root / "data/redis",
+        "legacy_clickhouse": root / "data/ch",
     }
     console = FakeConsole()
 
@@ -145,10 +147,13 @@ class TestSecretsAndEnvironment:
         assert orch._secrets == {
             "POSTGRES_PASSWORD": "generated-24",
             "SECRET_KEY": "generated-32",
+            "TELEMETRY_TOKEN": "generated-32",
         }
-        assert secrets_file.read_text() == "POSTGRES_PASSWORD=generated-24\nSECRET_KEY=generated-32\n"
+        assert secrets_file.read_text() == (
+            "POSTGRES_PASSWORD=generated-24\nSECRET_KEY=generated-32\nTELEMETRY_TOKEN=generated-32\n"
+        )
         assert stat.S_IMODE(secrets_file.stat().st_mode) == 0o600
-        assert generate.call_args_list == [call(24), call(32)]
+        assert generate.call_args_list == [call(24), call(32), call(32)]
 
     def test_existing_secrets_are_parsed_and_only_missing_values_are_added(
         self,
@@ -168,10 +173,13 @@ class TestSecretsAndEnvironment:
             "EXTRA": "a=b",
             "POSTGRES_PASSWORD": "existing",
             "SECRET_KEY": "new-secret",
+            "TELEMETRY_TOKEN": "new-secret",
         }
-        assert secrets_file.read_text() == "EXTRA=a=b\nPOSTGRES_PASSWORD=existing\nSECRET_KEY=new-secret\n"
+        assert secrets_file.read_text() == (
+            "EXTRA=a=b\nPOSTGRES_PASSWORD=existing\nSECRET_KEY=new-secret\nTELEMETRY_TOKEN=new-secret\n"
+        )
         assert stat.S_IMODE(secrets_file.stat().st_mode) == 0o600
-        generate.assert_called_once_with(32)
+        assert generate.call_args_list == [call(32), call(32)]
 
     def test_complete_existing_secrets_are_not_rewritten(
         self,
@@ -180,7 +188,7 @@ class TestSecretsAndEnvironment:
     ) -> None:
         isolated_runtime.root.mkdir(parents=True)
         secrets_file = isolated_runtime.root / ".secrets"
-        content = "POSTGRES_PASSWORD=postgres\nSECRET_KEY=jwt\n"
+        content = "POSTGRES_PASSWORD=postgres\nSECRET_KEY=jwt\nTELEMETRY_TOKEN=tok\n"
         secrets_file.write_text(content)
         secrets_file.chmod(0o640)
         generate = MagicMock()
@@ -189,7 +197,7 @@ class TestSecretsAndEnvironment:
         orch = Orchestrator()
         orch._secrets = orch._load_or_create_secrets()
 
-        assert orch._secrets == {"POSTGRES_PASSWORD": "postgres", "SECRET_KEY": "jwt"}
+        assert orch._secrets == {"POSTGRES_PASSWORD": "postgres", "SECRET_KEY": "jwt", "TELEMETRY_TOKEN": "tok"}
         assert secrets_file.read_text() == content
         assert stat.S_IMODE(secrets_file.stat().st_mode) == 0o640
         generate.assert_not_called()
@@ -204,7 +212,8 @@ class TestSecretsAndEnvironment:
 
         assert env["PRESERVED"] == "yes"
         assert env["DATABASE_URL"] == "postgresql+asyncpg://observal@127.0.0.1:5480/observal"
-        assert env["CLICKHOUSE_URL"] == "clickhouse://default@127.0.0.1:8124/observal"
+        assert env["TELEMETRY_URL"] == "http://127.0.0.1:8125"
+        assert env["TELEMETRY_TOKEN"] == "secret-32"
         assert env["REDIS_URL"] == "redis://127.0.0.1:6380"
         assert env["SECRET_KEY"] == "secret-32"
         assert env["JWT_KEY_DIR"] == str(orchestrator_module.KEYS_DIR)
@@ -253,7 +262,7 @@ class TestPostgresLifecycle:
         run = MagicMock(return_value=completed())
         generate_hba = MagicMock()
 
-        def generate_configs() -> None:
+        def generate_configs(token: str) -> None:
             isolated_runtime.config_dir.mkdir(parents=True, exist_ok=True)
             (isolated_runtime.config_dir / "postgresql.conf").write_text("local config")
 
@@ -462,78 +471,67 @@ class TestPostgresLifecycle:
         )
 
 
-class TestClickHouseLifecycle:
-    def test_start_generates_config_creates_dirs_and_tracks_process(
+class TestTelemetryLifecycle:
+    def test_start_writes_env_creates_dir_and_tracks_process(
         self,
         isolated_runtime: SimpleNamespace,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         isolated_runtime.log_dir.mkdir(parents=True)
         isolated_runtime.run_dir.mkdir(parents=True)
-        generate = MagicMock()
+        isolated_runtime.config_dir.mkdir(parents=True)
+        (isolated_runtime.config_dir / "telemetry.env").write_text("TELEMETRY_BIND=127.0.0.1:8125\nTELEMETRY_TOKEN=t\n")
         proc = MagicMock(pid=4242)
         popen = MagicMock(return_value=proc)
-        monkeypatch.setattr(orchestrator_module, "generate_all_configs", generate)
         monkeypatch.setattr(orchestrator_module.subprocess, "Popen", popen)
         orch = Orchestrator()
         immediate = MagicMock()
         wait = MagicMock()
-        ensure_database = MagicMock()
         monkeypatch.setattr(orch, "_check_immediate_death", immediate)
-        monkeypatch.setattr(orch, "_wait_for_clickhouse", wait)
-        monkeypatch.setattr(orch, "_ensure_clickhouse_database", ensure_database)
+        monkeypatch.setattr(orch, "_wait_for_telemetry", wait)
+        monkeypatch.setattr(orch, "_find_server_dir", lambda: isolated_runtime.root / "server")
+        monkeypatch.setattr(orch, "_find_python", lambda: "/python")
 
-        orch.start_clickhouse()
+        orch.start_telemetry()
 
-        generate.assert_called_once_with()
-        for name in ("tmp", "user_files", "format_schemas"):
-            assert (isolated_runtime.data["clickhouse"] / name).is_dir()
-        command = popen.call_args.args[0]
-        assert command == [
-            str(isolated_runtime.bins["clickhouse"]),
-            "server",
-            f"{LONG_OPTION}config-file",
-            str(isolated_runtime.config_dir / "clickhouse-config.xml"),
-            f"{LONG_OPTION}pid-file",
-            str(isolated_runtime.pids["clickhouse"]),
-        ]
+        assert isolated_runtime.data["telemetry"].is_dir()
+        assert popen.call_args.args[0] == ["/python", "-m", "telemetry_store"]
+        assert popen.call_args.kwargs["cwd"] == str(isolated_runtime.root / "server")
+        assert popen.call_args.kwargs["env"]["TELEMETRY_TOKEN"] == "t"
         assert popen.call_args.kwargs["stderr"] is subprocess.STDOUT
         assert popen.call_args.kwargs["start_new_session"] is True
-        assert orch._processes["clickhouse"] is proc
-        assert isolated_runtime.pids["clickhouse"].read_text() == "4242"
-        immediate.assert_called_once_with(proc, "clickhouse")
+        assert orch._processes["telemetry"] is proc
+        assert isolated_runtime.pids["telemetry"].read_text() == "4242"
+        immediate.assert_called_once_with(proc, "telemetry")
         wait.assert_called_once_with()
-        ensure_database.assert_called_once_with()
         orch._log_handles[0].close()
 
-    @pytest.mark.parametrize("status_code", [200, 503])
-    def test_create_database_posts_ddl_and_warns_on_non_success(
+    def test_start_generates_env_when_missing(
         self,
-        status_code: int,
         isolated_runtime: SimpleNamespace,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        post = MagicMock(return_value=SimpleNamespace(status_code=status_code))
-        monkeypatch.setattr(orchestrator_module.httpx, "post", post)
+        isolated_runtime.log_dir.mkdir(parents=True)
+        isolated_runtime.run_dir.mkdir(parents=True)
+        isolated_runtime.config_dir.mkdir(parents=True)
 
-        Orchestrator()._ensure_clickhouse_database()
+        def generate(token: str) -> dict:
+            (isolated_runtime.config_dir / "telemetry.env").write_text(f"TELEMETRY_TOKEN={token}\n")
+            return {}
 
-        post.assert_called_once_with(
-            "http://127.0.0.1:8124/",
-            content="CREATE DATABASE IF NOT EXISTS observal",
-            timeout=10,
-        )
-        assert ("returned 503" in isolated_runtime.console.text()) is (status_code == 503)
+        generate_mock = MagicMock(side_effect=generate)
+        monkeypatch.setattr(orchestrator_module, "generate_all_configs", generate_mock)
+        monkeypatch.setattr(orchestrator_module.subprocess, "Popen", MagicMock(return_value=MagicMock(pid=1)))
+        orch = Orchestrator()
+        monkeypatch.setattr(orch, "_check_immediate_death", MagicMock())
+        monkeypatch.setattr(orch, "_wait_for_telemetry", MagicMock())
+        monkeypatch.setattr(orch, "_find_server_dir", lambda: isolated_runtime.root)
+        monkeypatch.setattr(orch, "_find_python", lambda: "/python")
 
-    def test_create_database_translates_connection_failure(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(
-            orchestrator_module.httpx,
-            "post",
-            MagicMock(side_effect=httpx.ConnectError("offline")),
-        )
+        orch.start_telemetry()
 
-        with pytest.raises(ServiceError, match="became unreachable"):
-            Orchestrator()._ensure_clickhouse_database()
+        generate_mock.assert_called_once_with("secret-32")
+        orch._log_handles[0].close()
 
     def test_wait_tolerates_connection_and_http_failures_until_healthy(self, monkeypatch: pytest.MonkeyPatch) -> None:
         clock = Clock()
@@ -548,9 +546,10 @@ class TestClickHouseLifecycle:
         monkeypatch.setattr(orchestrator_module.time, "sleep", clock.sleep)
         monkeypatch.setattr(orchestrator_module.httpx, "get", get)
 
-        Orchestrator()._wait_for_clickhouse(timeout=2)
+        Orchestrator()._wait_for_telemetry(timeout=2)
 
         assert get.call_count == 3
+        assert get.call_args.args[0] == "http://127.0.0.1:8125/v1/health"
         assert clock.sleeps == [0.5, 0.5]
 
     def test_wait_reports_log_after_timeout(
@@ -565,11 +564,32 @@ class TestClickHouseLifecycle:
         monkeypatch.setattr(orchestrator_module.httpx, "get", get)
 
         with pytest.raises(ServiceError) as error:
-            Orchestrator()._wait_for_clickhouse(timeout=1)
+            Orchestrator()._wait_for_telemetry(timeout=1)
 
         assert "within 1s" in str(error.value)
-        assert str(isolated_runtime.log_dir / "clickhouse-startup.log") in str(error.value)
+        assert str(isolated_runtime.log_dir / "telemetry-startup.log") in str(error.value)
         assert get.call_count == 2
+
+    def test_legacy_clickhouse_start_requires_data(self) -> None:
+        with pytest.raises(ServiceError, match="No legacy ClickHouse data"):
+            Orchestrator().start_legacy_clickhouse()
+
+    def test_retire_legacy_clickhouse_keeps_data_unless_asked(
+        self, isolated_runtime: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        data = isolated_runtime.data["legacy_clickhouse"]
+        data.mkdir(parents=True)
+        (data / "metadata").mkdir()
+        orch = Orchestrator()
+        monkeypatch.setattr(orch, "stop_legacy_clickhouse", MagicMock())
+
+        kept = orch.retire_legacy_clickhouse()
+        assert kept == {"stopped": True, "data_dir": str(data), "deleted": False}
+        assert data.exists()
+
+        deleted = orch.retire_legacy_clickhouse(delete_volume=True)
+        assert deleted["deleted"] is True
+        assert not data.exists()
 
 
 class TestRedisLifecycle:
@@ -592,7 +612,7 @@ class TestRedisLifecycle:
 
         orch.start_redis()
 
-        generate.assert_called_once_with()
+        generate.assert_called_once_with("secret-32")
         popen.assert_called_once_with(
             [
                 str(isolated_runtime.bins["redis_server"]),
@@ -647,7 +667,7 @@ class TestPidShutdown:
     @pytest.mark.parametrize(
         ("service", "method_name", "poll_count", "wait_timeout"),
         [
-            ("clickhouse", "stop_clickhouse", 20, 10),
+            ("telemetry", "stop_telemetry", 40, 20),
             ("api", "stop_api", 10, 10),
         ],
     )
@@ -717,7 +737,7 @@ class TestPidShutdown:
     @pytest.mark.parametrize(
         ("service", "method_name", "live_checks"),
         [
-            ("clickhouse", "stop_clickhouse", 0),
+            ("telemetry", "stop_telemetry", 0),
             ("redis", "stop_redis", 1),
             ("api", "stop_api", 0),
         ],
@@ -756,7 +776,8 @@ class TestPidShutdown:
     @pytest.mark.parametrize(
         ("service", "method_name"),
         [
-            ("clickhouse", "stop_clickhouse"),
+            ("telemetry", "stop_telemetry"),
+            ("legacy_clickhouse", "stop_legacy_clickhouse"),
             ("redis", "stop_redis"),
             ("api", "stop_api"),
         ],
@@ -922,28 +943,26 @@ class TestMigrations:
 
         run.assert_not_called()
 
-    def test_success_applies_postgres_and_clickhouse_migrations(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_success_applies_postgres_migrations_only(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         (tmp_path / "alembic.ini").write_text("[alembic]")
-        run = MagicMock(side_effect=[completed(), completed()])
+        run = MagicMock(side_effect=[completed()])
         monkeypatch.setattr(orchestrator_module.subprocess, "run", run)
         orch = Orchestrator()
         self.configure_migration_paths(orch, tmp_path, monkeypatch)
 
         orch.run_migrations()
 
+        # The telemetry store applies its own schema at start; no second migrator runs here.
         assert [item.args[0] for item in run.call_args_list] == [
             ["/python", "-m", "alembic", "upgrade", "head"],
-            ["/python", "-m", "services.clickhouse.migrations"],
         ]
 
-    @pytest.mark.parametrize("failure_index", [0, 1])
+    @pytest.mark.parametrize("failure_index", [0])
     def test_migration_failure_never_stamps_schema(
         self, failure_index: int, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         (tmp_path / "alembic.ini").write_text("[alembic]")
-        results = [completed(), completed()]
+        results = [completed()]
         results[failure_index] = completed(1, stderr="migration crashed")
         run = MagicMock(side_effect=results)
         monkeypatch.setattr(orchestrator_module.subprocess, "run", run)
@@ -1131,7 +1150,7 @@ class TestFullLifecycle:
     ) -> None:
         monkeypatch.setattr(orchestrator_module, "ensure_dirs", lambda: calls.append("ensure_dirs"))
         monkeypatch.setattr(orch, "_is_first_run", lambda: first_run)
-        for name in ("start_postgres", "start_clickhouse", "start_redis", "run_migrations"):
+        for name in ("start_postgres", "start_telemetry", "start_redis", "run_migrations"):
             monkeypatch.setattr(orch, name, lambda name=name: calls.append(name))
 
         def start_api(*, foreground: bool) -> None:
@@ -1171,7 +1190,7 @@ class TestFullLifecycle:
         assert calls == [
             "ensure_dirs",
             "start_postgres",
-            "start_clickhouse",
+            "start_telemetry",
             "start_redis",
             "run_migrations",
             ("start_api", foreground),
@@ -1230,7 +1249,8 @@ class TestFullLifecycle:
         for method_name, label in (
             ("stop_api", "api"),
             ("stop_redis", "redis"),
-            ("stop_clickhouse", "clickhouse"),
+            ("stop_telemetry", "telemetry"),
+            ("stop_legacy_clickhouse", "legacy_clickhouse"),
             ("stop_postgres", "postgres"),
         ):
             monkeypatch.setattr(orch, method_name, lambda label=label: events.append(label))
@@ -1241,7 +1261,7 @@ class TestFullLifecycle:
 
         orch.stop_all()
 
-        assert events == ["api", "redis", "clickhouse", "postgres"]
+        assert events == ["api", "redis", "telemetry", "legacy_clickhouse", "postgres"]
         good_handle.close.assert_called_once_with()
         bad_handle.close.assert_called_once_with()
         assert orch._log_handles == []
@@ -1267,14 +1287,14 @@ class TestStatusAndReset:
 
         assert statuses == {
             "postgres": "running",
-            "clickhouse": "running",
+            "telemetry": "running",
             "redis": "running",
             "api": "running",
         }
         assert run.call_args_list[0].args[0][0] == str(isolated_runtime.bins["pg_isready"])
         assert run.call_args_list[1].args[0][0] == str(isolated_runtime.bins["redis_cli"])
         assert get.call_args_list == [
-            call("http://127.0.0.1:8124/ping", timeout=2),
+            call("http://127.0.0.1:8125/v1/health", timeout=2),
             call("http://127.0.0.1:9000/livez", timeout=2),
         ]
 
@@ -1299,7 +1319,7 @@ class TestStatusAndReset:
 
         assert statuses == {
             "postgres": "not initialized",
-            "clickhouse": "stopped",
+            "telemetry": "stopped",
             "redis": "stopped",
             "api": "stopped",
         }

@@ -433,20 +433,29 @@ async def _export_candidate(
 
 async def export_ch(
     params: ChConnParams,
-    manifest_path: Path,
+    manifest_path: Path | None,
     output_dir: Path,
     reporter: ProgressReporter,
+    *,
+    migration_id: str | None = None,
 ) -> TelemetryExportResult:
-    """Export ClickHouse telemetry into bounded, checksummed Parquet chunks."""
+    """Export legacy ClickHouse telemetry into bounded, checksummed Parquet chunks.
+
+    This is the *source* side of the ClickHouse -> DuckDB cutover. It is the
+    only ClickHouse reader left in the codebase. Pass ``migration_id``
+    directly (cutover) or a completed phase-1 PostgreSQL manifest (legacy
+    server-to-server flow).
+    """
     import httpx as _httpx
 
     t0 = time.monotonic()
-    if not manifest_path.exists():
-        raise PrerequisiteError(f"Phase 1 manifest not found: {manifest_path}")
-    p1_manifest = read_manifest(manifest_path)
-    if not p1_manifest.get("phase1_completed_at"):
-        raise PrerequisiteError("Phase 1 has not completed. Run PG export first.")
-    migration_id = p1_manifest["migration_id"]
+    if migration_id is None:
+        if manifest_path is None or not manifest_path.exists():
+            raise PrerequisiteError(f"Phase 1 manifest not found: {manifest_path}")
+        p1_manifest = read_manifest(manifest_path)
+        if not p1_manifest.get("phase1_completed_at"):
+            raise PrerequisiteError("Phase 1 has not completed. Run PG export first.")
+        migration_id = p1_manifest["migration_id"]
 
     cutoff_dt = datetime.now(UTC)
     export_time_cutoff = _format_ch_datetime(cutoff_dt)

@@ -26,7 +26,7 @@ class TestListBackups:
         b1 = isolated_backups / "v0.7.0-20260521T120000"
         b1.mkdir(parents=True)
         (b1 / "pg.dump").write_bytes(b"fake pg dump data" * 100)
-        (b1 / "clickhouse_schema.sql").write_text("CREATE TABLE...")
+        (b1 / "telemetry.duckdb").write_bytes(b"duckdb")
 
         b2 = isolated_backups / "v0.6.0-20260501T100000"
         b2.mkdir(parents=True)
@@ -36,8 +36,8 @@ class TestListBackups:
         assert len(results) == 2
         assert results[0]["name"] == "v0.7.0-20260521T120000"  # Most recent first
         assert results[0]["has_pg"] is True
-        assert results[0]["has_ch"] is True
-        assert results[1]["has_ch"] is False
+        assert results[0]["has_telemetry"] is True
+        assert results[1]["has_telemetry"] is False
 
 
 class TestPruneBackups:

@@ -402,7 +402,9 @@ def import_chunk(
     types = _column_types(conn, table.name)
     src = f"read_parquet('{parquet_path.as_posix()}')"
     src_cols = [d[0] for d in conn.execute(f"SELECT * FROM {src} LIMIT 0").description]
-    known = [c for c in table.columns if c in src_cols and c in types]
+    # Derived key columns are always recomputed from the identity columns so one
+    # hash implementation governs every row, whatever the chunk's origin.
+    known = [c for c in table.columns if c in src_cols and c in types and c not in table.derived_columns]
     if not known:
         raise WriteError(f"chunk {chunk_id} shares no columns with {table.name}")
 

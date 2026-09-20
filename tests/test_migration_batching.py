@@ -14,10 +14,10 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
-import observal_shared.migration.ch_export as ch_export_module
-import observal_shared.migration.ch_import as ch_import_module
-from observal_shared.migration.archive import write_manifest
-from observal_shared.migration.ch_export import (
+import observal_shared.migration.legacy_clickhouse_export as ch_export_module
+from observal_shared.migration.constants import CLICKHOUSE_TABLES
+from observal_shared.migration.exceptions import MigrationError
+from observal_shared.migration.legacy_clickhouse_export import (
     EXPORT_QUERY_SETTINGS,
     MAX_SHARD_COUNT,
     TelemetryChunk,
@@ -30,15 +30,6 @@ from observal_shared.migration.ch_export import (
     _split_chunk,
     _table_windows,
 )
-from observal_shared.migration.ch_import import (
-    _rebuild_session_stats_chunk,
-    _rewrite_project_id,
-    _summary_rebuild_chunks,
-    import_ch,
-)
-from observal_shared.migration.connections import ChConnParams
-from observal_shared.migration.constants import CLICKHOUSE_TABLES
-from observal_shared.migration.exceptions import MigrationError
 from observal_shared.migration.progress import NullReporter
 from observal_shared.migration.telemetry_manifest import validate_telemetry_manifest
 
@@ -292,14 +283,6 @@ def test_manifest_normalizes_legacy_monthly_exports(tmp_path):
     ]
 
 
-def test_legacy_session_summary_rebuild_is_split_into_bounded_hash_shards():
-    chunks = _summary_rebuild_chunks([{"chunk_id": "legacy:session_events:202609", "legacy": True}])
-
-    assert len(chunks) == 64
-    assert {chunk["bucket"] for chunk in chunks} == set(range(64))
-    assert all(chunk["shard_count"] == 64 for chunk in chunks)
-
-
 def test_manifest_accepts_early_v2_sub_millisecond_chunk_ids(tmp_path):
     manifest = _manifest_with_one_chunk(tmp_path)
     chunk = manifest["tables"]["session_events"]["chunks"][0]
@@ -308,89 +291,6 @@ def test_manifest_accepts_early_v2_sub_millisecond_chunk_ids(tmp_path):
     chunks = validate_telemetry_manifest(manifest)
 
     assert chunks["session_events"][0]["chunk_id"].endswith("000888:0:64")
-
-
-@pytest.mark.asyncio
-async def test_import_resumes_each_completed_chunk(tmp_path, monkeypatch):
-    manifest = _manifest_with_one_chunk(tmp_path)
-    write_manifest(tmp_path / "telemetry_manifest.json", manifest)
-    imported: list[str] = []
-    rebuilt: list[int] = []
-
-    class HealthClient:
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *_args):
-            return None
-
-        async def post(self, *_args, **_kwargs):
-            return httpx.Response(200, request=httpx.Request("POST", "http://example"))
-
-    async def fake_import(_url, _db, _user, _password, _table, _path, *, deduplication_token):
-        imported.append(deduplication_token)
-
-    async def fake_rebuild(_url, _db, _user, _password, chunk):
-        rebuilt.append(chunk["bucket"])
-
-    monkeypatch.setattr(httpx, "AsyncClient", lambda **_kwargs: HealthClient())
-    monkeypatch.setattr(
-        ch_import_module,
-        "_ch_existing_tables",
-        lambda *_args: _async_value({"session_events", "session_stats_agg"}),
-    )
-    monkeypatch.setattr(ch_import_module, "_ch_import", fake_import)
-    monkeypatch.setattr(ch_import_module, "_rebuild_session_stats_chunk", fake_rebuild)
-
-    first = await import_ch(ChConnParams(url="clickhouse://example/default"), tmp_path, NullReporter())
-    second = await import_ch(ChConnParams(url="clickhouse://example/default"), tmp_path, NullReporter())
-
-    assert first.rows_imported["session_events"] == 1
-    assert second.rows_imported["session_events"] == 0
-    assert len(imported) == 1
-    assert rebuilt == [0]
-    state = (tmp_path / ".import_state.json").read_text(encoding="utf-8")
-    assert "session_events:20260101T000000000000:20260102T000000000000:0:64" in state
-
-
-async def _async_value(value):
-    return value
-
-
-@pytest.mark.asyncio
-async def test_session_summary_rebuild_aggregates_complete_hash_bucket(monkeypatch):
-    captured = {}
-
-    async def fake_query(_url, _db, _user, _password, sql, **kwargs):
-        captured["sql"] = sql
-        captured["params"] = kwargs["extra_params"]
-        return httpx.Response(200)
-
-    monkeypatch.setattr(ch_import_module, "_ch_query", fake_query)
-    await _rebuild_session_stats_chunk(
-        "http://example",
-        "default",
-        "user",
-        "password",
-        {"bucket": 3, "shard_count": 128},
-    )
-
-    assert "FROM session_events FINAL" in captured["sql"]
-    assert "GROUP BY project_id, session_id, user_id, harness" in captured["sql"]
-    assert "summary_version" in captured["sql"]
-    assert captured["params"]["param_bucket"] == "3"
-    assert captured["params"]["param_shard_count"] == "128"
-
-
-def test_non_replicated_tables_enable_chunk_retry_deduplication():
-    migration = (
-        Path(__file__).resolve().parents[1]
-        / "observal-server/clickhouse/migrations/005_migration_insert_deduplication.sql"
-    ).read_text(encoding="utf-8")
-
-    for config in CLICKHOUSE_TABLES:
-        assert f"ALTER TABLE {config['name']}" in migration
-    assert "non_replicated_deduplication_window = 100000" in migration
 
 
 def test_migration_upload_proxy_streams_large_request_bodies():
@@ -408,27 +308,3 @@ def test_migration_upload_proxy_streams_large_request_bodies():
         assert "limit_conn migration_uploads 1" in config
         assert "proxy_request_buffering off" in config
         assert "proxy_send_timeout 3600s" in config
-
-
-def test_project_rewrite_streams_to_a_separate_parquet(tmp_path):
-    source = tmp_path / "chunk.parquet"
-    schema = pa.schema(
-        [
-            pa.field("project_id", pa.string(), nullable=False),
-            pa.field("payload", pa.string(), nullable=False),
-        ]
-    )
-    pq.write_table(
-        pa.Table.from_arrays([pa.array(["old", "old"]), pa.array(["a", "b"])], schema=schema),
-        source,
-        row_group_size=1,
-    )
-
-    rewritten = _rewrite_project_id(source, "default")
-    try:
-        assert rewritten != source
-        assert pq.read_table(rewritten).column("project_id").to_pylist() == ["default", "default"]
-        assert pq.read_schema(rewritten).field("project_id").nullable is False
-        assert pq.read_table(source).column("project_id").to_pylist() == ["old", "old"]
-    finally:
-        rewritten.unlink(missing_ok=True)

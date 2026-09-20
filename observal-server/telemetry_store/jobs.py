@@ -123,14 +123,27 @@ class JobRegistry:
 
     # ── Export to Parquet ────────────────────────────────────────
 
-    def start_export(self, tables: list[str], dest_dir: Path, since: str | None) -> Job:
+    def start_export(
+        self, tables: list[str], dest_dir: Path | None, since: str | None, *, export_root: Path | None = None
+    ) -> Job:
         unknown = [t for t in tables if t not in TELEMETRY_TABLES]
         if unknown:
             raise ValueError(f"unknown tables: {unknown}")
+        if dest_dir is None:
+            if export_root is None:
+                raise ValueError("dest_dir is required when no export root is configured")
+            dest_dir = export_root / uuid.uuid4().hex
 
         async def run(job: Job) -> dict[str, Any]:
             dest_dir.mkdir(parents=True, exist_ok=True)
-            manifest: dict[str, Any] = {"exported_at": _now(), "since": since, "chunks": []}
+            manifest: dict[str, Any] = {
+                "telemetry_manifest_version": "3.0",
+                "source": "duckdb",
+                "exported_at": _now(),
+                "since": since,
+                "tables": {},
+                "chunks": [],
+            }
             total = len(tables)
             for idx, table in enumerate(tables):
                 cfg = TELEMETRY_TABLES[table]
@@ -143,6 +156,7 @@ class JobRegistry:
                 cursor = self._conn.cursor()
                 try:
                     count = int(cursor.execute(f'SELECT count(*) FROM "{table}"{where}', params).fetchone()[0])
+                    manifest["tables"][table] = {"row_count": count}
                     chunks = max(1, -(-count // EXPORT_CHUNK_ROWS))
                     order = ", ".join(f'"{k}"' for k in cfg.key_columns)
                     for c in range(chunks):
@@ -164,15 +178,21 @@ class JobRegistry:
                             {
                                 "table": table,
                                 "chunk_id": f"{table}-{c:05d}",
-                                "path": str(path.relative_to(dest_dir)),
+                                "file": str(path.relative_to(dest_dir)),
                                 "row_count": rows,
+                                "size_bytes": path.stat().st_size,
                                 "sha256": _sha256(path),
                             }
                         )
                 finally:
                     cursor.close()
-            (dest_dir / "manifest.json").write_text(json.dumps(manifest, indent=2))
-            return {"dest_dir": str(dest_dir), "chunks": len(manifest["chunks"])}
+            (dest_dir / "telemetry_manifest.json").write_text(json.dumps(manifest, indent=2))
+            return {
+                "dest_dir": str(dest_dir),
+                "chunks": len(manifest["chunks"]),
+                "files": [c["file"] for c in manifest["chunks"]] + ["telemetry_manifest.json"],
+                "tables": manifest["tables"],
+            }
 
         return self._start("export", run)
 
