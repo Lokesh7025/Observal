@@ -1,0 +1,21 @@
+# SPDX-FileCopyrightText: 2026 Lokesh Selvam <lokeshselvam7025@gmail.com>
+# SPDX-License-Identifier: Apache-2.0
+#
+# Infinity datasource pointed at the telemetry store's read-only query endpoint.
+# Dashboards post DuckDB SQL to ${telemetry_url}/v1/query with a bearer token.
+
+apiVersion: 1
+
+datasources:
+  - name: Observal Telemetry
+    type: yesoreyeram-infinity-datasource
+    uid: observal-telemetry
+    access: proxy
+    isDefault: true
+    jsonData:
+      auth_method: bearerToken
+      allowedHosts:
+        - $TELEMETRY_URL
+    secureJsonData:
+      bearerToken: $TELEMETRY_TOKEN
+    editable: true

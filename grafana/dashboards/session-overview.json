@@ -1,376 +1,372 @@
 {
   "uid": "observal-session-overview",
-  "title": "Observal \u2014 Session Overview",
-  "description": "Trace count, active sessions, and trace type breakdown",
+  "title": "Observal / Session Overview",
+  "description": "Session volume, active users, and harness mix from the telemetry store.",
   "tags": [
-    "observal"
+    "observal",
+    "telemetry"
   ],
-  "timezone": "browser",
+  "timezone": "utc",
   "schemaVersion": 39,
   "version": 1,
   "editable": true,
-  "fiscalYearStartMonth": 0,
-  "graphTooltip": 1,
+  "refresh": "1m",
   "time": {
-    "from": "now-24h",
+    "from": "now-7d",
     "to": "now"
   },
-  "refresh": "30s",
   "templating": {
     "list": [
       {
-        "name": "project_id",
-        "label": "Project",
-        "type": "query",
-        "datasource": {
-          "type": "grafana-clickhouse-datasource",
-          "uid": "observal-clickhouse"
-        },
-        "query": "SELECT DISTINCT project_id FROM traces FINAL WHERE is_deleted = 0 ORDER BY project_id",
+        "name": "telemetry_url",
+        "label": "Telemetry store URL",
+        "type": "constant",
+        "query": "http://observal-telemetry:8125",
         "current": {
-          "selected": true,
-          "text": "All",
-          "value": "$__all"
+          "text": "http://observal-telemetry:8125",
+          "value": "http://observal-telemetry:8125"
         },
-        "includeAll": true,
-        "allValue": "1",
-        "multi": true,
-        "refresh": 2,
-        "sort": 1
+        "hide": 2
       },
       {
-        "name": "environment",
-        "label": "Environment",
-        "type": "query",
-        "datasource": {
-          "type": "grafana-clickhouse-datasource",
-          "uid": "observal-clickhouse"
-        },
-        "query": "SELECT DISTINCT environment FROM traces FINAL WHERE is_deleted = 0 ORDER BY environment",
+        "name": "bucket",
+        "label": "Bucket",
+        "type": "custom",
+        "query": "1 hour,1 day,15 minutes,5 minutes",
         "current": {
-          "selected": true,
-          "text": "All",
-          "value": "$__all"
+          "text": "1 hour",
+          "value": "1 hour"
         },
-        "includeAll": true,
-        "allValue": "1",
-        "multi": true,
-        "refresh": 2,
-        "sort": 1
+        "options": [
+          {
+            "text": "1 hour",
+            "value": "1 hour",
+            "selected": true
+          },
+          {
+            "text": "1 day",
+            "value": "1 day",
+            "selected": false
+          },
+          {
+            "text": "15 minutes",
+            "value": "15 minutes",
+            "selected": false
+          },
+          {
+            "text": "5 minutes",
+            "value": "5 minutes",
+            "selected": false
+          }
+        ]
       }
     ]
   },
   "panels": [
     {
       "id": 1,
-      "title": "Trace Count Over Time",
-      "type": "timeseries",
-      "gridPos": {
-        "h": 8,
-        "w": 16,
-        "x": 0,
-        "y": 0
-      },
-      "datasource": {
-        "type": "grafana-clickhouse-datasource",
-        "uid": "observal-clickhouse"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "custom": {
-            "lineWidth": 2,
-            "fillOpacity": 15,
-            "spanNulls": false,
-            "axisBorderShow": false
-          },
-          "unit": "short"
-        },
-        "overrides": []
-      },
-      "options": {
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        },
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom"
-        }
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "grafana-clickhouse-datasource",
-            "uid": "observal-clickhouse"
-          },
-          "queryType": "sql",
-          "rawSql": "SELECT\n  $__timeInterval(start_time) AS time,\n  count() AS traces\nFROM traces FINAL\nWHERE is_deleted = 0\n  AND $__timeFilter(start_time)\n  AND ('${project_id}' = '1' OR project_id IN (${project_id:singlequote}))\n  AND ('${environment}' = '1' OR environment IN (${environment:singlequote}))\nGROUP BY time\nORDER BY time",
-          "refId": "A",
-          "format": 1
-        }
-      ]
-    },
-    {
-      "id": 2,
-      "title": "Active Sessions",
+      "title": "Sessions",
       "type": "stat",
-      "gridPos": {
-        "h": 4,
-        "w": 4,
-        "x": 16,
-        "y": 0
-      },
       "datasource": {
-        "type": "grafana-clickhouse-datasource",
-        "uid": "observal-clickhouse"
+        "type": "yesoreyeram-infinity-datasource",
+        "uid": "observal-telemetry"
       },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "thresholds"
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "yellow",
-                "value": 50
-              },
-              {
-                "color": "red",
-                "value": 100
-              }
-            ]
-          },
-          "unit": "short"
-        },
-        "overrides": []
-      },
-      "options": {
-        "colorMode": "background",
-        "graphMode": "area",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ]
-        },
-        "textMode": "auto"
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "grafana-clickhouse-datasource",
-            "uid": "observal-clickhouse"
-          },
-          "queryType": "sql",
-          "rawSql": "SELECT\n  count(DISTINCT session_id) AS active_sessions\nFROM traces FINAL\nWHERE is_deleted = 0\n  AND $__timeFilter(start_time)\n  AND ('${project_id}' = '1' OR project_id IN (${project_id:singlequote}))\n  AND ('${environment}' = '1' OR environment IN (${environment:singlequote}))\n  AND session_id IS NOT NULL",
-          "refId": "A",
-          "format": 1
-        }
-      ]
-    },
-    {
-      "id": 3,
-      "title": "Total Traces",
-      "type": "stat",
       "gridPos": {
-        "h": 4,
-        "w": 4,
-        "x": 20,
-        "y": 0
-      },
-      "datasource": {
-        "type": "grafana-clickhouse-datasource",
-        "uid": "observal-clickhouse"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "thresholds"
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "blue",
-                "value": null
-              }
-            ]
-          },
-          "unit": "short"
-        },
-        "overrides": []
-      },
-      "options": {
-        "colorMode": "background",
-        "graphMode": "none",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ]
-        },
-        "textMode": "auto"
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "grafana-clickhouse-datasource",
-            "uid": "observal-clickhouse"
-          },
-          "queryType": "sql",
-          "rawSql": "SELECT\n  count() AS total_traces\nFROM traces FINAL\nWHERE is_deleted = 0\n  AND $__timeFilter(start_time)\n  AND ('${project_id}' = '1' OR project_id IN (${project_id:singlequote}))\n  AND ('${environment}' = '1' OR environment IN (${environment:singlequote}))",
-          "refId": "A",
-          "format": 1
-        }
-      ]
-    },
-    {
-      "id": 4,
-      "title": "Trace Type Breakdown",
-      "type": "piechart",
-      "gridPos": {
-        "h": 8,
-        "w": 8,
-        "x": 16,
-        "y": 4
-      },
-      "datasource": {
-        "type": "grafana-clickhouse-datasource",
-        "uid": "observal-clickhouse"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "unit": "short"
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "table",
-          "placement": "right",
-          "values": [
-            "value",
-            "percent"
-          ]
-        },
-        "tooltip": {
-          "mode": "single"
-        },
-        "pieType": "donut",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ]
-        }
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "grafana-clickhouse-datasource",
-            "uid": "observal-clickhouse"
-          },
-          "queryType": "sql",
-          "rawSql": "SELECT\n  trace_type,\n  count() AS count\nFROM traces FINAL\nWHERE is_deleted = 0\n  AND $__timeFilter(start_time)\n  AND ('${project_id}' = '1' OR project_id IN (${project_id:singlequote}))\n  AND ('${environment}' = '1' OR environment IN (${environment:singlequote}))\nGROUP BY trace_type\nORDER BY count DESC",
-          "refId": "A",
-          "format": 1
-        }
-      ]
-    },
-    {
-      "id": 5,
-      "title": "Traces by Harness",
-      "type": "barchart",
-      "gridPos": {
-        "h": 8,
-        "w": 8,
         "x": 0,
-        "y": 8
-      },
-      "datasource": {
-        "type": "grafana-clickhouse-datasource",
-        "uid": "observal-clickhouse"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "unit": "short"
-        },
-        "overrides": []
-      },
-      "options": {
-        "orientation": "horizontal",
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom"
-        },
-        "tooltip": {
-          "mode": "single"
-        }
+        "y": 0,
+        "w": 6,
+        "h": 4
       },
       "targets": [
         {
-          "datasource": {
-            "type": "grafana-clickhouse-datasource",
-            "uid": "observal-clickhouse"
-          },
-          "queryType": "sql",
-          "rawSql": "SELECT\n  harness,\n  count() AS count\nFROM traces FINAL\nWHERE is_deleted = 0\n  AND $__timeFilter(start_time)\n  AND ('${project_id}' = '1' OR project_id IN (${project_id:singlequote}))\n  AND ('${environment}' = '1' OR environment IN (${environment:singlequote}))\n  AND harness != ''\nGROUP BY harness\nORDER BY count DESC\nLIMIT 10",
           "refId": "A",
-          "format": 1
+          "datasource": {
+            "type": "yesoreyeram-infinity-datasource",
+            "uid": "observal-telemetry"
+          },
+          "type": "json",
+          "source": "url",
+          "format": "table",
+          "parser": "backend",
+          "url": "${telemetry_url}/v1/query",
+          "url_options": {
+            "method": "POST",
+            "body_type": "raw",
+            "body_content_type": "application/json",
+            "data": "{\"sql\": \"SELECT count(*) AS sessions FROM session_stats_agg WHERE last_event_time >= CAST($from AS TIMESTAMP) AND last_event_time < CAST($to AS TIMESTAMP)\", \"params\": {\"from\": \"${__from:date:iso}\", \"to\": \"${__to:date:iso}\", \"bucket\": \"${bucket}\"}}"
+          },
+          "root_selector": "rows",
+          "columns": []
         }
-      ]
-    },
-    {
-      "id": 6,
-      "title": "Recent Traces",
-      "type": "table",
-      "gridPos": {
-        "h": 8,
-        "w": 16,
-        "x": 8,
-        "y": 8
-      },
-      "datasource": {
-        "type": "grafana-clickhouse-datasource",
-        "uid": "observal-clickhouse"
-      },
+      ],
       "fieldConfig": {
         "defaults": {},
         "overrides": []
       },
-      "options": {
-        "showHeader": true,
-        "sortBy": [
-          {
-            "displayName": "start_time",
-            "desc": true
-          }
-        ]
+      "options": {}
+    },
+    {
+      "id": 2,
+      "title": "Active users",
+      "type": "stat",
+      "datasource": {
+        "type": "yesoreyeram-infinity-datasource",
+        "uid": "observal-telemetry"
+      },
+      "gridPos": {
+        "x": 6,
+        "y": 0,
+        "w": 6,
+        "h": 4
       },
       "targets": [
         {
-          "datasource": {
-            "type": "grafana-clickhouse-datasource",
-            "uid": "observal-clickhouse"
-          },
-          "queryType": "sql",
-          "rawSql": "SELECT\n  trace_id,\n  project_id,\n  session_id,\n  trace_type,\n  name,\n  harness,\n  start_time,\n  end_time\nFROM traces FINAL\nWHERE is_deleted = 0\n  AND $__timeFilter(start_time)\n  AND ('${project_id}' = '1' OR project_id IN (${project_id:singlequote}))\n  AND ('${environment}' = '1' OR environment IN (${environment:singlequote}))\nORDER BY start_time DESC\nLIMIT 50",
           "refId": "A",
-          "format": 2
+          "datasource": {
+            "type": "yesoreyeram-infinity-datasource",
+            "uid": "observal-telemetry"
+          },
+          "type": "json",
+          "source": "url",
+          "format": "table",
+          "parser": "backend",
+          "url": "${telemetry_url}/v1/query",
+          "url_options": {
+            "method": "POST",
+            "body_type": "raw",
+            "body_content_type": "application/json",
+            "data": "{\"sql\": \"SELECT count(DISTINCT user_id) AS users FROM session_stats_agg WHERE user_id <> '' AND last_event_time >= CAST($from AS TIMESTAMP) AND last_event_time < CAST($to AS TIMESTAMP)\", \"params\": {\"from\": \"${__from:date:iso}\", \"to\": \"${__to:date:iso}\", \"bucket\": \"${bucket}\"}}"
+          },
+          "root_selector": "rows",
+          "columns": []
         }
-      ]
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "id": 3,
+      "title": "Prompts",
+      "type": "stat",
+      "datasource": {
+        "type": "yesoreyeram-infinity-datasource",
+        "uid": "observal-telemetry"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 0,
+        "w": 6,
+        "h": 4
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "yesoreyeram-infinity-datasource",
+            "uid": "observal-telemetry"
+          },
+          "type": "json",
+          "source": "url",
+          "format": "table",
+          "parser": "backend",
+          "url": "${telemetry_url}/v1/query",
+          "url_options": {
+            "method": "POST",
+            "body_type": "raw",
+            "body_content_type": "application/json",
+            "data": "{\"sql\": \"SELECT coalesce(sum(prompt_count), 0) AS prompts FROM session_stats_agg WHERE last_event_time >= CAST($from AS TIMESTAMP) AND last_event_time < CAST($to AS TIMESTAMP)\", \"params\": {\"from\": \"${__from:date:iso}\", \"to\": \"${__to:date:iso}\", \"bucket\": \"${bucket}\"}}"
+          },
+          "root_selector": "rows",
+          "columns": []
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "id": 4,
+      "title": "Tool calls",
+      "type": "stat",
+      "datasource": {
+        "type": "yesoreyeram-infinity-datasource",
+        "uid": "observal-telemetry"
+      },
+      "gridPos": {
+        "x": 18,
+        "y": 0,
+        "w": 6,
+        "h": 4
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "yesoreyeram-infinity-datasource",
+            "uid": "observal-telemetry"
+          },
+          "type": "json",
+          "source": "url",
+          "format": "table",
+          "parser": "backend",
+          "url": "${telemetry_url}/v1/query",
+          "url_options": {
+            "method": "POST",
+            "body_type": "raw",
+            "body_content_type": "application/json",
+            "data": "{\"sql\": \"SELECT coalesce(sum(tool_call_count), 0) AS tool_calls FROM session_stats_agg WHERE last_event_time >= CAST($from AS TIMESTAMP) AND last_event_time < CAST($to AS TIMESTAMP)\", \"params\": {\"from\": \"${__from:date:iso}\", \"to\": \"${__to:date:iso}\", \"bucket\": \"${bucket}\"}}"
+          },
+          "root_selector": "rows",
+          "columns": []
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "id": 5,
+      "title": "Sessions over time",
+      "type": "timeseries",
+      "datasource": {
+        "type": "yesoreyeram-infinity-datasource",
+        "uid": "observal-telemetry"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 4,
+        "w": 16,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "yesoreyeram-infinity-datasource",
+            "uid": "observal-telemetry"
+          },
+          "type": "json",
+          "source": "url",
+          "format": "timeseries",
+          "parser": "backend",
+          "url": "${telemetry_url}/v1/query",
+          "url_options": {
+            "method": "POST",
+            "body_type": "raw",
+            "body_content_type": "application/json",
+            "data": "{\"sql\": \"SELECT time_bucket(CAST($bucket AS INTERVAL), last_event_time) AS time, count(*) AS sessions FROM session_stats_agg WHERE last_event_time >= CAST($from AS TIMESTAMP) AND last_event_time < CAST($to AS TIMESTAMP) GROUP BY time ORDER BY time\", \"params\": {\"from\": \"${__from:date:iso}\", \"to\": \"${__to:date:iso}\", \"bucket\": \"${bucket}\"}}"
+          },
+          "root_selector": "rows",
+          "columns": [
+            {
+              "selector": "time",
+              "text": "time",
+              "type": "timestamp"
+            },
+            {
+              "selector": "sessions",
+              "text": "sessions",
+              "type": "number"
+            }
+          ]
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "id": 6,
+      "title": "Sessions by harness",
+      "type": "piechart",
+      "datasource": {
+        "type": "yesoreyeram-infinity-datasource",
+        "uid": "observal-telemetry"
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 4,
+        "w": 8,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "yesoreyeram-infinity-datasource",
+            "uid": "observal-telemetry"
+          },
+          "type": "json",
+          "source": "url",
+          "format": "table",
+          "parser": "backend",
+          "url": "${telemetry_url}/v1/query",
+          "url_options": {
+            "method": "POST",
+            "body_type": "raw",
+            "body_content_type": "application/json",
+            "data": "{\"sql\": \"SELECT harness, count(*) AS sessions FROM session_stats_agg WHERE harness <> '' AND last_event_time >= CAST($from AS TIMESTAMP) AND last_event_time < CAST($to AS TIMESTAMP) GROUP BY harness ORDER BY sessions DESC\", \"params\": {\"from\": \"${__from:date:iso}\", \"to\": \"${__to:date:iso}\", \"bucket\": \"${bucket}\"}}"
+          },
+          "root_selector": "rows",
+          "columns": []
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "id": 7,
+      "title": "Recent sessions",
+      "type": "table",
+      "datasource": {
+        "type": "yesoreyeram-infinity-datasource",
+        "uid": "observal-telemetry"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 12,
+        "w": 24,
+        "h": 10
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "yesoreyeram-infinity-datasource",
+            "uid": "observal-telemetry"
+          },
+          "type": "json",
+          "source": "url",
+          "format": "table",
+          "parser": "backend",
+          "url": "${telemetry_url}/v1/query",
+          "url_options": {
+            "method": "POST",
+            "body_type": "raw",
+            "body_content_type": "application/json",
+            "data": "{\"sql\": \"SELECT session_id, user_id, harness, agent_id, prompt_count, tool_call_count, input_tokens + output_tokens AS tokens, last_event_time FROM session_stats_agg WHERE last_event_time >= CAST($from AS TIMESTAMP) AND last_event_time < CAST($to AS TIMESTAMP) ORDER BY last_event_time DESC LIMIT 50\", \"params\": {\"from\": \"${__from:date:iso}\", \"to\": \"${__to:date:iso}\", \"bucket\": \"${bucket}\"}}"
+          },
+          "root_selector": "rows",
+          "columns": []
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {}
     }
   ]
 }

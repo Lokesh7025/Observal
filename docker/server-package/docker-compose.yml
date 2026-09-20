@@ -16,7 +16,7 @@ services:
     depends_on:
       observal-db:
         condition: service_healthy
-      observal-clickhouse:
+      observal-telemetry:
         condition: service_healthy
       observal-redis:
         condition: service_healthy
@@ -99,7 +99,50 @@ services:
     networks:
       - observal-net
 
+  observal-telemetry:
+    # Single-writer DuckDB telemetry store. Same image as the API; one process only.
+    image: ghcr.io/observal/observal-api:${OBSERVAL_VERSION:-latest}
+    command: ["/app/.venv/bin/python", "-m", "telemetry_store"]
+    group_add:
+      - "${OBSERVAL_SECRET_GID:-1000}"
+    ports:
+      - "${OBSERVAL_BIND_ADDRESS:-127.0.0.1}:${TELEMETRY_HOST_PORT:-8125}:8125"
+    environment:
+      - TELEMETRY_DB_PATH=/data/telemetry/observal.duckdb
+      - TELEMETRY_TEMP_DIR=/data/telemetry/tmp
+      - TELEMETRY_EXPORT_DIR=/data/telemetry/exports
+      - TELEMETRY_BIND=0.0.0.0:8125
+      - TELEMETRY_TOKEN_FILE=/run/secrets/telemetry_token
+      - TELEMETRY_MEMORY_LIMIT=${TELEMETRY_MEMORY_LIMIT_DUCKDB:-1536MB}
+      - TELEMETRY_THREADS=${TELEMETRY_THREADS:-4}
+    volumes:
+      - tdata:/data/telemetry
+      - ./secrets/telemetry:/run/secrets:ro
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8125/v1/health')\""]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 30s
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    deploy:
+      resources:
+        limits:
+          memory: ${TELEMETRY_MEMORY_LIMIT:-2G}
+    networks:
+      - observal-net
+
+  # Legacy ClickHouse, only for the one-time cutover of existing installs:
+  #   docker compose --profile legacy-clickhouse up -d observal-clickhouse
+  #   observal server migrate telemetry-cutover --clickhouse-url ... --telemetry-url http://localhost:8125
+  # The chdata volume is kept until you remove it explicitly.
   observal-clickhouse:
+    profiles: ["legacy-clickhouse"]
     image: clickhouse/clickhouse-server:26.6
     group_add:
       - "${OBSERVAL_SECRET_GID:-1000}"
@@ -218,6 +261,8 @@ services:
 
 volumes:
   pgdata:
+  tdata:
+  # Legacy ClickHouse data (pre-DuckDB installs). Declared so rollback stays possible.
   chdata:
   redisdata:
   apidata:

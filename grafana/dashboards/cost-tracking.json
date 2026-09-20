@@ -1,445 +1,330 @@
 {
   "uid": "observal-cost-tracking",
-  "title": "Observal \u2014 Cost Tracking",
-  "description": "Cumulative cost, cost by agent and project",
+  "title": "Observal / Cost Tracking",
+  "description": "Credits and token spend by time, agent, and user.",
   "tags": [
-    "observal"
+    "observal",
+    "telemetry"
   ],
-  "timezone": "browser",
+  "timezone": "utc",
   "schemaVersion": 39,
   "version": 1,
   "editable": true,
-  "fiscalYearStartMonth": 0,
-  "graphTooltip": 1,
+  "refresh": "1m",
   "time": {
     "from": "now-7d",
     "to": "now"
   },
-  "refresh": "1m",
   "templating": {
     "list": [
       {
-        "name": "project_id",
-        "label": "Project",
-        "type": "query",
-        "datasource": {
-          "type": "grafana-clickhouse-datasource",
-          "uid": "observal-clickhouse"
-        },
-        "query": "SELECT DISTINCT project_id FROM spans FINAL WHERE is_deleted = 0 ORDER BY project_id",
+        "name": "telemetry_url",
+        "label": "Telemetry store URL",
+        "type": "constant",
+        "query": "http://observal-telemetry:8125",
         "current": {
-          "selected": true,
-          "text": "All",
-          "value": "$__all"
+          "text": "http://observal-telemetry:8125",
+          "value": "http://observal-telemetry:8125"
         },
-        "includeAll": true,
-        "allValue": "1",
-        "multi": true,
-        "refresh": 2,
-        "sort": 1
+        "hide": 2
       },
       {
-        "name": "environment",
-        "label": "Environment",
-        "type": "query",
-        "datasource": {
-          "type": "grafana-clickhouse-datasource",
-          "uid": "observal-clickhouse"
-        },
-        "query": "SELECT DISTINCT environment FROM spans FINAL WHERE is_deleted = 0 ORDER BY environment",
+        "name": "bucket",
+        "label": "Bucket",
+        "type": "custom",
+        "query": "1 hour,1 day,15 minutes,5 minutes",
         "current": {
-          "selected": true,
-          "text": "All",
-          "value": "$__all"
+          "text": "1 hour",
+          "value": "1 hour"
         },
-        "includeAll": true,
-        "allValue": "1",
-        "multi": true,
-        "refresh": 2,
-        "sort": 1
+        "options": [
+          {
+            "text": "1 hour",
+            "value": "1 hour",
+            "selected": true
+          },
+          {
+            "text": "1 day",
+            "value": "1 day",
+            "selected": false
+          },
+          {
+            "text": "15 minutes",
+            "value": "15 minutes",
+            "selected": false
+          },
+          {
+            "text": "5 minutes",
+            "value": "5 minutes",
+            "selected": false
+          }
+        ]
       }
     ]
   },
   "panels": [
     {
       "id": 1,
-      "title": "Cumulative Cost Over Time",
-      "type": "timeseries",
-      "gridPos": {
-        "h": 8,
-        "w": 16,
-        "x": 0,
-        "y": 0
-      },
+      "title": "Credits (Kiro)",
+      "type": "stat",
       "datasource": {
-        "type": "grafana-clickhouse-datasource",
-        "uid": "observal-clickhouse"
+        "type": "yesoreyeram-infinity-datasource",
+        "uid": "observal-telemetry"
       },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "fixed",
-            "fixedColor": "green"
-          },
-          "custom": {
-            "lineWidth": 2,
-            "fillOpacity": 20,
-            "spanNulls": false,
-            "axisBorderShow": false
-          },
-          "unit": "currencyUSD"
-        },
-        "overrides": []
-      },
-      "options": {
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        },
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom"
-        }
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 8,
+        "h": 4
       },
       "targets": [
         {
-          "datasource": {
-            "type": "grafana-clickhouse-datasource",
-            "uid": "observal-clickhouse"
-          },
-          "queryType": "sql",
-          "rawSql": "SELECT\n  time,\n  sum(daily_cost) OVER (ORDER BY time) AS cumulative_cost\nFROM (\n  SELECT\n    $__timeInterval(start_time) AS time,\n    sum(cost) AS daily_cost\n  FROM spans FINAL\n  WHERE is_deleted = 0\n    AND $__timeFilter(start_time)\n    AND ('${project_id}' = '1' OR project_id IN (${project_id:singlequote}))\n  AND ('${environment}' = '1' OR environment IN (${environment:singlequote}))\n    AND cost IS NOT NULL AND cost > 0\n  GROUP BY time\n  ORDER BY time\n)\nORDER BY time",
           "refId": "A",
-          "format": 1
+          "datasource": {
+            "type": "yesoreyeram-infinity-datasource",
+            "uid": "observal-telemetry"
+          },
+          "type": "json",
+          "source": "url",
+          "format": "table",
+          "parser": "backend",
+          "url": "${telemetry_url}/v1/query",
+          "url_options": {
+            "method": "POST",
+            "body_type": "raw",
+            "body_content_type": "application/json",
+            "data": "{\"sql\": \"SELECT coalesce(sum(total_credits), 0) AS credits FROM session_stats_agg WHERE last_event_time >= CAST($from AS TIMESTAMP) AND last_event_time < CAST($to AS TIMESTAMP)\", \"params\": {\"from\": \"${__from:date:iso}\", \"to\": \"${__to:date:iso}\", \"bucket\": \"${bucket}\"}}"
+          },
+          "root_selector": "rows",
+          "columns": []
         }
-      ]
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {}
     },
     {
       "id": 2,
-      "title": "Total Cost",
+      "title": "Total tokens",
       "type": "stat",
-      "gridPos": {
-        "h": 4,
-        "w": 4,
-        "x": 16,
-        "y": 0
-      },
       "datasource": {
-        "type": "grafana-clickhouse-datasource",
-        "uid": "observal-clickhouse"
+        "type": "yesoreyeram-infinity-datasource",
+        "uid": "observal-telemetry"
       },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "fixed",
-            "fixedColor": "green"
-          },
-          "unit": "currencyUSD",
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "colorMode": "background",
-        "graphMode": "none",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ]
-        },
-        "textMode": "auto"
+      "gridPos": {
+        "x": 8,
+        "y": 0,
+        "w": 8,
+        "h": 4
       },
       "targets": [
         {
-          "datasource": {
-            "type": "grafana-clickhouse-datasource",
-            "uid": "observal-clickhouse"
-          },
-          "queryType": "sql",
-          "rawSql": "SELECT sum(cost) AS total_cost\nFROM spans FINAL\nWHERE is_deleted = 0\n  AND $__timeFilter(start_time)\n  AND ('${project_id}' = '1' OR project_id IN (${project_id:singlequote}))\n  AND ('${environment}' = '1' OR environment IN (${environment:singlequote}))\n  AND cost IS NOT NULL AND cost > 0",
           "refId": "A",
-          "format": 1
+          "datasource": {
+            "type": "yesoreyeram-infinity-datasource",
+            "uid": "observal-telemetry"
+          },
+          "type": "json",
+          "source": "url",
+          "format": "table",
+          "parser": "backend",
+          "url": "${telemetry_url}/v1/query",
+          "url_options": {
+            "method": "POST",
+            "body_type": "raw",
+            "body_content_type": "application/json",
+            "data": "{\"sql\": \"SELECT coalesce(sum(input_tokens + output_tokens + cache_read_tokens + cache_write_tokens), 0) AS tokens FROM session_stats_agg WHERE last_event_time >= CAST($from AS TIMESTAMP) AND last_event_time < CAST($to AS TIMESTAMP)\", \"params\": {\"from\": \"${__from:date:iso}\", \"to\": \"${__to:date:iso}\", \"bucket\": \"${bucket}\"}}"
+          },
+          "root_selector": "rows",
+          "columns": []
         }
-      ]
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {}
     },
     {
       "id": 3,
-      "title": "Avg Cost per Span",
+      "title": "Avg tokens per session",
       "type": "stat",
-      "gridPos": {
-        "h": 4,
-        "w": 4,
-        "x": 20,
-        "y": 0
-      },
       "datasource": {
-        "type": "grafana-clickhouse-datasource",
-        "uid": "observal-clickhouse"
+        "type": "yesoreyeram-infinity-datasource",
+        "uid": "observal-telemetry"
       },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "fixed",
-            "fixedColor": "blue"
-          },
-          "unit": "currencyUSD",
-          "decimals": 4,
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "blue",
-                "value": null
-              }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "colorMode": "background",
-        "graphMode": "none",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ]
-        },
-        "textMode": "auto"
+      "gridPos": {
+        "x": 16,
+        "y": 0,
+        "w": 8,
+        "h": 4
       },
       "targets": [
         {
-          "datasource": {
-            "type": "grafana-clickhouse-datasource",
-            "uid": "observal-clickhouse"
-          },
-          "queryType": "sql",
-          "rawSql": "SELECT avg(cost) AS avg_cost\nFROM spans FINAL\nWHERE is_deleted = 0\n  AND $__timeFilter(start_time)\n  AND ('${project_id}' = '1' OR project_id IN (${project_id:singlequote}))\n  AND ('${environment}' = '1' OR environment IN (${environment:singlequote}))\n  AND cost IS NOT NULL AND cost > 0",
           "refId": "A",
-          "format": 1
+          "datasource": {
+            "type": "yesoreyeram-infinity-datasource",
+            "uid": "observal-telemetry"
+          },
+          "type": "json",
+          "source": "url",
+          "format": "table",
+          "parser": "backend",
+          "url": "${telemetry_url}/v1/query",
+          "url_options": {
+            "method": "POST",
+            "body_type": "raw",
+            "body_content_type": "application/json",
+            "data": "{\"sql\": \"SELECT round(coalesce(avg(input_tokens + output_tokens), 0)) AS avg_tokens FROM session_stats_agg WHERE last_event_time >= CAST($from AS TIMESTAMP) AND last_event_time < CAST($to AS TIMESTAMP)\", \"params\": {\"from\": \"${__from:date:iso}\", \"to\": \"${__to:date:iso}\", \"bucket\": \"${bucket}\"}}"
+          },
+          "root_selector": "rows",
+          "columns": []
         }
-      ]
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {}
     },
     {
       "id": 4,
-      "title": "Cost by Agent",
-      "type": "barchart",
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 8
-      },
+      "title": "Credits over time",
+      "type": "timeseries",
       "datasource": {
-        "type": "grafana-clickhouse-datasource",
-        "uid": "observal-clickhouse"
+        "type": "yesoreyeram-infinity-datasource",
+        "uid": "observal-telemetry"
       },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "unit": "currencyUSD"
-        },
-        "overrides": []
-      },
-      "options": {
-        "orientation": "horizontal",
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom"
-        },
-        "tooltip": {
-          "mode": "single"
-        }
+      "gridPos": {
+        "x": 0,
+        "y": 4,
+        "w": 12,
+        "h": 8
       },
       "targets": [
         {
-          "datasource": {
-            "type": "grafana-clickhouse-datasource",
-            "uid": "observal-clickhouse"
-          },
-          "queryType": "sql",
-          "rawSql": "SELECT\n  t.agent_id AS agent,\n  round(sum(s.cost), 4) AS total_cost\nFROM spans AS s FINAL\nINNER JOIN traces AS t FINAL ON s.trace_id = t.trace_id AND s.project_id = t.project_id AND t.is_deleted = 0\nWHERE s.is_deleted = 0\n  AND $__timeFilter(s.start_time)\n  AND ('${project_id}' = '1' OR s.project_id IN (${project_id:singlequote}))\n  AND ('${environment}' = '1' OR s.environment IN (${environment:singlequote}))\n  AND s.cost IS NOT NULL AND s.cost > 0\n  AND t.agent_id IS NOT NULL\nGROUP BY agent\nORDER BY total_cost DESC\nLIMIT 15",
           "refId": "A",
-          "format": 1
+          "datasource": {
+            "type": "yesoreyeram-infinity-datasource",
+            "uid": "observal-telemetry"
+          },
+          "type": "json",
+          "source": "url",
+          "format": "timeseries",
+          "parser": "backend",
+          "url": "${telemetry_url}/v1/query",
+          "url_options": {
+            "method": "POST",
+            "body_type": "raw",
+            "body_content_type": "application/json",
+            "data": "{\"sql\": \"SELECT time_bucket(CAST($bucket AS INTERVAL), last_event_time) AS time, sum(total_credits) AS credits FROM session_stats_agg WHERE last_event_time >= CAST($from AS TIMESTAMP) AND last_event_time < CAST($to AS TIMESTAMP) GROUP BY time ORDER BY time\", \"params\": {\"from\": \"${__from:date:iso}\", \"to\": \"${__to:date:iso}\", \"bucket\": \"${bucket}\"}}"
+          },
+          "root_selector": "rows",
+          "columns": [
+            {
+              "selector": "time",
+              "text": "time",
+              "type": "timestamp"
+            },
+            {
+              "selector": "credits",
+              "text": "credits",
+              "type": "number"
+            }
+          ]
         }
-      ]
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {}
     },
     {
       "id": 5,
-      "title": "Cost by Project",
+      "title": "Tokens per agent",
       "type": "barchart",
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 8
-      },
       "datasource": {
-        "type": "grafana-clickhouse-datasource",
-        "uid": "observal-clickhouse"
+        "type": "yesoreyeram-infinity-datasource",
+        "uid": "observal-telemetry"
       },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "unit": "currencyUSD"
-        },
-        "overrides": []
-      },
-      "options": {
-        "orientation": "horizontal",
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom"
-        },
-        "tooltip": {
-          "mode": "single"
-        }
+      "gridPos": {
+        "x": 12,
+        "y": 4,
+        "w": 12,
+        "h": 8
       },
       "targets": [
         {
-          "datasource": {
-            "type": "grafana-clickhouse-datasource",
-            "uid": "observal-clickhouse"
-          },
-          "queryType": "sql",
-          "rawSql": "SELECT\n  project_id,\n  round(sum(cost), 4) AS total_cost\nFROM spans FINAL\nWHERE is_deleted = 0\n  AND $__timeFilter(start_time)\n  AND ('${environment}' = '1' OR environment IN (${environment:singlequote}))\n  AND cost IS NOT NULL AND cost > 0\nGROUP BY project_id\nORDER BY total_cost DESC\nLIMIT 15",
           "refId": "A",
-          "format": 1
+          "datasource": {
+            "type": "yesoreyeram-infinity-datasource",
+            "uid": "observal-telemetry"
+          },
+          "type": "json",
+          "source": "url",
+          "format": "table",
+          "parser": "backend",
+          "url": "${telemetry_url}/v1/query",
+          "url_options": {
+            "method": "POST",
+            "body_type": "raw",
+            "body_content_type": "application/json",
+            "data": "{\"sql\": \"SELECT agent_id, sum(input_tokens + output_tokens) AS tokens FROM session_stats_agg WHERE agent_id <> '' AND last_event_time >= CAST($from AS TIMESTAMP) AND last_event_time < CAST($to AS TIMESTAMP) GROUP BY agent_id ORDER BY tokens DESC LIMIT 15\", \"params\": {\"from\": \"${__from:date:iso}\", \"to\": \"${__to:date:iso}\", \"bucket\": \"${bucket}\"}}"
+          },
+          "root_selector": "rows",
+          "columns": []
         }
-      ]
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {}
     },
     {
       "id": 6,
-      "title": "Daily Cost Over Time",
-      "type": "timeseries",
-      "gridPos": {
-        "h": 8,
-        "w": 16,
-        "x": 0,
-        "y": 16
-      },
+      "title": "Cost drivers by user",
+      "type": "table",
       "datasource": {
-        "type": "grafana-clickhouse-datasource",
-        "uid": "observal-clickhouse"
+        "type": "yesoreyeram-infinity-datasource",
+        "uid": "observal-telemetry"
       },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "custom": {
-            "lineWidth": 2,
-            "fillOpacity": 15,
-            "spanNulls": false,
-            "drawStyle": "bars",
-            "axisBorderShow": false
-          },
-          "unit": "currencyUSD"
-        },
-        "overrides": []
-      },
-      "options": {
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        },
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom"
-        }
+      "gridPos": {
+        "x": 0,
+        "y": 12,
+        "w": 24,
+        "h": 9
       },
       "targets": [
         {
-          "datasource": {
-            "type": "grafana-clickhouse-datasource",
-            "uid": "observal-clickhouse"
-          },
-          "queryType": "sql",
-          "rawSql": "SELECT\n  toStartOfDay(start_time) AS time,\n  round(sum(cost), 4) AS daily_cost\nFROM spans FINAL\nWHERE is_deleted = 0\n  AND $__timeFilter(start_time)\n  AND ('${project_id}' = '1' OR project_id IN (${project_id:singlequote}))\n  AND ('${environment}' = '1' OR environment IN (${environment:singlequote}))\n  AND cost IS NOT NULL AND cost > 0\nGROUP BY time\nORDER BY time",
           "refId": "A",
-          "format": 1
+          "datasource": {
+            "type": "yesoreyeram-infinity-datasource",
+            "uid": "observal-telemetry"
+          },
+          "type": "json",
+          "source": "url",
+          "format": "table",
+          "parser": "backend",
+          "url": "${telemetry_url}/v1/query",
+          "url_options": {
+            "method": "POST",
+            "body_type": "raw",
+            "body_content_type": "application/json",
+            "data": "{\"sql\": \"SELECT user_id, count(*) AS sessions, sum(total_credits) AS credits, sum(input_tokens + output_tokens) AS tokens FROM session_stats_agg WHERE last_event_time >= CAST($from AS TIMESTAMP) AND last_event_time < CAST($to AS TIMESTAMP) GROUP BY user_id ORDER BY tokens DESC LIMIT 25\", \"params\": {\"from\": \"${__from:date:iso}\", \"to\": \"${__to:date:iso}\", \"bucket\": \"${bucket}\"}}"
+          },
+          "root_selector": "rows",
+          "columns": []
         }
-      ]
-    },
-    {
-      "id": 7,
-      "title": "Daily Cost Breakdown",
-      "type": "table",
-      "gridPos": {
-        "h": 8,
-        "w": 8,
-        "x": 16,
-        "y": 16
-      },
-      "datasource": {
-        "type": "grafana-clickhouse-datasource",
-        "uid": "observal-clickhouse"
-      },
+      ],
       "fieldConfig": {
         "defaults": {},
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "total_cost"
-            },
-            "properties": [
-              {
-                "id": "unit",
-                "value": "currencyUSD"
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "avg_cost"
-            },
-            "properties": [
-              {
-                "id": "unit",
-                "value": "currencyUSD"
-              },
-              {
-                "id": "decimals",
-                "value": 4
-              }
-            ]
-          }
-        ]
+        "overrides": []
       },
-      "options": {
-        "showHeader": true,
-        "sortBy": [
-          {
-            "displayName": "date",
-            "desc": true
-          }
-        ]
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "grafana-clickhouse-datasource",
-            "uid": "observal-clickhouse"
-          },
-          "queryType": "sql",
-          "rawSql": "SELECT\n  toDate(start_time) AS date,\n  count() AS spans,\n  round(sum(cost), 4) AS total_cost,\n  round(avg(cost), 6) AS avg_cost,\n  sum(token_count_total) AS total_tokens\nFROM spans FINAL\nWHERE is_deleted = 0\n  AND $__timeFilter(start_time)\n  AND ('${project_id}' = '1' OR project_id IN (${project_id:singlequote}))\n  AND ('${environment}' = '1' OR environment IN (${environment:singlequote}))\n  AND cost IS NOT NULL AND cost > 0\nGROUP BY date\nORDER BY date DESC",
-          "refId": "A",
-          "format": 2
-        }
-      ]
+      "options": {}
     }
   ]
 }

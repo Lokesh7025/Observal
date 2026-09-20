@@ -34,24 +34,25 @@ services:
         if [ -n "$${GRAFANA_ADMIN_PASSWORD_FILE:-}" ]; then
           export GF_SECURITY_ADMIN_PASSWORD="$$(cat "$$GRAFANA_ADMIN_PASSWORD_FILE")"
         fi
-        if [ -n "$${GRAFANA_CLICKHOUSE_PASSWORD_FILE:-}" ]; then
-          export CLICKHOUSE_PASSWORD="$$(cat "$$GRAFANA_CLICKHOUSE_PASSWORD_FILE")"
+        if [ -n "$${GRAFANA_TELEMETRY_TOKEN_FILE:-}" ]; then
+          export TELEMETRY_TOKEN="$$(cat "$$GRAFANA_TELEMETRY_TOKEN_FILE")"
         fi
         exec /run.sh
     environment:
       - GF_SECURITY_ADMIN_USER=${GRAFANA_ADMIN_USER:-admin}
       - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:-admin}
       - GRAFANA_ADMIN_PASSWORD_FILE=${GRAFANA_ADMIN_PASSWORD_FILE:-}
-      - GF_INSTALL_PLUGINS=grafana-clickhouse-datasource
-      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-clickhouse}
-      - GRAFANA_CLICKHOUSE_PASSWORD_FILE=${GRAFANA_CLICKHOUSE_PASSWORD_FILE:-}
+      - GF_INSTALL_PLUGINS=yesoreyeram-infinity-datasource
+      - TELEMETRY_URL=http://observal-telemetry:8125
+      - TELEMETRY_TOKEN=${TELEMETRY_TOKEN:-}
+      - GRAFANA_TELEMETRY_TOKEN_FILE=${GRAFANA_TELEMETRY_TOKEN_FILE:-}
     volumes:
       - ./secrets/grafana:/run/secrets:ro
       - ./grafana/provisioning:/etc/grafana/provisioning:ro
       - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
       - grafanadata:/var/lib/grafana
     depends_on:
-      observal-clickhouse:
+      observal-telemetry:
         condition: service_healthy
     restart: unless-stopped
     deploy:

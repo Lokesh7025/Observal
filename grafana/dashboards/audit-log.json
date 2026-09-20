@@ -1,472 +1,414 @@
 {
   "uid": "observal-audit-log",
-  "title": "Observal \u2014 Audit Log",
-  "description": "Audit trail: actions, actors, and resource access",
+  "title": "Observal / Audit Log",
+  "description": "Audit trail and security events from the telemetry store.",
   "tags": [
-    "observal"
+    "observal",
+    "telemetry"
   ],
-  "timezone": "browser",
+  "timezone": "utc",
   "schemaVersion": 39,
   "version": 1,
   "editable": true,
-  "fiscalYearStartMonth": 0,
-  "graphTooltip": 1,
+  "refresh": "1m",
   "time": {
     "from": "now-7d",
     "to": "now"
   },
-  "refresh": "1m",
   "templating": {
     "list": [
       {
-        "name": "action",
-        "label": "Action",
-        "type": "query",
-        "datasource": {
-          "type": "grafana-clickhouse-datasource",
-          "uid": "observal-clickhouse"
-        },
-        "query": "SELECT DISTINCT action FROM audit_log ORDER BY action",
+        "name": "telemetry_url",
+        "label": "Telemetry store URL",
+        "type": "constant",
+        "query": "http://observal-telemetry:8125",
         "current": {
-          "selected": true,
-          "text": "All",
-          "value": "$__all"
+          "text": "http://observal-telemetry:8125",
+          "value": "http://observal-telemetry:8125"
         },
-        "includeAll": true,
-        "allValue": "1",
-        "multi": true,
-        "refresh": 2,
-        "sort": 1
+        "hide": 2
       },
       {
-        "name": "resource_type",
-        "label": "Resource Type",
-        "type": "query",
-        "datasource": {
-          "type": "grafana-clickhouse-datasource",
-          "uid": "observal-clickhouse"
-        },
-        "query": "SELECT DISTINCT resource_type FROM audit_log ORDER BY resource_type",
+        "name": "bucket",
+        "label": "Bucket",
+        "type": "custom",
+        "query": "1 hour,1 day,15 minutes,5 minutes",
         "current": {
-          "selected": true,
-          "text": "All",
-          "value": "$__all"
+          "text": "1 hour",
+          "value": "1 hour"
         },
-        "includeAll": true,
-        "allValue": "1",
-        "multi": true,
-        "refresh": 2,
-        "sort": 1
+        "options": [
+          {
+            "text": "1 hour",
+            "value": "1 hour",
+            "selected": true
+          },
+          {
+            "text": "1 day",
+            "value": "1 day",
+            "selected": false
+          },
+          {
+            "text": "15 minutes",
+            "value": "15 minutes",
+            "selected": false
+          },
+          {
+            "text": "5 minutes",
+            "value": "5 minutes",
+            "selected": false
+          }
+        ]
       }
     ]
   },
   "panels": [
     {
       "id": 1,
-      "title": "Audit Events Over Time",
-      "type": "timeseries",
-      "gridPos": {
-        "h": 8,
-        "w": 16,
-        "x": 0,
-        "y": 0
-      },
-      "datasource": {
-        "type": "grafana-clickhouse-datasource",
-        "uid": "observal-clickhouse"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "fixed",
-            "fixedColor": "blue"
-          },
-          "custom": {
-            "lineWidth": 2,
-            "fillOpacity": 15,
-            "spanNulls": false,
-            "axisBorderShow": false
-          },
-          "unit": "short"
-        },
-        "overrides": []
-      },
-      "options": {
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        },
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom"
-        }
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "grafana-clickhouse-datasource",
-            "uid": "observal-clickhouse"
-          },
-          "queryType": "sql",
-          "rawSql": "SELECT\n  $__timeInterval(timestamp) AS time,\n  count() AS events\nFROM audit_log\nWHERE $__timeFilter(timestamp)\n  AND ('${action}' = '1' OR action IN (${action:singlequote}))\n  AND ('${resource_type}' = '1' OR resource_type IN (${resource_type:singlequote}))\nGROUP BY time\nORDER BY time",
-          "refId": "A",
-          "format": 1
-        }
-      ]
-    },
-    {
-      "id": 2,
-      "title": "Total Events",
+      "title": "Audit events",
       "type": "stat",
-      "gridPos": {
-        "h": 4,
-        "w": 4,
-        "x": 16,
-        "y": 0
-      },
       "datasource": {
-        "type": "grafana-clickhouse-datasource",
-        "uid": "observal-clickhouse"
+        "type": "yesoreyeram-infinity-datasource",
+        "uid": "observal-telemetry"
       },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "fixed",
-            "fixedColor": "blue"
-          },
-          "unit": "short",
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "blue",
-                "value": null
-              }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "colorMode": "background",
-        "graphMode": "area",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ]
-        },
-        "textMode": "auto"
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "grafana-clickhouse-datasource",
-            "uid": "observal-clickhouse"
-          },
-          "queryType": "sql",
-          "rawSql": "SELECT count() AS total\nFROM audit_log\nWHERE $__timeFilter(timestamp)\n  AND ('${action}' = '1' OR action IN (${action:singlequote}))\n  AND ('${resource_type}' = '1' OR resource_type IN (${resource_type:singlequote}))",
-          "refId": "A",
-          "format": 1
-        }
-      ]
-    },
-    {
-      "id": 3,
-      "title": "Unique Actors",
-      "type": "stat",
       "gridPos": {
-        "h": 4,
-        "w": 4,
-        "x": 20,
-        "y": 0
-      },
-      "datasource": {
-        "type": "grafana-clickhouse-datasource",
-        "uid": "observal-clickhouse"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "fixed",
-            "fixedColor": "purple"
-          },
-          "unit": "short",
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "purple",
-                "value": null
-              }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "colorMode": "background",
-        "graphMode": "none",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ]
-        },
-        "textMode": "auto"
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "grafana-clickhouse-datasource",
-            "uid": "observal-clickhouse"
-          },
-          "queryType": "sql",
-          "rawSql": "SELECT count(DISTINCT actor_id) AS unique_actors\nFROM audit_log\nWHERE $__timeFilter(timestamp)\n  AND ('${action}' = '1' OR action IN (${action:singlequote}))\n  AND ('${resource_type}' = '1' OR resource_type IN (${resource_type:singlequote}))",
-          "refId": "A",
-          "format": 1
-        }
-      ]
-    },
-    {
-      "id": 4,
-      "title": "Events by Action",
-      "type": "piechart",
-      "gridPos": {
-        "h": 8,
-        "w": 8,
-        "x": 16,
-        "y": 4
-      },
-      "datasource": {
-        "type": "grafana-clickhouse-datasource",
-        "uid": "observal-clickhouse"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "unit": "short"
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "table",
-          "placement": "right",
-          "values": [
-            "value",
-            "percent"
-          ]
-        },
-        "tooltip": {
-          "mode": "single"
-        },
-        "pieType": "donut",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ]
-        }
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "grafana-clickhouse-datasource",
-            "uid": "observal-clickhouse"
-          },
-          "queryType": "sql",
-          "rawSql": "SELECT\n  action,\n  count() AS count\nFROM audit_log\nWHERE $__timeFilter(timestamp)\n  AND ('${resource_type}' = '1' OR resource_type IN (${resource_type:singlequote}))\nGROUP BY action\nORDER BY count DESC",
-          "refId": "A",
-          "format": 1
-        }
-      ]
-    },
-    {
-      "id": 5,
-      "title": "Events by Resource Type",
-      "type": "barchart",
-      "gridPos": {
-        "h": 8,
-        "w": 8,
         "x": 0,
-        "y": 8
-      },
-      "datasource": {
-        "type": "grafana-clickhouse-datasource",
-        "uid": "observal-clickhouse"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "unit": "short"
-        },
-        "overrides": []
-      },
-      "options": {
-        "orientation": "horizontal",
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom"
-        },
-        "tooltip": {
-          "mode": "single"
-        }
+        "y": 0,
+        "w": 6,
+        "h": 4
       },
       "targets": [
         {
-          "datasource": {
-            "type": "grafana-clickhouse-datasource",
-            "uid": "observal-clickhouse"
-          },
-          "queryType": "sql",
-          "rawSql": "SELECT\n  resource_type,\n  count() AS count\nFROM audit_log\nWHERE $__timeFilter(timestamp)\n  AND ('${action}' = '1' OR action IN (${action:singlequote}))\nGROUP BY resource_type\nORDER BY count DESC\nLIMIT 15",
           "refId": "A",
-          "format": 1
-        }
-      ]
-    },
-    {
-      "id": 6,
-      "title": "Top Actors",
-      "type": "barchart",
-      "gridPos": {
-        "h": 8,
-        "w": 8,
-        "x": 8,
-        "y": 8
-      },
-      "datasource": {
-        "type": "grafana-clickhouse-datasource",
-        "uid": "observal-clickhouse"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "unit": "short"
-        },
-        "overrides": []
-      },
-      "options": {
-        "orientation": "horizontal",
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom"
-        },
-        "tooltip": {
-          "mode": "single"
-        }
-      },
-      "targets": [
-        {
           "datasource": {
-            "type": "grafana-clickhouse-datasource",
-            "uid": "observal-clickhouse"
+            "type": "yesoreyeram-infinity-datasource",
+            "uid": "observal-telemetry"
           },
-          "queryType": "sql",
-          "rawSql": "SELECT\n  actor_email,\n  actor_role,\n  count() AS events\nFROM audit_log\nWHERE $__timeFilter(timestamp)\n  AND ('${action}' = '1' OR action IN (${action:singlequote}))\n  AND ('${resource_type}' = '1' OR resource_type IN (${resource_type:singlequote}))\nGROUP BY actor_email, actor_role\nORDER BY events DESC\nLIMIT 15",
-          "refId": "A",
-          "format": 1
-        }
-      ]
-    },
-    {
-      "id": 7,
-      "title": "Events by HTTP Method",
-      "type": "piechart",
-      "gridPos": {
-        "h": 8,
-        "w": 8,
-        "x": 16,
-        "y": 12
-      },
-      "datasource": {
-        "type": "grafana-clickhouse-datasource",
-        "uid": "observal-clickhouse"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
+          "type": "json",
+          "source": "url",
+          "format": "table",
+          "parser": "backend",
+          "url": "${telemetry_url}/v1/query",
+          "url_options": {
+            "method": "POST",
+            "body_type": "raw",
+            "body_content_type": "application/json",
+            "data": "{\"sql\": \"SELECT count(*) AS events FROM audit_log WHERE \\\"timestamp\\\" >= CAST($from AS TIMESTAMP) AND \\\"timestamp\\\" < CAST($to AS TIMESTAMP)\", \"params\": {\"from\": \"${__from:date:iso}\", \"to\": \"${__to:date:iso}\", \"bucket\": \"${bucket}\"}}"
           },
-          "unit": "short"
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "table",
-          "placement": "right",
-          "values": [
-            "value",
-            "percent"
-          ]
-        },
-        "tooltip": {
-          "mode": "single"
-        },
-        "pieType": "donut",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ]
+          "root_selector": "rows",
+          "columns": []
         }
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "grafana-clickhouse-datasource",
-            "uid": "observal-clickhouse"
-          },
-          "queryType": "sql",
-          "rawSql": "SELECT\n  http_method,\n  count() AS count\nFROM audit_log\nWHERE $__timeFilter(timestamp)\n  AND http_method != ''\n  AND ('${action}' = '1' OR action IN (${action:singlequote}))\n  AND ('${resource_type}' = '1' OR resource_type IN (${resource_type:singlequote}))\nGROUP BY http_method\nORDER BY count DESC",
-          "refId": "A",
-          "format": 1
-        }
-      ]
-    },
-    {
-      "id": 8,
-      "title": "Recent Audit Events",
-      "type": "table",
-      "gridPos": {
-        "h": 10,
-        "w": 24,
-        "x": 0,
-        "y": 20
-      },
-      "datasource": {
-        "type": "grafana-clickhouse-datasource",
-        "uid": "observal-clickhouse"
-      },
+      ],
       "fieldConfig": {
         "defaults": {},
         "overrides": []
       },
-      "options": {
-        "showHeader": true,
-        "sortBy": [
-          {
-            "displayName": "timestamp",
-            "desc": true
-          }
-        ]
+      "options": {}
+    },
+    {
+      "id": 2,
+      "title": "Failures",
+      "type": "stat",
+      "datasource": {
+        "type": "yesoreyeram-infinity-datasource",
+        "uid": "observal-telemetry"
+      },
+      "gridPos": {
+        "x": 6,
+        "y": 0,
+        "w": 6,
+        "h": 4
       },
       "targets": [
         {
-          "datasource": {
-            "type": "grafana-clickhouse-datasource",
-            "uid": "observal-clickhouse"
-          },
-          "queryType": "sql",
-          "rawSql": "SELECT\n  timestamp,\n  actor_email,\n  actor_role,\n  action,\n  resource_type,\n  resource_name,\n  http_method,\n  http_path,\n  status_code,\n  ip_address,\n  detail\nFROM audit_log\nWHERE $__timeFilter(timestamp)\n  AND ('${action}' = '1' OR action IN (${action:singlequote}))\n  AND ('${resource_type}' = '1' OR resource_type IN (${resource_type:singlequote}))\nORDER BY timestamp DESC\nLIMIT 100",
           "refId": "A",
-          "format": 2
+          "datasource": {
+            "type": "yesoreyeram-infinity-datasource",
+            "uid": "observal-telemetry"
+          },
+          "type": "json",
+          "source": "url",
+          "format": "table",
+          "parser": "backend",
+          "url": "${telemetry_url}/v1/query",
+          "url_options": {
+            "method": "POST",
+            "body_type": "raw",
+            "body_content_type": "application/json",
+            "data": "{\"sql\": \"SELECT count(*) AS failures FROM audit_log WHERE outcome = 'failure' AND \\\"timestamp\\\" >= CAST($from AS TIMESTAMP) AND \\\"timestamp\\\" < CAST($to AS TIMESTAMP)\", \"params\": {\"from\": \"${__from:date:iso}\", \"to\": \"${__to:date:iso}\", \"bucket\": \"${bucket}\"}}"
+          },
+          "root_selector": "rows",
+          "columns": []
         }
-      ]
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "id": 3,
+      "title": "Sensitive actions",
+      "type": "stat",
+      "datasource": {
+        "type": "yesoreyeram-infinity-datasource",
+        "uid": "observal-telemetry"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 0,
+        "w": 6,
+        "h": 4
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "yesoreyeram-infinity-datasource",
+            "uid": "observal-telemetry"
+          },
+          "type": "json",
+          "source": "url",
+          "format": "table",
+          "parser": "backend",
+          "url": "${telemetry_url}/v1/query",
+          "url_options": {
+            "method": "POST",
+            "body_type": "raw",
+            "body_content_type": "application/json",
+            "data": "{\"sql\": \"SELECT count(*) AS sensitive FROM audit_log WHERE sensitivity <> 'standard' AND \\\"timestamp\\\" >= CAST($from AS TIMESTAMP) AND \\\"timestamp\\\" < CAST($to AS TIMESTAMP)\", \"params\": {\"from\": \"${__from:date:iso}\", \"to\": \"${__to:date:iso}\", \"bucket\": \"${bucket}\"}}"
+          },
+          "root_selector": "rows",
+          "columns": []
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "id": 4,
+      "title": "Security events",
+      "type": "stat",
+      "datasource": {
+        "type": "yesoreyeram-infinity-datasource",
+        "uid": "observal-telemetry"
+      },
+      "gridPos": {
+        "x": 18,
+        "y": 0,
+        "w": 6,
+        "h": 4
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "yesoreyeram-infinity-datasource",
+            "uid": "observal-telemetry"
+          },
+          "type": "json",
+          "source": "url",
+          "format": "table",
+          "parser": "backend",
+          "url": "${telemetry_url}/v1/query",
+          "url_options": {
+            "method": "POST",
+            "body_type": "raw",
+            "body_content_type": "application/json",
+            "data": "{\"sql\": \"SELECT count(*) AS events FROM security_events WHERE \\\"timestamp\\\" >= CAST($from AS TIMESTAMP) AND \\\"timestamp\\\" < CAST($to AS TIMESTAMP)\", \"params\": {\"from\": \"${__from:date:iso}\", \"to\": \"${__to:date:iso}\", \"bucket\": \"${bucket}\"}}"
+          },
+          "root_selector": "rows",
+          "columns": []
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "id": 5,
+      "title": "Audit events over time",
+      "type": "timeseries",
+      "datasource": {
+        "type": "yesoreyeram-infinity-datasource",
+        "uid": "observal-telemetry"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 4,
+        "w": 16,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "yesoreyeram-infinity-datasource",
+            "uid": "observal-telemetry"
+          },
+          "type": "json",
+          "source": "url",
+          "format": "timeseries",
+          "parser": "backend",
+          "url": "${telemetry_url}/v1/query",
+          "url_options": {
+            "method": "POST",
+            "body_type": "raw",
+            "body_content_type": "application/json",
+            "data": "{\"sql\": \"SELECT time_bucket(CAST($bucket AS INTERVAL), \\\"timestamp\\\") AS time, count(*) AS events FROM audit_log WHERE \\\"timestamp\\\" >= CAST($from AS TIMESTAMP) AND \\\"timestamp\\\" < CAST($to AS TIMESTAMP) GROUP BY time ORDER BY time\", \"params\": {\"from\": \"${__from:date:iso}\", \"to\": \"${__to:date:iso}\", \"bucket\": \"${bucket}\"}}"
+          },
+          "root_selector": "rows",
+          "columns": [
+            {
+              "selector": "time",
+              "text": "time",
+              "type": "timestamp"
+            },
+            {
+              "selector": "events",
+              "text": "events",
+              "type": "number"
+            }
+          ]
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "id": 6,
+      "title": "Actions",
+      "type": "piechart",
+      "datasource": {
+        "type": "yesoreyeram-infinity-datasource",
+        "uid": "observal-telemetry"
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 4,
+        "w": 8,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "yesoreyeram-infinity-datasource",
+            "uid": "observal-telemetry"
+          },
+          "type": "json",
+          "source": "url",
+          "format": "table",
+          "parser": "backend",
+          "url": "${telemetry_url}/v1/query",
+          "url_options": {
+            "method": "POST",
+            "body_type": "raw",
+            "body_content_type": "application/json",
+            "data": "{\"sql\": \"SELECT action, count(*) AS events FROM audit_log WHERE \\\"timestamp\\\" >= CAST($from AS TIMESTAMP) AND \\\"timestamp\\\" < CAST($to AS TIMESTAMP) GROUP BY action ORDER BY events DESC LIMIT 12\", \"params\": {\"from\": \"${__from:date:iso}\", \"to\": \"${__to:date:iso}\", \"bucket\": \"${bucket}\"}}"
+          },
+          "root_selector": "rows",
+          "columns": []
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "id": 7,
+      "title": "Recent audit entries",
+      "type": "table",
+      "datasource": {
+        "type": "yesoreyeram-infinity-datasource",
+        "uid": "observal-telemetry"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 12,
+        "w": 24,
+        "h": 10
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "yesoreyeram-infinity-datasource",
+            "uid": "observal-telemetry"
+          },
+          "type": "json",
+          "source": "url",
+          "format": "table",
+          "parser": "backend",
+          "url": "${telemetry_url}/v1/query",
+          "url_options": {
+            "method": "POST",
+            "body_type": "raw",
+            "body_content_type": "application/json",
+            "data": "{\"sql\": \"SELECT \\\"timestamp\\\" AS time, actor_email, action, resource_type, resource_name, outcome, source, http_method, http_path, status_code FROM audit_log WHERE \\\"timestamp\\\" >= CAST($from AS TIMESTAMP) AND \\\"timestamp\\\" < CAST($to AS TIMESTAMP) ORDER BY \\\"timestamp\\\" DESC LIMIT 100\", \"params\": {\"from\": \"${__from:date:iso}\", \"to\": \"${__to:date:iso}\", \"bucket\": \"${bucket}\"}}"
+          },
+          "root_selector": "rows",
+          "columns": []
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "id": 8,
+      "title": "Recent security events",
+      "type": "table",
+      "datasource": {
+        "type": "yesoreyeram-infinity-datasource",
+        "uid": "observal-telemetry"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 22,
+        "w": 24,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "yesoreyeram-infinity-datasource",
+            "uid": "observal-telemetry"
+          },
+          "type": "json",
+          "source": "url",
+          "format": "table",
+          "parser": "backend",
+          "url": "${telemetry_url}/v1/query",
+          "url_options": {
+            "method": "POST",
+            "body_type": "raw",
+            "body_content_type": "application/json",
+            "data": "{\"sql\": \"SELECT \\\"timestamp\\\" AS time, event_type, severity, actor_email, outcome, source_ip, detail FROM security_events WHERE \\\"timestamp\\\" >= CAST($from AS TIMESTAMP) AND \\\"timestamp\\\" < CAST($to AS TIMESTAMP) ORDER BY \\\"timestamp\\\" DESC LIMIT 50\", \"params\": {\"from\": \"${__from:date:iso}\", \"to\": \"${__to:date:iso}\", \"bucket\": \"${bucket}\"}}"
+          },
+          "root_selector": "rows",
+          "columns": []
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {}
     }
   ]
 }

@@ -29,14 +29,15 @@ services:
     environment:
       - GF_SECURITY_ADMIN_USER=${GRAFANA_ADMIN_USER:-admin}
       - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:-admin}
-      - GF_INSTALL_PLUGINS=grafana-clickhouse-datasource
-      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-clickhouse}
+      - GF_INSTALL_PLUGINS=yesoreyeram-infinity-datasource
+      - TELEMETRY_URL=http://observal-telemetry:8125
+      - TELEMETRY_TOKEN=${TELEMETRY_TOKEN:-}
     volumes:
       - ../grafana/provisioning:/etc/grafana/provisioning:ro
       - ../grafana/dashboards:/var/lib/grafana/dashboards:ro
       - grafanadata:/var/lib/grafana
     depends_on:
-      observal-clickhouse:
+      observal-telemetry:
         condition: service_healthy
     restart: unless-stopped
     deploy:
