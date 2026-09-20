@@ -44,15 +44,15 @@ Sources: `1e2f2be5`, `7955fdd9`
 
 Current PR #1748 gap: `telemetry_store.writer.replace_rows()` deletes existing keys and inserts every incoming row. Duplicate logical keys inside one request remain duplicated because the schema intentionally has no PK/UNIQUE constraint.
 
-- [ ] Add an incoming-order column to staged replacement batches.
-- [ ] Deduplicate staged rows by the complete logical key before delete and insert.
-- [ ] Define and enforce last-payload-wins semantics.
-- [ ] Apply the same semantics to session events and layer snapshots.
-- [ ] Confirm checkpoint and summary replacement cannot produce duplicate logical rows.
-- [ ] Test duplicate keys inside one request.
-- [ ] Test duplicate keys across retries/replays.
-- [ ] Test duplicate sentinel/non-source event rows.
-- [ ] Test concurrent reads during repeated replacement.
+- [x] Add an incoming-order column to staged replacement batches.
+- [x] Deduplicate staged rows by the complete logical key before delete and insert.
+- [x] Define and enforce last-payload-wins semantics.
+- [x] Apply the same semantics to session events and layer snapshots.
+- [x] Confirm checkpoint and summary replacement cannot produce duplicate logical rows.
+- [x] Test duplicate keys inside one request.
+- [x] Test duplicate keys across retries/replays.
+- [x] Test duplicate sentinel/non-source event rows.
+- [x] Test concurrent reads during repeated replacement.
 
 Evidence required:
 

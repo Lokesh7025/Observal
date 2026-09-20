@@ -208,9 +208,85 @@ async def test_replace_latest_wins_and_sentinel_preserved(store, event_row):
     assert [r_["line_offset"] for r_ in rows] == [0, 1, 2, EXTRA_ROW_LINE_OFFSET]
     assert rows[1]["content_preview"] == "changed"
     assert rows[3]["is_source_record"] is False
+
+    # Duplicate identities are compared after type coercion and retain the
+    # final payload in caller order.
+    duplicate_first = event_row("dupe", 7, content_preview="first")
+    duplicate_last = event_row("dupe", 7, content_preview="last")
+    duplicate_last["line_offset"] = "7"
+    r = await store.post(
+        "/v1/write/replace",
+        json={"table": "session_events", "rows": [duplicate_first, duplicate_last]},
+    )
+    assert r.status_code == 200 and r.json() == {"rows_written": 1, "rows_replaced": 0}
+    assert await _q(
+        store,
+        "SELECT content_preview FROM session_events WHERE session_id = 'dupe' AND line_offset = 7",
+    ) == [{"content_preview": "last"}]
+
+    # Replaying an overlapping duplicate batch still leaves one canonical row.
+    r = await store.post(
+        "/v1/write/replace",
+        json={
+            "table": "session_events",
+            "rows": [
+                event_row("dupe", 7, content_preview="replay-first"),
+                event_row("dupe", 7, content_preview="replay-last"),
+            ],
+        },
+    )
+    assert r.status_code == 200 and r.json() == {"rows_written": 1, "rows_replaced": 1}
+    assert await _q(
+        store,
+        "SELECT count(*) AS c, max(content_preview) AS content FROM session_events "
+        "WHERE session_id = 'dupe' AND line_offset = 7",
+    ) == [{"c": 1, "content": "replay-last"}]
+
+    sentinel_rows = [
+        event_row("sentinel", EXTRA_ROW_LINE_OFFSET, is_source_record=0, content_preview="old"),
+        event_row("sentinel", EXTRA_ROW_LINE_OFFSET, is_source_record=0, content_preview="new"),
+    ]
+    r = await store.post("/v1/write/replace", json={"table": "session_events", "rows": sentinel_rows})
+    assert r.status_code == 200 and r.json()["rows_written"] == 1
+    assert await _q(
+        store,
+        "SELECT count(*) AS c, max(content_preview) AS content FROM session_events WHERE session_id = 'sentinel'",
+    ) == [{"c": 1, "content": "new"}]
+
     key = session_key("default", "u1", "claude-code", "s1")
-    keys = await _q(store, "SELECT DISTINCT session_key AS k FROM session_events")
+    keys = await _q(store, "SELECT DISTINCT session_key AS k FROM session_events WHERE session_id = 's1'")
     assert keys == [{"k": key}]
+
+
+@pytest.mark.asyncio
+async def test_overlapping_batch_replay_is_stable_during_reads(store, event_row):
+    rows = [event_row("pressure", offset) for offset in range(200)]
+
+    async def replay() -> None:
+        for generation in range(3):
+            batch = [{**row, "content_preview": f"generation-{generation}"} for row in rows]
+            response = await store.post(
+                "/v1/write/replace",
+                json={"table": "session_events", "rows": [*batch, *batch]},
+            )
+            assert response.status_code == 200, response.text
+            assert response.json()["rows_written"] == len(rows)
+
+    async def read() -> None:
+        for _ in range(10):
+            result = await _q(
+                store,
+                "SELECT count(*) AS c, max(line_offset) AS max_offset FROM session_events "
+                "WHERE session_id = 'pressure'",
+            )
+            assert result[0]["c"] in {0, len(rows)}
+
+    await asyncio.gather(replay(), *(read() for _ in range(3)))
+    assert await _q(
+        store,
+        "SELECT count(*) AS c, count(DISTINCT line_offset) AS distinct_offsets, "
+        "min(content_preview) AS content FROM session_events WHERE session_id = 'pressure'",
+    ) == [{"c": len(rows), "distinct_offsets": len(rows), "content": "generation-2"}]
 
 
 @pytest.mark.asyncio
@@ -320,6 +396,18 @@ async def test_layer_snapshot_replace(store):
     assert r.json() == {"rows_written": 1, "rows_replaced": 1}
     rows = await _q(store, "SELECT content FROM layer_snapshots")
     assert rows == [{"content": '{"v":2}'}]
+
+    r = await store.post(
+        "/v1/write/replace",
+        json={
+            "table": "layer_snapshots",
+            "rows": [{**row, "content": '{"v":3}'}, {**row, "content": '{"v":4}'}],
+        },
+    )
+    assert r.json() == {"rows_written": 1, "rows_replaced": 1}
+    assert await _q(store, "SELECT count(*) AS c, max(content) AS content FROM layer_snapshots") == [
+        {"c": 1, "content": '{"v":4}'}
+    ]
 
 
 # ── A-12 retention primitives ────────────────────────────────────────

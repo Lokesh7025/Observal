@@ -129,7 +129,13 @@ def _arrow_from_rows(columns: Iterable[str], rows: list[dict[str, Any]]) -> pa.T
     return pa.table(arrays, names=cols)
 
 
-def _cast_select(columns: Iterable[str], types: dict[str, str], source: str) -> str:
+def _cast_select(
+    columns: Iterable[str],
+    types: dict[str, str],
+    source: str,
+    *,
+    passthrough: Iterable[str] = (),
+) -> str:
     parts = []
     for c in columns:
         target = types[c]
@@ -142,11 +148,23 @@ def _cast_select(columns: Iterable[str], types: dict[str, str], source: str) -> 
             )
         else:
             parts.append(f'CAST("{c}" AS {target}) AS "{c}"')
+    parts.extend(f'"{c}"' for c in passthrough)
     return f"SELECT {', '.join(parts)} FROM {source}"
 
 
-def _stage_rows(conn: duckdb.DuckDBPyConnection, table: TelemetryTable, rows: list[dict[str, Any]]) -> str:
-    """Register incoming rows as a typed temporary view. Returns the view name."""
+def _stage_rows(
+    conn: duckdb.DuckDBPyConnection,
+    table: TelemetryTable,
+    rows: list[dict[str, Any]],
+    *,
+    deduplicate_by: Iterable[str] = (),
+) -> str:
+    """Register incoming rows as a typed temporary view. Returns the view name.
+
+    Replacement batches are deduplicated after type coercion so values such as
+    ``1`` and ``"1"`` resolve to the same logical key. Caller order is retained
+    explicitly and the final payload wins.
+    """
     types = _column_types(conn, table.name)
     unknown = {k for row in rows for k in row} - set(types)
     if unknown:
@@ -154,10 +172,34 @@ def _stage_rows(conn: duckdb.DuckDBPyConnection, table: TelemetryTable, rows: li
     present = [c for c in table.columns if c in types and any(c in row for row in rows)]
     if not present:
         raise WriteError("rows contain no known columns")
+
+    dedupe_keys = tuple(deduplicate_by)
+    missing_keys = [key for key in dedupe_keys if key not in present or any(row.get(key) is None for row in rows)]
+    if missing_keys:
+        raise WriteError(f"replacement rows for {table.name} require keys: {missing_keys}")
+
     raw_view = f"_incoming_raw_{table.name}"
     typed_view = f"_incoming_{table.name}"
-    conn.register(raw_view, _arrow_from_rows(present, rows))
-    conn.execute(f"CREATE OR REPLACE TEMP VIEW {typed_view} AS {_cast_select(present, types, raw_view)}")
+    if not dedupe_keys:
+        conn.register(raw_view, _arrow_from_rows(present, rows))
+        conn.execute(f"CREATE OR REPLACE TEMP VIEW {typed_view} AS {_cast_select(present, types, raw_view)}")
+        return typed_view
+
+    order_column = "_incoming_order"
+    ordered_rows = [{**row, order_column: index} for index, row in enumerate(rows)]
+    conn.register(raw_view, _arrow_from_rows([*present, order_column], ordered_rows))
+    cast_view = f"_incoming_cast_{table.name}"
+    conn.execute(
+        f"CREATE OR REPLACE TEMP VIEW {cast_view} AS "
+        f"{_cast_select(present, types, raw_view, passthrough=(order_column,))}"
+    )
+    partition = ", ".join(f'"{key}"' for key in dedupe_keys)
+    conn.execute(
+        f"CREATE OR REPLACE TEMP VIEW {typed_view} AS "
+        'SELECT * EXCLUDE ("_incoming_order", "_incoming_rank") FROM ('
+        f'SELECT *, row_number() OVER (PARTITION BY {partition} ORDER BY "{order_column}" DESC) '
+        f'AS "_incoming_rank" FROM {cast_view}) WHERE "_incoming_rank" = 1'
+    )
     return typed_view
 
 
@@ -224,7 +266,7 @@ def replace_rows(conn: duckdb.DuckDBPyConnection, table_name: str, rows: list[di
     if not rows:
         return {"rows_written": 0, "rows_replaced": 0}
     attach_keys(table, rows)
-    view = _stage_rows(conn, table, rows)
+    view = _stage_rows(conn, table, rows, deduplicate_by=table.key_columns)
     replaced = _delete_matching_keys(conn, table, view)
     written = _insert_from_view(conn, table.name, view, _view_columns(conn, view))
     return {"rows_written": written, "rows_replaced": replaced}
