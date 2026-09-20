@@ -161,6 +161,30 @@ def _stage_rows(conn: duckdb.DuckDBPyConnection, table: TelemetryTable, rows: li
     return typed_view
 
 
+def _release_staging(conn: duckdb.DuckDBPyConnection) -> None:
+    """Drop per-transaction staging objects so they neither pin row buffers nor show up in listings.
+
+    Registered Arrow tables and temp views live on the writer connection, which
+    is shared by every transaction; without this they would linger between
+    requests and appear in ``information_schema``.
+    """
+    names = [
+        r[0]
+        for r in conn.execute("SELECT view_name FROM duckdb_views() WHERE view_name LIKE '\\_%' ESCAPE '\\'").fetchall()
+    ]
+    for name in names:
+        try:
+            conn.unregister(name)
+        except duckdb.Error:
+            pass
+        try:
+            conn.execute(f'DROP VIEW IF EXISTS "{name}"')
+        except duckdb.Error:
+            pass
+    for name in ("_chunk_src", "_chunk_typed"):
+        conn.execute(f"DROP TABLE IF EXISTS {name}")
+
+
 def _insert_from_view(conn: duckdb.DuckDBPyConnection, table: str, view: str, columns: list[str]) -> int:
     cols = ", ".join(f'"{c}"' for c in columns)
     conn.execute(f'INSERT INTO "{table}" ({cols}) SELECT {cols} FROM {view}')
@@ -624,6 +648,8 @@ class Writer:
             except duckdb.Error:
                 pass
             raise
+        finally:
+            _release_staging(conn)
 
     async def run(self, fn: Callable[..., T], *args: Any, **kwargs: Any) -> T:
         if self.paused:

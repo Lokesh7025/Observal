@@ -201,7 +201,13 @@ class Database:
 
     def table_counts(self) -> dict[str, int]:
         conn = self.open()
-        names = [r[0] for r in conn.execute("SELECT table_name FROM information_schema.tables ORDER BY 1").fetchall()]
+        names = [
+            r[0]
+            for r in conn.execute(
+                "SELECT table_name FROM information_schema.tables "
+                "WHERE table_schema = 'main' AND table_type = 'BASE TABLE' ORDER BY 1"
+            ).fetchall()
+        ]
         counts: dict[str, int] = {}
         for name in names:
             counts[name] = int(conn.execute(f'SELECT count(*) FROM "{name}"').fetchone()[0])

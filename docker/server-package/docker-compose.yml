@@ -40,6 +40,7 @@ services:
       - "${OBSERVAL_SECRET_GID:-1000}"
     environment:
       - JWT_KEY_DIR=/data/keys
+      - MIGRATION_ARTIFACT_ROOT=/data/migration_artifacts
       - SKIP_DDL_ON_STARTUP=true
       - DEMO_SUPER_ADMIN_EMAIL=${DEMO_SUPER_ADMIN_EMAIL:-super@demo.example}
       - DEMO_ADMIN_EMAIL=${DEMO_ADMIN_EMAIL:-admin@demo.example}
@@ -198,10 +199,13 @@ services:
     command: ["/app/.venv/bin/python", "-c", "import asyncio; asyncio.set_event_loop(asyncio.new_event_loop()); from arq import run_worker; from worker import WorkerSettings; run_worker(WorkerSettings)"]
     env_file:
       - ./.env
+    environment:
+      - MIGRATION_ARTIFACT_ROOT=/data/migration_artifacts
     group_add:
       - "${OBSERVAL_SECRET_GID:-1000}"
     volumes:
       - ./secrets:/run/secrets:ro
+      - apidata:/data
     depends_on:
       observal-init:
         condition: service_completed_successfully

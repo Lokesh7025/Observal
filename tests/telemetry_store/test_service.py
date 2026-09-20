@@ -584,6 +584,29 @@ async def test_stats_and_metrics(store):
     assert r.json() == {"ok": True}
 
 
+@pytest.mark.asyncio
+async def test_writes_leave_no_staging_objects_behind(store, event_row):
+    """Registered Arrow views and temp tables are released after every transaction."""
+    identity = {"project_id": "default", "user_id": "u1", "harness": "claude-code", "session_id": "st"}
+    await store.post("/v1/write/session-batch", json={"events": [event_row("st", 0)], "advance_checkpoint": identity})
+    r = await store.post(
+        "/v1/write/append",
+        json={
+            "table": "audit_log",
+            "rows": [
+                {"event_id": "33333333-3333-3333-3333-333333333333", "timestamp": "2026-05-01T10:00:00Z", "action": "a"}
+            ],
+        },
+    )
+    assert r.status_code == 200, r.text
+    r = await store.get("/v1/stats")
+    tables = r.json()["tables"]
+    assert not [t for t in tables if t.startswith("_")], tables
+    assert tables["session_events"] == 1 and tables["audit_log"] == 1
+    views = await _q(store, "SELECT view_name FROM duckdb_views() WHERE NOT internal")
+    assert views == []
+
+
 # ── init-container migrate ──────────────────────────────────────────────
 
 
