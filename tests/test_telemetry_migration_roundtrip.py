@@ -20,7 +20,9 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
+import observal_shared.migration.telemetry_import as telemetry_import_module
 from observal_shared.migration import (
+    ArtifactValidationError,
     NullReporter,
     TelemetryConnParams,
     export_telemetry,
@@ -286,6 +288,7 @@ async def test_import_is_idempotent_rebuilds_derived_and_protects_live_rows(tmp_
         # Resume state file exists and is scoped to the migration id.
         state = json.loads((export_dir / "import_state.json").read_text())
         assert state["migration_id"] == "cutover-test" and len(state["completed"]) == 4
+        assert all({"table", "sha256", "row_count"} <= entry.keys() for entry in state["completed"].values())
 
         validation = await validate_telemetry(store.params, None, export_dir, NullReporter())
         assert validation.checksums_valid
@@ -304,10 +307,86 @@ async def test_checksum_mismatch_is_reported_before_import(tmp_path, route_httpx
 
         with pytest.raises(MigrationError, match="checksum mismatch"):
             await import_telemetry(store.params, export_dir, NullReporter())
-        # Other chunks were still imported, nothing from the corrupt one.
-        assert await store.rows("SELECT count(*) AS c FROM session_events WHERE session_id='s1'") == [{"c": 0}]
+        # The entire manifest is checked before the destination is contacted for writes.
+        assert await store.rows("SELECT count(*) AS c FROM session_events") == [{"c": 0}]
+        assert await store.rows("SELECT count(*) AS c FROM telemetry_import_ledger") == [{"c": 0}]
         validation = await validate_telemetry(None, None, export_dir, NullReporter())
         assert validation.checksums_valid is False
+
+
+async def test_interrupted_import_resumes_without_duplicate_writes(tmp_path, route_httpx_to_stores, monkeypatch):
+    export_dir = tmp_path / "legacy"
+    write_legacy_export(export_dir)
+    async with LiveStore(tmp_path / "a") as store:
+        route_httpx_to_stores["store"] = store
+        original_post_chunk = telemetry_import_module._post_chunk
+        calls = 0
+
+        async def interrupt_after_first(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise telemetry_import_module.MigrationError("simulated interruption")
+            return await original_post_chunk(*args, **kwargs)
+
+        monkeypatch.setattr(telemetry_import_module, "_post_chunk", interrupt_after_first)
+        with pytest.raises(telemetry_import_module.MigrationError, match="simulated interruption"):
+            await import_telemetry(store.params, export_dir, NullReporter(), rebuild=False)
+        assert await store.rows("SELECT count(*) AS c FROM telemetry_import_ledger") == [{"c": 1}]
+
+        monkeypatch.setattr(telemetry_import_module, "_post_chunk", original_post_chunk)
+        result = await import_telemetry(store.params, export_dir, NullReporter(), rebuild=False)
+        assert result.rows_imported == 10
+        assert await store.rows("SELECT count(*) AS c FROM session_events") == [{"c": 8}]
+        assert await store.rows("SELECT count(*) AS c FROM telemetry_import_ledger") == [{"c": 4}]
+
+
+async def test_modified_resume_state_is_rejected(tmp_path, route_httpx_to_stores):
+    export_dir = tmp_path / "legacy"
+    write_legacy_export(export_dir)
+    async with LiveStore(tmp_path / "a") as store:
+        route_httpx_to_stores["store"] = store
+        await import_telemetry(store.params, export_dir, NullReporter(), rebuild=False)
+        state_path = export_dir / "import_state.json"
+        state = json.loads(state_path.read_text())
+        first = next(iter(state["completed"].values()))
+        first["row_count"] += 1
+        state_path.write_text(json.dumps(state))
+
+        with pytest.raises(ArtifactValidationError, match="resume state metadata changed"):
+            await import_telemetry(store.params, export_dir, NullReporter(), rebuild=False)
+        assert await store.rows("SELECT count(*) AS c FROM telemetry_import_ledger") == [{"c": 4}]
+
+
+@pytest.mark.parametrize(
+    "damage", ["duplicate_id", "duplicate_file", "traversal", "missing_file", "table_total", "parquet_row_count"]
+)
+async def test_invalid_manifest_is_rejected_before_any_rows_are_written(tmp_path, route_httpx_to_stores, damage):
+    export_dir = tmp_path / "legacy"
+    manifest = write_legacy_export(export_dir)
+    session_chunks = manifest["tables"]["session_events"]["chunks"]
+    if damage == "duplicate_id":
+        session_chunks[1]["chunk_id"] = session_chunks[0]["chunk_id"]
+    elif damage == "duplicate_file":
+        session_chunks[1]["file"] = session_chunks[0]["file"]
+    elif damage == "traversal":
+        session_chunks[0]["file"] = "../outside.parquet"
+    elif damage == "missing_file":
+        (export_dir / session_chunks[0]["file"]).unlink()
+    elif damage == "table_total":
+        manifest["tables"]["session_events"]["row_count"] += 1
+    else:
+        session_chunks[1]["row_count"] += 1
+        manifest["tables"]["session_events"]["row_count"] += 1
+    manifest.pop("_session_chunk_a", None)
+    (export_dir / "telemetry_manifest.json").write_text(json.dumps(manifest, indent=2))
+
+    async with LiveStore(tmp_path / "a") as store:
+        route_httpx_to_stores["store"] = store
+        with pytest.raises(ArtifactValidationError):
+            await import_telemetry(store.params, export_dir, NullReporter(), rebuild=False)
+        assert await store.rows("SELECT count(*) AS c FROM session_events") == [{"c": 0}]
+        assert await store.rows("SELECT count(*) AS c FROM telemetry_import_ledger") == [{"c": 0}]
 
 
 async def test_store_export_roundtrips_into_a_second_store(tmp_path, route_httpx_to_stores):
@@ -337,3 +416,9 @@ async def test_store_export_roundtrips_into_a_second_store(tmp_path, route_httpx
         assert await target.rows("SELECT count(*) AS c FROM session_stats_agg") == [{"c": 2}]
         validation = await validate_telemetry(target.params, None, out, NullReporter())
         assert validation.checksums_valid and validation.row_count_results["session_events"] == (8, 8)
+
+        # The standalone validation command uses the same strict v3 contract as import.
+        manifest["chunks"][1]["chunk_id"] = manifest["chunks"][0]["chunk_id"]
+        (out / "telemetry_manifest.json").write_text(json.dumps(manifest, indent=2))
+        with pytest.raises(ArtifactValidationError, match="duplicate"):
+            await validate_telemetry(None, None, out, NullReporter())

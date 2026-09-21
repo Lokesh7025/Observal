@@ -444,19 +444,29 @@ def import_chunk(
     chunk_id: str,
     table_name: str,
     sha256: str,
+    expected_row_count: int,
     parquet_path: Path,
     project_id_override: str | None = None,
 ) -> dict[str, Any]:
     """Idempotently import one checksummed Parquet chunk exported from ClickHouse."""
     if table_name not in IMPORTED_TABLES:
         raise WriteError(f"{table_name} is not importable (derived tables are rebuilt)")
+    if expected_row_count < 0:
+        raise WriteError(f"negative row count for chunk {chunk_id}")
     table = get_table(table_name)
     ledger = conn.execute(
-        "SELECT row_count FROM telemetry_import_ledger WHERE migration_id = $m AND chunk_id = $c",
+        'SELECT "table", sha256, row_count FROM telemetry_import_ledger WHERE migration_id = $m AND chunk_id = $c',
         {"m": migration_id, "c": chunk_id},
     ).fetchone()
+    recorded: tuple[str, str, int] | None = None
     if ledger:
-        return {"skipped": True, "rows_written": 0, "row_count": int(ledger[0])}
+        recorded = (str(ledger[0]), str(ledger[1]), int(ledger[2]))
+        expected = (table.name, sha256, expected_row_count)
+        if recorded != expected:
+            raise WriteError(
+                f"chunk ID {chunk_id} was already imported with different metadata "
+                f"(recorded table={recorded[0]}, sha256={recorded[1]}, row_count={recorded[2]})"
+            )
 
     digest = hashlib.sha256()
     with parquet_path.open("rb") as fh:
@@ -464,6 +474,8 @@ def import_chunk(
             digest.update(block)
     if digest.hexdigest() != sha256:
         raise WriteError(f"checksum mismatch for chunk {chunk_id}")
+    if recorded is not None:
+        return {"skipped": True, "rows_written": 0, "row_count": recorded[2]}
 
     types = _column_types(conn, table.name)
     src = f"read_parquet('{parquet_path.as_posix()}')"
@@ -493,6 +505,8 @@ def import_chunk(
         {"pid": project_id_override} if project_id_override else {},
     )
     row_count = int(conn.execute("SELECT count(*) FROM _chunk_src").fetchone()[0])
+    if row_count != expected_row_count:
+        raise WriteError(f"row count mismatch for chunk {chunk_id}: expected {expected_row_count}, found {row_count}")
     if row_count == 0:
         # An empty chunk (exported table with no rows) is a no-op, but it is still
         # recorded so a resumed import does not re-upload it.

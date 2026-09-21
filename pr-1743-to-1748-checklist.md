@@ -154,22 +154,24 @@ Evidence required:
 
 Sources: `3f897885`, `b03004c1`, `5f2358ac`
 
-Current PR #1748 gap: an existing `(migration_id, chunk_id)` is treated as complete without comparing its stored table or SHA-256 to the new request. Local `import_state.json` also records row count but not artifact identity.
+PR #1748 now validates the complete v2/v3 manifest and every Parquet artifact before the first destination write. The v2 path retains the established ClickHouse manifest checks; import and standalone validation share the same canonical validator. Ledger retries and local resume state both bind chunk IDs to table, SHA-256, and row count.
 
-- [ ] On an existing ledger entry, compare table, SHA-256, and expected row count.
-- [ ] Reject reused chunk IDs whose artifact identity changed.
-- [ ] Store and compare SHA-256 in local resume state.
-- [ ] Validate the complete manifest before importing the first chunk.
-- [ ] Reject unknown tables, duplicate chunk IDs, traversal paths, missing files, extra unexpected files where applicable, and row-count inconsistencies.
-- [ ] Keep empty-table handling explicit and idempotent.
-- [ ] Validate migration IDs and chunk IDs before using them in state or filenames.
-- [ ] Test interrupted import followed by a valid resume.
-- [ ] Test interrupted import followed by a modified chunk/manifest.
+- [x] On an existing ledger entry, compare table, SHA-256, and expected row count.
+- [x] Reject reused chunk IDs whose artifact identity changed.
+- [x] Store and compare SHA-256 in local resume state.
+- [x] Validate the complete manifest before importing the first chunk.
+- [x] Reject unknown tables, duplicate chunk IDs, traversal paths, missing files, extra unexpected files where applicable, and row-count inconsistencies.
+- [x] Keep empty-table handling explicit and idempotent.
+- [x] Validate migration IDs and chunk IDs before using them in state or filenames.
+- [x] Test interrupted import followed by a valid resume.
+- [x] Test interrupted import followed by a modified chunk/manifest.
 
-Evidence required:
+Evidence:
 
+- Matching ledger metadata with corrupted uploaded bytes is rejected before an idempotent skip.
 - Modified resumed artifacts fail closed.
 - A valid retry performs no duplicate writes.
+- Duplicate IDs/files, traversal, missing files, table-total drift, and Parquet row-count drift fail before writes.
 
 ### 7. Server-owned paths and bounded uploads
 

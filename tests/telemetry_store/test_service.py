@@ -452,6 +452,8 @@ def _write_parquet(path: Path, rows: list[dict]) -> str:
 
 async def _import_chunk(store, path: Path, **form):
     """POST a parquet chunk the way the migration client does: always as an upload."""
+    if "expected_row_count" not in form:
+        form["expected_row_count"] = pq.read_metadata(path).num_rows
     with path.open("rb") as fh:
         return await store.post(
             "/v1/import/chunk", data=form, files={"file": (path.name, fh, "application/octet-stream")}
@@ -475,6 +477,25 @@ async def test_import_chunk_idempotent_and_checksummed(store, event_row, tmp_pat
     r = await _import_chunk(store, path, **form)
     assert r.json()["skipped"] is True
     assert await _q(store, "SELECT count(*) AS c FROM session_events") == [{"c": 4}]
+    assert await _q(store, "SELECT count(*) AS c FROM telemetry_import_ledger") == [{"c": 1}]
+
+    # A ledger key is immutable: retries only skip when every recorded field matches.
+    corrupt = tmp_path / "corrupt.parquet"
+    corrupt.write_bytes(b"not the original parquet")
+    r = await _import_chunk(store, corrupt, **{**form, "expected_row_count": 4})
+    assert r.status_code == 422 and "checksum mismatch" in r.json()["error"]["message"]
+
+    for changed in (
+        {"sha256": "0" * 64},
+        {"table": "audit_log"},
+        {"expected_row_count": 5},
+    ):
+        r = await _import_chunk(store, path, **{**form, **changed})
+        assert r.status_code == 422 and "different metadata" in r.json()["error"]["message"]
+    assert await _q(store, "SELECT count(*) AS c FROM session_events") == [{"c": 4}]
+
+    r = await _import_chunk(store, path, **{**form, "chunk_id": "wrong-count", "expected_row_count": 3})
+    assert r.status_code == 422 and "row count mismatch" in r.json()["error"]["message"]
     assert await _q(store, "SELECT count(*) AS c FROM telemetry_import_ledger") == [{"c": 1}]
 
     r = await _import_chunk(store, path, **{**form, "chunk_id": "c2", "sha256": "0" * 64})

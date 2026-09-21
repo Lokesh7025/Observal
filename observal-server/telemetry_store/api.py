@@ -359,6 +359,7 @@ def create_app(settings: TelemetrySettings | None = None) -> FastAPI:
         chunk_id: str = Form(...),
         table: str = Form(...),
         sha256: str = Form(...),
+        expected_row_count: int = Form(..., ge=0),
         project_id: str | None = Form(None),
         file: UploadFile = File(...),
     ):
@@ -376,6 +377,7 @@ def create_app(settings: TelemetrySettings | None = None) -> FastAPI:
                     chunk_id=chunk_id,
                     table_name=table,
                     sha256=sha256,
+                    expected_row_count=expected_row_count,
                     parquet_path=parquet_path,
                     project_id_override=project_id,
                 )

@@ -18,8 +18,7 @@ from observal_shared.migration.connections import PgConnParams, TelemetryConnPar
 from observal_shared.migration.constants import _UUID_RE, CLICKHOUSE_TABLES, INSERT_ORDER
 from observal_shared.migration.exceptions import MigrationError
 from observal_shared.migration.results import ChecksumResult, TelemetryValidationResult, ValidationResult
-from observal_shared.migration.telemetry_import import manifest_chunks
-from observal_shared.migration.telemetry_manifest import validate_telemetry_manifest
+from observal_shared.migration.telemetry_import import manifest_chunks, validate_manifest
 from observal_shared.telemetry_tables import IMPORTED_TABLES
 
 if TYPE_CHECKING:
@@ -190,10 +189,7 @@ async def validate_telemetry(
     if not manifest_path.exists():
         raise MigrationError("Telemetry manifest not found.")
     manifest = read_manifest(manifest_path)
-    version = str(manifest.get("schema_version") or manifest.get("telemetry_manifest_version") or "")
-    if not version.startswith("3"):
-        validate_telemetry_manifest(manifest, input_dir)
-    chunks = manifest_chunks(manifest, input_dir)
+    chunks = validate_manifest(manifest, input_dir)
 
     await reporter.update(phase="validate", pct=0, message="Verifying telemetry chunks")
     checksum_results: dict[str, bool] = {}
