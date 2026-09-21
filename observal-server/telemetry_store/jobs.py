@@ -14,11 +14,11 @@ import uuid
 from dataclasses import asdict, dataclass, field
 from typing import TYPE_CHECKING, Any
 
+import pyarrow.parquet as pq
 from loguru import logger as optic
 
 from observal_shared.telemetry_tables import TELEMETRY_TABLES
 from telemetry_store import writer as w
-from telemetry_store.sql import sql_string_literal
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -56,8 +56,15 @@ def _now() -> str:
     return dt.datetime.now(dt.UTC).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
 
 
-def _copy(cursor: duckdb.DuckDBPyConnection, sql: str, params: dict[str, Any]) -> None:
-    cursor.execute(sql, params or None)
+def _export_parquet(cursor: duckdb.DuckDBPyConnection, sql: str, params: dict[str, Any], path: Path) -> int:
+    """Stream one query result to Parquet without granting DuckDB filesystem access."""
+    reader = cursor.execute(sql, params or None).to_arrow_reader(batch_size=65_536)
+    rows = 0
+    with pq.ParquetWriter(path, reader.schema, compression="zstd") as parquet:
+        for batch in reader:
+            parquet.write_batch(batch)
+            rows += batch.num_rows
+    return rows
 
 
 def _sha256(path: Path) -> str:
@@ -124,15 +131,19 @@ class JobRegistry:
             try:
                 self._touch(job, 5, "copying database snapshot")
 
-                def body_named(conn: duckdb.DuckDBPyConnection) -> None:
-                    name = str(conn.execute("SELECT current_database()").fetchone()[0]).replace('"', '""')
-                    conn.execute(f"ATTACH {sql_string_literal(str(dest_path))} AS telemetry_backup")
-                    try:
-                        conn.execute(f'COPY FROM DATABASE "{name}" TO telemetry_backup')
-                    finally:
-                        conn.execute("DETACH telemetry_backup")
+                def copy_snapshot(conn: duckdb.DuckDBPyConnection) -> None:
+                    database_name = conn.execute("SELECT current_database()").fetchone()[0]
+                    source_row = next(
+                        (row for row in conn.execute("PRAGMA database_list").fetchall() if row[1] == database_name),
+                        None,
+                    )
+                    if source_row is None or not source_row[2]:
+                        raise RuntimeError("telemetry database has no on-disk source")
+                    conn.execute("CHECKPOINT")
+                    shutil.copyfile(source_row[2], dest_path)
 
-                await self._writer.run_raw(body_named)
+                # run_raw serializes the checkpoint and copy against all writes.
+                await self._writer.run_raw(copy_snapshot)
                 self._touch(job, 95, "verifying")
                 size = dest_path.stat().st_size
                 return {"file": "backup.duckdb", "bytes": size, "sha256": _sha256(dest_path)}
@@ -185,15 +196,11 @@ class JobRegistry:
                         path = dest_dir / table / f"{table}-{c:05d}.parquet"
                         path.parent.mkdir(parents=True, exist_ok=True)
                         sql = (
-                            f'COPY (SELECT * FROM "{table}"{where} ORDER BY {order} '
-                            f"LIMIT {EXPORT_CHUNK_ROWS} OFFSET {c * EXPORT_CHUNK_ROWS}) "
-                            f"TO {sql_string_literal(str(path))} (FORMAT PARQUET, COMPRESSION ZSTD)"
+                            f'SELECT * FROM "{table}"{where} ORDER BY {order} '
+                            f"LIMIT {EXPORT_CHUNK_ROWS} OFFSET {c * EXPORT_CHUNK_ROWS}"
                         )
-                        await asyncio.get_running_loop().run_in_executor(None, _copy, cursor, sql, params)
-                        rows = int(
-                            cursor.execute(
-                                f"SELECT count(*) FROM read_parquet({sql_string_literal(str(path))})"
-                            ).fetchone()[0]
+                        rows = await asyncio.get_running_loop().run_in_executor(
+                            None, _export_parquet, cursor, sql, params, path
                         )
                         manifest["chunks"].append(
                             {

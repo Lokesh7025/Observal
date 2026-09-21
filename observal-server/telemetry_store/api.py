@@ -308,8 +308,9 @@ def create_app(settings: TelemetrySettings | None = None) -> FastAPI:
     async def _duckdb_error(request: Request, exc: duckdb.Error):
         optic.error("duckdb error on {}: {}", request.url.path, exc)
         if request.url.path.endswith("/query"):
-            # Binder/parser errors describe the caller's SQL; they carry no internal state.
-            return _error(400, "query_error", str(exc))
+            # DuckDB binder errors can contain catalog names, filesystem paths, and
+            # configuration values. Keep details in server logs only.
+            return _error(400, "query_error", "telemetry query could not be executed")
         return _error(500, "write_failed", "telemetry write failed; see service logs")
 
     # ── Health / stats ────────────────────────────────────────

@@ -200,18 +200,19 @@ Evidence:
 
 Related hardening area from `15ffa645`, `539fd2e0`, and `4abcc570`.
 
-Current PR #1748 gap: read-only enforcement uses a small substring deny-list. DuckDB exposes additional filesystem/network table functions and aliases such as `read_text` and `parquet_scan`.
+PR #1748 now parses each query into DuckDB's JSON AST before execution. Only one `SELECT` over allow-listed telemetry tables in the local `main` schema is accepted; CTE references are tracked separately, and every table-function node is rejected regardless of spelling, casing, quoting, aliasing, or nesting. Extension auto-install/load and external access are disabled at the database level. DuckDB parser and binder details remain server-side.
 
-- [ ] Restrict queries to approved telemetry schemas/tables.
-- [ ] Reject table functions and external scans structurally rather than relying only on a string deny-list.
-- [ ] Disable DuckDB external access and extension installation/loading where supported.
-- [ ] Reject filesystem reads, URL reads, secrets access, `ATTACH`, `COPY`, extension operations, and multi-statements.
-- [ ] Keep Grafana queries working through the same restricted contract.
-- [ ] Ensure parser/binder errors do not disclose sensitive internal paths or configuration.
+- [x] Restrict queries to approved telemetry schemas/tables.
+- [x] Reject table functions and external scans structurally rather than relying only on a string deny-list.
+- [x] Disable DuckDB external access and extension installation/loading where supported.
+- [x] Reject filesystem reads, URL reads, secrets access, `ATTACH`, `COPY`, extension operations, and multi-statements.
+- [x] Keep Grafana queries working through the same restricted contract.
+- [x] Ensure parser/binder errors do not disclose sensitive internal paths or configuration.
 
-Evidence required:
+Evidence:
 
-- Tests covering known aliases and bypass forms, comments, casing, quoting, CTEs, macros, and nested subqueries.
+- Tests cover `read_text`, `parquet_scan`, CSV/JSON scans, URL and quoted relations, secrets/settings functions, casing, comments, aliases, CTEs, nested subqueries, macro creation, and multi-statements.
+- Every generated Grafana panel query executes through `/v1/query` in `tests/test_grafana_dashboards.py`.
 
 ## P1 — required for production readiness
 

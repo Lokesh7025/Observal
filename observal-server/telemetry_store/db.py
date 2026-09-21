@@ -125,9 +125,18 @@ class Database:
         conn.execute(f"SET memory_limit = '{self.settings.memory_limit}'")
         conn.execute(f"SET threads = {int(self.settings.threads)}")
         conn.execute("SET preserve_insertion_order = false")
+        # Trusted export/import/backup jobs require filesystem access, but extension
+        # discovery and loading are never needed by this service. The query endpoint
+        # is additionally constrained by structural AST validation.
+        conn.execute("SET autoinstall_known_extensions = false")
+        conn.execute("SET autoload_known_extensions = false")
+        conn.execute("SET allow_unsigned_extensions = false")
         if not self.is_memory:
             conn.execute(f"SET temp_directory = {sql_string_literal(str(self.settings.temp_dir))}")
             conn.execute(f"SET checkpoint_threshold = '{self.settings.checkpoint_threshold}'")
+        # All service filesystem I/O is performed by Python against server-owned
+        # paths. DuckDB itself never needs arbitrary filesystem or URL access.
+        conn.execute("SET enable_external_access = false")
         self.conn = conn
         optic.info(
             "telemetry database opened (path={}, memory_limit={}, threads={})",

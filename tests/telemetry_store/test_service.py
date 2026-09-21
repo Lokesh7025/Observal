@@ -121,7 +121,20 @@ async def test_auth_required(store):
         "SET memory_limit='1MB'",
         "SELECT 1; SELECT 2",
         "SELECT * FROM read_parquet('/etc/passwd')",
+        "SELECT * FROM ReAd_TeXt('/etc/passwd') AS harmless_alias",
+        "SELECT * FROM \"parquet_scan\"('/etc/passwd')",
+        "SELECT * FROM (SELECT * FROM read_csv_auto('/etc/passwd')) nested",
+        "WITH remote AS (SELECT * FROM read_json_auto('https://example.com/data.json')) SELECT * FROM remote",
+        "SELECT * FROM '/etc/passwd'",
+        "SELECT * FROM 'https://example.com/data.csv'",
+        "SELECT * FROM information_schema.tables",
+        "SELECT * FROM pg_catalog.pg_tables",
+        "SELECT * FROM duckdb_secrets()",
+        "SELECT current_setting('temp_directory')",
+        "SELECT getenv('HOME')",
         "INSTALL httpfs",
+        "LoAd /* comment */ httpfs",
+        "CREATE MACRO leak() AS TABLE SELECT * FROM read_text('/etc/passwd')",
     ],
 )
 @pytest.mark.asyncio
@@ -140,10 +153,61 @@ async def test_query_params_and_timestamp_format(store):
 
 
 @pytest.mark.asyncio
+async def test_query_allows_comments_quoted_tables_ctes_and_nested_queries(store):
+    rows = await _q(
+        store,
+        """
+        /* read_text('/etc/passwd') is inert inside a comment */
+        WITH recent AS (SELECT * FROM "main"."session_events")
+        SELECT count(*) AS count FROM (SELECT * FROM recent) nested
+        WHERE 'COPY secret ATTACH' <> ''
+        """,
+    )
+    assert rows == [{"count": 0}]
+
+
+@pytest.mark.asyncio
+async def test_duckdb_external_access_and_extension_loading_are_disabled(store):
+    writer = store.app.state.telemetry.writer
+    settings = await writer.run_raw(
+        lambda conn: dict(
+            conn.execute(
+                "SELECT name, value FROM duckdb_settings() WHERE name IN "
+                "('enable_external_access', 'autoinstall_known_extensions', "
+                "'autoload_known_extensions', 'allow_unsigned_extensions')"
+            ).fetchall()
+        )
+    )
+    assert settings == {
+        "allow_unsigned_extensions": "false",
+        "autoload_known_extensions": "false",
+        "autoinstall_known_extensions": "false",
+        "enable_external_access": "false",
+    }
+
+
+@pytest.mark.asyncio
+async def test_query_errors_do_not_expose_internal_paths(store):
+    secret_path = "/private/internal/telemetry.duckdb"
+    rejected = await store.post("/v1/query", json={"sql": f"SELECT * FROM '{secret_path}'"})
+    assert rejected.status_code == 400 and secret_path not in rejected.text
+    malformed = await store.post("/v1/query", json={"sql": f"SELECT * FRM '{secret_path}'"})
+    assert malformed.status_code == 400 and secret_path not in malformed.text
+
+    binder = await store.post(
+        "/v1/query",
+        json={"sql": f'SELECT missing_column AS "{secret_path}" FROM session_events'},
+    )
+    assert binder.status_code == 400
+    assert binder.json()["error"] == {"code": "query_error", "message": "telemetry query could not be executed"}
+    assert secret_path not in binder.text
+
+
+@pytest.mark.asyncio
 async def test_query_bad_sql_is_400_not_empty(store):
     r = await store.post("/v1/query", json={"sql": "SELECT * FROM no_such_table"})
     assert r.status_code == 400
-    assert r.json()["error"]["code"] == "query_error"
+    assert r.json()["error"]["code"] == "query_rejected"
 
 
 # ── A-04 timeout ─────────────────────────────────────────────────────
@@ -151,7 +215,10 @@ async def test_query_bad_sql_is_400_not_empty(store):
 
 @pytest.mark.asyncio
 async def test_query_timeout_interrupts_and_connection_stays_usable(store):
-    slow = "SELECT count(*) FROM range(2000000000) a, range(1000) b"
+    slow = (
+        "WITH RECURSIVE nums(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM nums WHERE i < 2000000000) "
+        "SELECT count(*) FROM nums"
+    )
     t0 = asyncio.get_running_loop().time()
     r = await store.post("/v1/query", json={"sql": slow, "timeout_ms": 200})
     elapsed = asyncio.get_running_loop().time() - t0
@@ -163,7 +230,8 @@ async def test_query_timeout_interrupts_and_connection_stays_usable(store):
 
 @pytest.mark.asyncio
 async def test_result_too_large(store):
-    r = await store.post("/v1/query", json={"sql": "SELECT * FROM range(20000)"})
+    sql = "WITH RECURSIVE nums(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM nums WHERE i < 20000) SELECT * FROM nums"
+    r = await store.post("/v1/query", json={"sql": sql})
     assert r.status_code == 413
 
 
@@ -172,7 +240,10 @@ async def test_result_too_large(store):
 
 @pytest.mark.asyncio
 async def test_backpressure_returns_429_not_hang(store):
-    slow = "SELECT count(*) FROM range(300000000) a, range(1000) b"
+    slow = (
+        "WITH RECURSIVE nums(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM nums WHERE i < 300000000) "
+        "SELECT count(*) FROM nums"
+    )
     tasks = [store.post("/v1/query", json={"sql": slow, "timeout_ms": 400}) for _ in range(12)]
     results = await asyncio.wait_for(asyncio.gather(*tasks), timeout=60)
     codes = sorted(r.status_code for r in results)
@@ -869,7 +940,12 @@ async def test_writes_leave_no_staging_objects_behind(store, event_row):
     tables = r.json()["tables"]
     assert not [t for t in tables if t.startswith("_")], tables
     assert tables["session_events"] == 1 and tables["audit_log"] == 1
-    views = await _q(store, "SELECT view_name FROM duckdb_views() WHERE NOT internal")
+    writer = store.app.state.telemetry.writer
+    views = await writer.run_raw(
+        lambda conn: [
+            row[0] for row in conn.execute("SELECT view_name FROM duckdb_views() WHERE NOT internal").fetchall()
+        ]
+    )
     assert views == []
 
 

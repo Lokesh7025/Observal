@@ -1,11 +1,12 @@
 # SPDX-FileCopyrightText: 2026 Lokesh Selvam <lokeshselvam7025@gmail.com>
 # SPDX-License-Identifier: Apache-2.0
 
-"""Read path: bounded thread pool, read-only statement enforcement, timeouts."""
+"""Read path: structural query sandbox, bounded pool, and timeouts."""
 
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 import threading
 import time
@@ -15,16 +16,24 @@ from typing import Any
 import duckdb
 from loguru import logger as optic
 
+from observal_shared.telemetry_tables import TELEMETRY_TABLES
 from telemetry_store.db import rows_to_dicts
 
-_READ_ONLY_TYPES = {
-    duckdb.StatementType.SELECT,
-    duckdb.StatementType.EXPLAIN,
+_ALLOWED_QUERY_TABLES = set(TELEMETRY_TABLES) | {
+    "schema_migrations",
+    "telemetry_backfill_state",
+    "telemetry_import_ledger",
+}
+_ALLOWED_SCHEMAS = {"", "main"}
+_BLOCKED_SCALAR_FUNCTIONS = {
+    "current_query",
+    "current_setting",
+    "getenv",
 }
 
 
 class QueryRejectedError(ValueError):
-    """Statement is not a read-only query."""
+    """Statement is not a safe telemetry read query."""
 
 
 class QueryTimeoutError(TimeoutError):
@@ -39,22 +48,66 @@ class ReaderBusyError(RuntimeError):
     """Read queue is saturated."""
 
 
-def assert_read_only(sql: str) -> None:
+def _walk_ast(value: Any):
+    if isinstance(value, dict):
+        yield value
+        for child in value.values():
+            yield from _walk_ast(child)
+    elif isinstance(value, list):
+        for child in value:
+            yield from _walk_ast(child)
+
+
+def _parse_select(parser: duckdb.DuckDBPyConnection, sql: str) -> dict[str, Any]:
     try:
         statements = duckdb.extract_statements(sql)
     except duckdb.Error as exc:
-        raise QueryRejectedError(f"could not parse statement: {exc}") from exc
+        raise QueryRejectedError("could not parse telemetry query") from exc
     if len(statements) != 1:
         raise QueryRejectedError("exactly one statement is required")
-    stmt = statements[0]
-    if stmt.type not in _READ_ONLY_TYPES:
-        raise QueryRejectedError(f"statement type {stmt.type.name} is not allowed on the query endpoint")
-    # SELECT ... INTO / COPY are separate statement types in DuckDB, but
-    # table-producing functions that touch the filesystem are not.
-    lowered = sql.lower()
-    for token in ("read_parquet", "read_csv", "read_json", "glob(", "attach ", "copy ", "install ", "load "):
-        if token in lowered:
-            raise QueryRejectedError(f"'{token.strip()}' is not allowed on the query endpoint")
+    if statements[0].type != duckdb.StatementType.SELECT:
+        raise QueryRejectedError("only SELECT statements are allowed on the query endpoint")
+    try:
+        serialized = parser.execute("SELECT json_serialize_sql($sql)", {"sql": sql}).fetchone()
+        parsed = json.loads(serialized[0]) if serialized else {}
+    except (duckdb.Error, json.JSONDecodeError, TypeError) as exc:
+        raise QueryRejectedError("could not parse telemetry query") from exc
+    if parsed.get("error") or len(parsed.get("statements", [])) != 1:
+        raise QueryRejectedError("could not parse telemetry query")
+    return parsed["statements"][0]
+
+
+def assert_query_safe(parser: duckdb.DuckDBPyConnection, sql: str) -> None:
+    """Reject anything except SELECTs over allow-listed local telemetry tables."""
+    statement = _parse_select(parser, sql)
+    cte_names: set[str] = set()
+    for node in _walk_ast(statement):
+        cte_map = node.get("cte_map")
+        if isinstance(cte_map, dict):
+            for entry in cte_map.get("map", []):
+                if isinstance(entry, dict) and isinstance(entry.get("key"), str):
+                    cte_names.add(entry["key"])
+
+    for node in _walk_ast(statement):
+        node_type = node.get("type")
+        if node_type == "TABLE_FUNCTION":
+            raise QueryRejectedError("table functions are not allowed on the query endpoint")
+        if node_type == "BASE_TABLE":
+            table = node.get("table_name")
+            schema = node.get("schema_name") or ""
+            catalog = node.get("catalog_name") or ""
+            if not catalog and not schema and table in cte_names:
+                continue
+            if catalog or schema not in _ALLOWED_SCHEMAS or table not in _ALLOWED_QUERY_TABLES:
+                raise QueryRejectedError("query references a table outside the approved telemetry schema")
+        if node.get("class") == "FUNCTION":
+            function = str(node.get("function_name") or "").lower()
+            if (
+                function in _BLOCKED_SCALAR_FUNCTIONS
+                or "secret" in function
+                or function.startswith(("read_", "http_", "url_"))
+            ):
+                raise QueryRejectedError("query uses a restricted function")
 
 
 _PARAM_RE = re.compile(r"\$([A-Za-z_][A-Za-z0-9_]*)")
@@ -79,6 +132,17 @@ class Reader:
         max_rows: int,
     ):
         self._conn = conn
+        # Parsing is isolated from the data connection and cannot load extensions
+        # or access files/network even if a future parser feature binds expressions.
+        self._parser = duckdb.connect(
+            ":memory:",
+            config={
+                "enable_external_access": "false",
+                "autoinstall_known_extensions": "false",
+                "autoload_known_extensions": "false",
+                "allow_unsigned_extensions": "false",
+            },
+        )
         self._executor = ThreadPoolExecutor(max_workers=threads, thread_name_prefix="telemetry-reader")
         self._queue_max = queue_max
         self._default_timeout = default_timeout_ms
@@ -115,7 +179,7 @@ class Reader:
                 self._active -= 1
 
     async def query(self, sql: str, params: dict[str, Any] | None, timeout_ms: int | None) -> dict[str, Any]:
-        assert_read_only(sql)
+        assert_query_safe(self._parser, sql)
         with self._pending_lock:
             if self._pending >= self._queue_max:
                 self.busy_count += 1
@@ -145,8 +209,8 @@ class Reader:
                 except (TimeoutError, Exception):
                     pass
             if not future.done():
-                optic.error("telemetry query did not stop after interrupt: {}", sql[:120])
-            optic.warning("telemetry query interrupted after {:.0f}ms: {}", budget * 1000, sql[:120])
+                optic.error("telemetry query did not stop after interrupt")
+            optic.warning("telemetry query interrupted after {:.0f}ms", budget * 1000)
             raise QueryTimeoutError(f"query exceeded {int(budget * 1000)}ms") from exc
         finally:
             with self._pending_lock:
@@ -164,4 +228,5 @@ class Reader:
         }
 
     def shutdown(self) -> None:
+        self._parser.close()
         self._executor.shutdown(wait=False, cancel_futures=True)

@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Any, TypeVar
 
 import duckdb
 import pyarrow as pa
+import pyarrow.parquet as pq
 from loguru import logger as optic
 
 from observal_shared.telemetry_keys import parent_session_key, session_key, snapshot_key
@@ -35,7 +36,6 @@ from telemetry_store.sql import (
     CONTIGUOUS_CHECKPOINT_BATCH,
     SUMMARY_COLUMNS,
     SUMMARY_SELECT,
-    sql_string_literal,
 )
 
 if TYPE_CHECKING:
@@ -478,9 +478,15 @@ def import_chunk(
     if recorded is not None:
         return {"skipped": True, "rows_written": 0, "row_count": recorded[2]}
 
+    try:
+        parquet = pq.ParquetFile(parquet_path)
+        src_cols = parquet.schema_arrow.names
+        batches = pa.RecordBatchReader.from_batches(parquet.schema_arrow, parquet.iter_batches(batch_size=65_536))
+    except Exception as exc:
+        raise WriteError(f"invalid Parquet for chunk {chunk_id}") from exc
+    conn.register("_chunk_parquet", batches)
     types = _column_types(conn, table.name)
-    src = f"read_parquet({sql_string_literal(str(parquet_path))})"
-    src_cols = [d[0] for d in conn.execute(f"SELECT * FROM {src} LIMIT 0").description]
+    src = '"_chunk_parquet"'
     # Derived key columns are always recomputed from the identity columns so one
     # hash implementation governs every row, whatever the chunk's origin.
     known = [c for c in table.columns if c in src_cols and c in types and c not in table.derived_columns]

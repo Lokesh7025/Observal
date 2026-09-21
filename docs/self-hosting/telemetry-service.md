@@ -35,6 +35,8 @@ All endpoints except `/v1/health` require `Authorization: Bearer $TELEMETRY_TOKE
 
 Failure modes are explicit: a slow query is interrupted and returns `504 query_timeout`; too many concurrent reads return `429 telemetry_busy`; a paused writer returns `503 writer_paused`. The API maps these to 503/504/413/429 responses and never substitutes empty data.
 
+`/v1/query` is structurally sandboxed using DuckDB's parsed JSON AST. It accepts one `SELECT` over the local allow-listed telemetry tables (including nested queries and CTEs), rejects all table functions and external/catalog schemas, and does not return parser or binder details. DuckDB external access, extension auto-installation, and extension loading are disabled for the store; trusted import/export jobs perform filesystem I/O through Python instead.
+
 ## Configuration
 
 | Variable | Default | Notes |
