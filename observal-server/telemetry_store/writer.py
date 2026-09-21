@@ -35,6 +35,7 @@ from telemetry_store.sql import (
     CONTIGUOUS_CHECKPOINT_BATCH,
     SUMMARY_COLUMNS,
     SUMMARY_SELECT,
+    sql_string_literal,
 )
 
 if TYPE_CHECKING:
@@ -478,7 +479,7 @@ def import_chunk(
         return {"skipped": True, "rows_written": 0, "row_count": recorded[2]}
 
     types = _column_types(conn, table.name)
-    src = f"read_parquet('{parquet_path.as_posix()}')"
+    src = f"read_parquet({sql_string_literal(str(parquet_path))})"
     src_cols = [d[0] for d in conn.execute(f"SELECT * FROM {src} LIMIT 0").description]
     # Derived key columns are always recomputed from the identity columns so one
     # hash implementation governs every row, whatever the chunk's origin.

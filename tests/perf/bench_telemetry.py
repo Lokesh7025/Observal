@@ -254,8 +254,7 @@ async def bench(db_path: Path, sessions: int) -> dict:
             )
 
             t0 = time.perf_counter()
-            dest = db_path.parent / "backup.duckdb"
-            r = await c.post("/v1/admin/backup", json={"dest_path": str(dest)})
+            r = await c.post("/v1/admin/backup")
             job = r.json()["id"]
             while True:
                 j = (await c.get(f"/v1/jobs/{job}")).json()

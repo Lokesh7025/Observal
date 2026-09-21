@@ -48,6 +48,9 @@ class TelemetrySettings:
     metrics_public: bool
     #: When true, the service may run with an empty token (tests / embedded loopback only).
     allow_anonymous: bool
+    backup_dir: Path | None = None
+    max_import_chunk_bytes: int = 1024 * 1024 * 1024
+    min_free_space_bytes: int = 256 * 1024 * 1024
 
     @classmethod
     def from_env(cls) -> TelemetrySettings:
@@ -74,6 +77,9 @@ class TelemetrySettings:
             bind_port=int(port or 8125),
             metrics_public=os.environ.get("TELEMETRY_METRICS_PUBLIC", "false").lower() in {"1", "true", "yes"},
             allow_anonymous=os.environ.get("TELEMETRY_ALLOW_ANONYMOUS", "false").lower() in {"1", "true", "yes"},
+            backup_dir=Path(os.environ.get("TELEMETRY_BACKUP_DIR", str(db_path.parent / "backups"))),
+            max_import_chunk_bytes=_env_int("TELEMETRY_MAX_IMPORT_CHUNK_BYTES", 1024 * 1024 * 1024),
+            min_free_space_bytes=_env_int("TELEMETRY_MIN_FREE_SPACE_BYTES", 256 * 1024 * 1024),
         )
 
     def validate(self) -> None:
@@ -83,3 +89,7 @@ class TelemetrySettings:
             raise ValueError("TELEMETRY_THREADS and TELEMETRY_READ_THREADS must be >= 1")
         if self.query_timeout_ms < 100:
             raise ValueError("TELEMETRY_QUERY_TIMEOUT_MS must be >= 100")
+        if self.max_import_chunk_bytes < 1:
+            raise ValueError("TELEMETRY_MAX_IMPORT_CHUNK_BYTES must be >= 1")
+        if self.min_free_space_bytes < 0:
+            raise ValueError("TELEMETRY_MIN_FREE_SPACE_BYTES must be >= 0")

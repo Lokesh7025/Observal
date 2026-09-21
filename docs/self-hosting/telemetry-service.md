@@ -27,7 +27,8 @@ All endpoints except `/v1/health` require `Authorization: Bearer $TELEMETRY_TOKE
 | `POST /v1/import/chunk` | Idempotent, checksummed Parquet chunk import (ledger keyed by migration + chunk id) |
 | `POST /v1/rebuild/derived` | Rebuild `session_stats_agg` and `session_checkpoints` from events (job) |
 | `POST /v1/export` + `GET /v1/export/{job}/files/{name}` | Export tables to Parquet chunks with a manifest (job) |
-| `POST /v1/admin/backup` | Online snapshot copy via `COPY FROM DATABASE` (job) |
+| `POST /v1/admin/backup` | Online snapshot under the server-owned backup root (job) |
+| `GET /v1/admin/backup/{job_id}/file` | Download a completed snapshot by opaque job ID |
 | `POST /v1/admin/pause-writes` / `resume-writes` / `checkpoint` | Operator controls |
 | `GET /v1/jobs/{id}` | Job progress with heartbeat; long operations never sit behind an HTTP timeout |
 | `GET /metrics` | Prometheus metrics (query/write latency, timeouts, backpressure, table rows, file size) |
@@ -40,7 +41,10 @@ Failure modes are explicit: a slow query is interrupted and returns `504 query_t
 | --- | --- | --- |
 | `TELEMETRY_DB_PATH` | `/data/telemetry/observal.duckdb` | Must be on a persistent volume |
 | `TELEMETRY_TEMP_DIR` | `<db dir>/tmp` | Spill directory for large sorts/aggregations |
-| `TELEMETRY_EXPORT_DIR` | `<db dir>/exports` | Where `/v1/export` writes chunks |
+| `TELEMETRY_EXPORT_DIR` | `<db dir>/exports` | Server-owned root where `/v1/export` writes chunks |
+| `TELEMETRY_BACKUP_DIR` | `<db dir>/backups` | Server-owned root for online snapshots |
+| `TELEMETRY_MAX_IMPORT_CHUNK_BYTES` | `1073741824` | Maximum uploaded Parquet chunk size; larger uploads return 413 |
+| `TELEMETRY_MIN_FREE_SPACE_BYTES` | `268435456` | Free-space reserve maintained while staging imports |
 | `TELEMETRY_TOKEN` / `TELEMETRY_TOKEN_FILE` | required | Shared bearer token |
 | `TELEMETRY_MEMORY_LIMIT` | `1536MB` | DuckDB memory ceiling; keep ~25% below the container limit |
 | `TELEMETRY_THREADS` | `4` | DuckDB worker threads |
@@ -75,7 +79,7 @@ Supported target: 30 million `session_events`, 300 thousand sessions, 2 GB conta
 python -m telemetry_store.backup /data/telemetry/backups/$(date -u +%Y%m%dT%H%M%SZ).duckdb
 ```
 
-The copy is snapshot-consistent and writes continue during it. To restore: stop the service, replace `observal.duckdb` (and delete any `observal.duckdb.wal`), start the service. `observal server upgrade` takes a snapshot automatically and the cloud Terraform modules ship one to object storage nightly.
+The copy is snapshot-consistent and writes continue during it. The helper asks the service to create the snapshot beneath `TELEMETRY_BACKUP_DIR`, downloads it through an opaque job handle, verifies its size and SHA-256, and atomically writes the requested local path. To restore: stop the service, replace `observal.duckdb` (and delete any `observal.duckdb.wal`), start the service. `observal server upgrade` takes a snapshot automatically and the cloud Terraform modules ship one to object storage nightly.
 
 ## Operations
 

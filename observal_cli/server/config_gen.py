@@ -114,6 +114,9 @@ def generate_telemetry_env(token: str) -> Path:
         TELEMETRY_DB_PATH={data_path}/observal.duckdb
         TELEMETRY_TEMP_DIR={data_path}/tmp
         TELEMETRY_EXPORT_DIR={data_path}/exports
+        TELEMETRY_BACKUP_DIR={data_path}/backups
+        TELEMETRY_MAX_IMPORT_CHUNK_BYTES=1073741824
+        TELEMETRY_MIN_FREE_SPACE_BYTES=268435456
         TELEMETRY_BIND=127.0.0.1:{TELEMETRY_PORT}
         TELEMETRY_TOKEN={token}
         TELEMETRY_MEMORY_LIMIT=1536MB

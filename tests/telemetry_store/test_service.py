@@ -8,19 +8,23 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import re
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
 import duckdb
+import httpx
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
+from starlette.datastructures import UploadFile
 
 from observal_shared.telemetry_keys import session_key
 from observal_shared.telemetry_tables import EXTRA_ROW_LINE_OFFSET
+from telemetry_store.api import create_app
 from telemetry_store.db import SCHEMA_DIR, Database, SingleWriterViolationError
 from telemetry_store.settings import TelemetrySettings
 
-from .conftest import make_settings
+from .conftest import TOKEN, make_settings
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -501,6 +505,7 @@ async def test_import_chunk_idempotent_and_checksummed(store, event_row, tmp_pat
     r = await _import_chunk(store, path, **{**form, "chunk_id": "c2", "sha256": "0" * 64})
     assert r.status_code == 422 and "checksum" in r.json()["error"]["message"]
     assert await _q(store, "SELECT count(*) AS c FROM telemetry_import_ledger") == [{"c": 1}]
+    assert not list(store.app.state.telemetry.settings.temp_dir.glob("telemetry-chunk-*"))
 
     # Same keys under a new chunk id → replaced, not duplicated
     r = await _import_chunk(store, path, **{**form, "chunk_id": "c3"})
@@ -615,8 +620,8 @@ async def test_backup_while_writing(store, event_row, tmp_path: Path):
         "/v1/write/session-batch",
         json={"events": [event_row("b1", i) for i in range(10)], "advance_checkpoint": identity},
     )
-    dest = tmp_path / "backup" / "telemetry.duckdb"
-    r = await store.post("/v1/admin/backup", json={"dest_path": str(dest)})
+    requested = tmp_path / "caller-controlled" / "telemetry.duckdb"
+    r = await store.post("/v1/admin/backup", json={"dest_path": str(requested)})
     assert r.status_code == 202
     # concurrent write during backup
     await store.post(
@@ -625,8 +630,15 @@ async def test_backup_while_writing(store, event_row, tmp_path: Path):
     )
     job = await _wait_job(store, r.json()["id"])
     assert job["state"] == "done", job
+    assert "path" not in job["result"] and job["result"]["file"] == "backup.duckdb"
     assert job["result"]["bytes"] > 0 and re.fullmatch(r"[0-9a-f]{64}", job["result"]["sha256"])
+    assert not requested.exists()
 
+    download = await store.get(f"/v1/admin/backup/{job['id']}/file")
+    assert download.status_code == 200
+    assert (await store.get(f"/v1/admin/backup/{job['id']}/file")).status_code == 404
+    dest = tmp_path / "downloaded.duckdb"
+    dest.write_bytes(download.content)
     conn = duckdb.connect(str(dest), read_only=True)
     count = conn.execute("SELECT count(*) FROM session_events").fetchone()[0]
     conn.close()
@@ -640,23 +652,27 @@ async def test_export_parquet_with_manifest(store, event_row, tmp_path: Path):
         "/v1/write/session-batch",
         json={"events": [event_row("e1", i) for i in range(7)], "advance_checkpoint": identity},
     )
-    dest = tmp_path / "export"
-    r = await store.post("/v1/export", json={"tables": ["session_events", "session_stats_agg"], "dest_dir": str(dest)})
+    requested = tmp_path / "caller-controlled-export"
+    r = await store.post(
+        "/v1/export",
+        json={"tables": ["session_events", "session_stats_agg"], "dest_dir": str(requested)},
+    )
     assert r.status_code == 202
     job = await _wait_job(store, r.json()["id"])
     assert job["state"] == "done", job
-    manifest = (dest / "telemetry_manifest.json").read_text()
+    assert "dest_dir" not in job["result"] and not requested.exists()
+    manifest_response = await store.get(f"/v1/export/{job['id']}/files/telemetry_manifest.json")
+    manifest = manifest_response.text
     assert '"session_events-00000"' in manifest
-    files = list((dest / "session_events").glob("*.parquet"))
-    assert len(files) == 1
-    assert pq.read_table(files[0]).num_rows == 7
+    parquet_response = await store.get(f"/v1/export/{job['id']}/files/session_events/session_events-00000.parquet")
+    assert parquet_response.status_code == 200
+    assert pq.read_table(pa.BufferReader(parquet_response.content)).num_rows == 7
     # Empty tables are recorded in the manifest but produce no chunk files.
-    r = await store.post("/v1/export", json={"tables": ["layer_snapshots"], "dest_dir": str(tmp_path / "empty")})
+    r = await store.post("/v1/export", json={"tables": ["layer_snapshots"]})
     empty_job = await _wait_job(store, r.json()["id"])
     assert empty_job["state"] == "done" and empty_job["result"]["chunks"] == 0
     assert empty_job["result"]["tables"] == {"layer_snapshots": {"row_count": 0}}
-    assert not (tmp_path / "empty" / "layer_snapshots").exists()
-    r = await store.post("/v1/export", json={"tables": ["nope"], "dest_dir": str(dest)})
+    r = await store.post("/v1/export", json={"tables": ["nope"]})
     assert r.status_code == 422
 
     # Download endpoint serves files inside the job directory only.
@@ -668,7 +684,148 @@ async def test_export_parquet_with_manifest(store, event_row, tmp_path: Path):
     for name in ("../secret.txt", "..%2Fsecret.txt", "/etc/passwd", "session_events/../../secret.txt"):
         r = await store.get(f"/v1/export/{job_id}/files/{name}")
         assert r.status_code == 404, name
+    artifact_dir = store.app.state.telemetry.jobs.get(job_id).artifact_dir
+    (artifact_dir / "outside-link").symlink_to(outside)
+    assert (await store.get(f"/v1/export/{job_id}/files/outside-link")).status_code == 404
     assert (await store.get("/v1/export/nope/files/telemetry_manifest.json")).status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_server_owned_artifact_roots_escape_sql_literals(tmp_path: Path, event_row):
+    settings = make_settings(
+        tmp_path,
+        temp_dir=tmp_path / "tmp'quoted",
+        export_dir=tmp_path / "exports'quoted",
+        backup_dir=tmp_path / "backups'quoted",
+    )
+    app = create_app(settings)
+    async with (
+        app.router.lifespan_context(app),
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://telemetry",
+            headers={"Authorization": f"Bearer {TOKEN}"},
+        ) as client,
+    ):
+        import_path = tmp_path / "quoted-import.parquet"
+        sha = _write_parquet(import_path, [event_row("q2", 0, ingested_at="2026-05-01 10:00:01.000")])
+        imported = await _import_chunk(
+            client,
+            import_path,
+            migration_id="quoted",
+            chunk_id="quoted",
+            table="session_events",
+            sha256=sha,
+        )
+        assert imported.status_code == 200, imported.text
+        export = await client.post("/v1/export", json={"tables": ["session_events"]})
+        export_job = await _wait_job(client, export.json()["id"])
+        assert export_job["state"] == "done", export_job
+        backup = await client.post("/v1/admin/backup")
+        backup_job = await _wait_job(client, backup.json()["id"])
+        assert backup_job["state"] == "done", backup_job
+
+
+@pytest.mark.asyncio
+async def test_import_upload_limits_space_checks_and_cleanup(tmp_path: Path, event_row, monkeypatch):
+    path = tmp_path / "chunk.parquet"
+    sha = _write_parquet(path, [event_row("bounded", 0)])
+    form = {
+        "migration_id": "m",
+        "chunk_id": "bounded",
+        "table": "session_events",
+        "sha256": sha,
+        "expected_row_count": 1,
+    }
+
+    settings = make_settings(tmp_path / "oversize", max_import_chunk_bytes=8, min_free_space_bytes=0)
+    app = create_app(settings)
+    async with (
+        app.router.lifespan_context(app),
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://telemetry",
+            headers={"Authorization": f"Bearer {TOKEN}"},
+        ) as client,
+    ):
+        with path.open("rb") as fh:
+            response = await client.post(
+                "/v1/import/chunk", data=form, files={"file": (path.name, fh, "application/octet-stream")}
+            )
+        assert response.status_code == 413
+        streamed = await client.post(
+            "/v1/import/chunk",
+            content=b"x" * (64 * 1024 + 9),
+            headers={"content-type": "multipart/form-data; boundary=x"},
+        )
+        assert streamed.status_code == 413
+
+        request = client.build_request(
+            "POST",
+            "/v1/import/chunk",
+            data=form,
+            files={"file": ("large.parquet", b"x" * (64 * 1024 + 9), "application/octet-stream")},
+        )
+        del request.headers["content-length"]
+        streamed = await client.send(request)
+        assert streamed.status_code == 413, streamed.text
+        assert not list(settings.temp_dir.glob("telemetry-chunk-*"))
+
+    settings = make_settings(tmp_path / "no-space", min_free_space_bytes=1)
+    app = create_app(settings)
+    monkeypatch.setattr("telemetry_store.api.shutil.disk_usage", lambda _path: SimpleNamespace(free=0))
+    async with (
+        app.router.lifespan_context(app),
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://telemetry",
+            headers={"Authorization": f"Bearer {TOKEN}"},
+        ) as client,
+    ):
+        with path.open("rb") as fh:
+            response = await client.post(
+                "/v1/import/chunk", data=form, files={"file": (path.name, fh, "application/octet-stream")}
+            )
+        assert response.status_code == 507
+        assert not list(settings.temp_dir.glob("telemetry-chunk-*"))
+
+
+@pytest.mark.asyncio
+async def test_interrupted_import_upload_removes_partial_file(tmp_path: Path, event_row, monkeypatch):
+    path = tmp_path / "chunk.parquet"
+    sha = _write_parquet(path, [event_row("interrupted", 0)])
+    form = {
+        "migration_id": "m",
+        "chunk_id": "interrupted",
+        "table": "session_events",
+        "sha256": sha,
+        "expected_row_count": 1,
+    }
+    settings = make_settings(tmp_path / "interrupted", min_free_space_bytes=0)
+    app = create_app(settings)
+    original_read = UploadFile.read
+    reads = 0
+
+    async def fail_after_first_read(self, size=-1):
+        nonlocal reads
+        reads += 1
+        if reads > 1:
+            raise RuntimeError("simulated interrupted upload")
+        return await original_read(self, size)
+
+    async with app.router.lifespan_context(app):
+        monkeypatch.setattr(UploadFile, "read", fail_after_first_read)
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://telemetry",
+            headers={"Authorization": f"Bearer {TOKEN}"},
+        ) as client:
+            with path.open("rb") as fh:
+                with pytest.raises(RuntimeError, match="simulated interrupted upload"):
+                    await client.post(
+                        "/v1/import/chunk", data=form, files={"file": (path.name, fh, "application/octet-stream")}
+                    )
+        assert not list(settings.temp_dir.glob("telemetry-chunk-*"))
 
 
 @pytest.mark.asyncio

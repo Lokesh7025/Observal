@@ -71,7 +71,12 @@ def _row_count(value: Any, context: str) -> int:
 
 
 def _safe_chunk_path(input_dir: Path, filename: Any, chunk_id: str) -> Path:
-    if not isinstance(filename, str) or not filename or Path(filename).is_absolute():
+    if (
+        not isinstance(filename, str)
+        or not filename
+        or Path(filename).is_absolute()
+        or Path(filename).suffix != ".parquet"
+    ):
         raise ArtifactValidationError(f"chunk {chunk_id} has an unsafe filename")
     root = input_dir.resolve()
     path = (input_dir / filename).resolve()
@@ -167,6 +172,15 @@ def validate_manifest(
                     f"row count mismatch for chunk {chunk_id}: expected {count}, found {actual_rows}"
                 )
         out.append({"table": table, "chunk_id": chunk_id, "path": path, "sha256": digest, "row_count": count})
+
+    actual_files = {
+        str(path.resolve().relative_to(input_dir.resolve()))
+        for path in input_dir.rglob("*.parquet")
+        if path.is_file() and path.resolve().is_relative_to(input_dir.resolve())
+    }
+    unexpected_files = sorted(actual_files - seen_files)
+    if unexpected_files:
+        raise ArtifactValidationError(f"telemetry import contains unexpected Parquet files: {unexpected_files}")
 
     for table, meta in tables.items():
         if not isinstance(meta, dict):

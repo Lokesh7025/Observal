@@ -111,7 +111,10 @@ services:
     environment:
       - TELEMETRY_DB_PATH=/data/telemetry/observal.duckdb
       - TELEMETRY_TEMP_DIR=/data/telemetry/tmp
-      - TELEMETRY_EXPORT_DIR=/data/telemetry/exports
+      - TELEMETRY_EXPORT_DIR=${TELEMETRY_EXPORT_DIR:-/data/telemetry/exports}
+      - TELEMETRY_BACKUP_DIR=${TELEMETRY_BACKUP_DIR:-/data/telemetry/backups}
+      - TELEMETRY_MAX_IMPORT_CHUNK_BYTES=${TELEMETRY_MAX_IMPORT_CHUNK_BYTES:-1073741824}
+      - TELEMETRY_MIN_FREE_SPACE_BYTES=${TELEMETRY_MIN_FREE_SPACE_BYTES:-268435456}
       - TELEMETRY_BIND=0.0.0.0:8125
       - TELEMETRY_TOKEN_FILE=/run/secrets/telemetry_token
       - TELEMETRY_MEMORY_LIMIT=${TELEMETRY_MEMORY_LIMIT_DUCKDB:-1536MB}

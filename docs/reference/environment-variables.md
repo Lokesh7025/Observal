@@ -38,6 +38,9 @@ Every credential listed with file support accepts `NAME_FILE=/path/to/secret` in
 | `TELEMETRY_TIMEOUT`   | `30.0`                                                           | Interactive read timeout (seconds) against the telemetry store |
 | `TELEMETRY_WRITE_TIMEOUT` | `60.0`                                                       | Ingest write timeout (seconds) |
 | `TELEMETRY_MAX_CONNECTIONS` | `50`                                                       | HTTP connection pool per API process |
+| `TELEMETRY_BACKUP_DIR` | `<database directory>/backups`                                  | Server-owned root for telemetry snapshots |
+| `TELEMETRY_MAX_IMPORT_CHUNK_BYTES` | `1073741824`                                           | Maximum Parquet import upload size |
+| `TELEMETRY_MIN_FREE_SPACE_BYTES` | `268435456`                                               | Free-space reserve while staging imports |
 | `CLICKHOUSE_URL`      | unset                                                            | Legacy ClickHouse source URL, only for `observal server migrate telemetry-cutover` |
 | `TARGET_DATABASE_URL` | unset                                                            | Target PostgreSQL URL for `server migrate` import and validation commands |
 | `CLICKHOUSE_PASSWORD` | unset                                                            | Legacy ClickHouse container password (`docker compose --profile legacy-clickhouse`) |

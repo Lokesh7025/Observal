@@ -48,6 +48,12 @@ spec:
               value: /data/telemetry/tmp
             - name: TELEMETRY_EXPORT_DIR
               value: /data/telemetry/exports
+            - name: TELEMETRY_BACKUP_DIR
+              value: /data/telemetry/backups
+            - name: TELEMETRY_MAX_IMPORT_CHUNK_BYTES
+              value: {{ .Values.telemetry.maxImportChunkBytes | quote }}
+            - name: TELEMETRY_MIN_FREE_SPACE_BYTES
+              value: {{ .Values.telemetry.minFreeSpaceBytes | quote }}
             - name: TELEMETRY_BIND
               value: 0.0.0.0:8125
             - name: TELEMETRY_MEMORY_LIMIT

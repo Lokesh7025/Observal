@@ -13,6 +13,14 @@ from __future__ import annotations
 TS_LOWER = "1971-01-01 00:00:00"
 TS_UPPER = "2099-01-01 00:00:00"
 
+
+def sql_string_literal(value: str) -> str:
+    """Quote a trusted value for statements where DuckDB cannot bind parameters."""
+    if "\x00" in value:
+        raise ValueError("SQL string literal contains a NUL byte")
+    return "'" + value.replace("'", "''") + "'"
+
+
 _VALID_TS = f"rendered AND \"timestamp\" > TIMESTAMP '{TS_LOWER}' AND \"timestamp\" < TIMESTAMP '{TS_UPPER}'"
 
 #: Aggregate one or more sessions from ``session_events``. Bind ``$keys`` (BIGINT list)

@@ -9,6 +9,7 @@ import asyncio
 import datetime as dt
 import hashlib
 import json
+import shutil
 import uuid
 from dataclasses import asdict, dataclass, field
 from typing import TYPE_CHECKING, Any
@@ -17,6 +18,7 @@ from loguru import logger as optic
 
 from observal_shared.telemetry_tables import TELEMETRY_TABLES
 from telemetry_store import writer as w
+from telemetry_store.sql import sql_string_literal
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -39,9 +41,15 @@ class Job:
     heartbeat_at: str | None = None
     error: str | None = None
     result: dict[str, Any] = field(default_factory=dict)
+    # Server-owned artifact locations are deliberately excluded from API responses.
+    artifact_dir: Path | None = field(default=None, repr=False)
+    artifact_file: Path | None = field(default=None, repr=False)
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        data = asdict(self)
+        data.pop("artifact_dir")
+        data.pop("artifact_file")
+        return data
 
 
 def _now() -> str:
@@ -58,6 +66,15 @@ def _sha256(path: Path) -> str:
         for block in iter(lambda: fh.read(1 << 20), b""):
             digest.update(block)
     return digest.hexdigest()
+
+
+def _owned_child(root: Path, name: str) -> Path:
+    root.mkdir(parents=True, exist_ok=True)
+    resolved_root = root.resolve()
+    child = (resolved_root / name).resolve()
+    if not child.is_relative_to(resolved_root):
+        raise ValueError("artifact path escapes its configured root")
+    return child
 
 
 class JobRegistry:
@@ -99,43 +116,44 @@ class JobRegistry:
 
     # ── Backup ────────────────────────────────────────────────────
 
-    def start_backup(self, dest_path: Path) -> Job:
+    def start_backup(self, backup_root: Path) -> Job:
+        artifact_id = uuid.uuid4().hex
+        dest_path = _owned_child(backup_root, f"{artifact_id}.duckdb")
+
         async def run(job: Job) -> dict[str, Any]:
-            dest_path.parent.mkdir(parents=True, exist_ok=True)
-            if dest_path.exists():
-                raise FileExistsError(f"backup destination exists: {dest_path}")
-            self._touch(job, 5, "copying database snapshot")
+            try:
+                self._touch(job, 5, "copying database snapshot")
 
-            def body_named(conn: duckdb.DuckDBPyConnection) -> None:
-                name = conn.execute("SELECT current_database()").fetchone()[0]
-                conn.execute(f"ATTACH '{dest_path.as_posix()}' AS telemetry_backup")
-                try:
-                    conn.execute(f'COPY FROM DATABASE "{name}" TO telemetry_backup')
-                finally:
-                    conn.execute("DETACH telemetry_backup")
+                def body_named(conn: duckdb.DuckDBPyConnection) -> None:
+                    name = str(conn.execute("SELECT current_database()").fetchone()[0]).replace('"', '""')
+                    conn.execute(f"ATTACH {sql_string_literal(str(dest_path))} AS telemetry_backup")
+                    try:
+                        conn.execute(f'COPY FROM DATABASE "{name}" TO telemetry_backup')
+                    finally:
+                        conn.execute("DETACH telemetry_backup")
 
-            await self._writer.run_raw(body_named)
-            self._touch(job, 95, "verifying")
-            size = dest_path.stat().st_size
-            return {"path": str(dest_path), "bytes": size, "sha256": _sha256(dest_path)}
+                await self._writer.run_raw(body_named)
+                self._touch(job, 95, "verifying")
+                size = dest_path.stat().st_size
+                return {"file": "backup.duckdb", "bytes": size, "sha256": _sha256(dest_path)}
+            except BaseException:
+                dest_path.unlink(missing_ok=True)
+                raise
 
-        return self._start("backup", run)
+        job = self._start("backup", run)
+        job.artifact_file = dest_path
+        return job
 
     # ── Export to Parquet ────────────────────────────────────────
 
-    def start_export(
-        self, tables: list[str], dest_dir: Path | None, since: str | None, *, export_root: Path | None = None
-    ) -> Job:
+    def start_export(self, tables: list[str], since: str | None, *, export_root: Path) -> Job:
         unknown = [t for t in tables if t not in TELEMETRY_TABLES]
         if unknown:
             raise ValueError(f"unknown tables: {unknown}")
-        if dest_dir is None:
-            if export_root is None:
-                raise ValueError("dest_dir is required when no export root is configured")
-            dest_dir = export_root / uuid.uuid4().hex
+        dest_dir = _owned_child(export_root, uuid.uuid4().hex)
 
         async def run(job: Job) -> dict[str, Any]:
-            dest_dir.mkdir(parents=True, exist_ok=True)
+            dest_dir.mkdir(mode=0o700)
             manifest: dict[str, Any] = {
                 "telemetry_manifest_version": "3.0",
                 "source": "duckdb",
@@ -169,11 +187,13 @@ class JobRegistry:
                         sql = (
                             f'COPY (SELECT * FROM "{table}"{where} ORDER BY {order} '
                             f"LIMIT {EXPORT_CHUNK_ROWS} OFFSET {c * EXPORT_CHUNK_ROWS}) "
-                            f"TO '{path.as_posix()}' (FORMAT PARQUET, COMPRESSION ZSTD)"
+                            f"TO {sql_string_literal(str(path))} (FORMAT PARQUET, COMPRESSION ZSTD)"
                         )
                         await asyncio.get_running_loop().run_in_executor(None, _copy, cursor, sql, params)
                         rows = int(
-                            cursor.execute(f"SELECT count(*) FROM read_parquet('{path.as_posix()}')").fetchone()[0]
+                            cursor.execute(
+                                f"SELECT count(*) FROM read_parquet({sql_string_literal(str(path))})"
+                            ).fetchone()[0]
                         )
                         manifest["chunks"].append(
                             {
@@ -189,13 +209,21 @@ class JobRegistry:
                     cursor.close()
             (dest_dir / "telemetry_manifest.json").write_text(json.dumps(manifest, indent=2))
             return {
-                "dest_dir": str(dest_dir),
                 "chunks": len(manifest["chunks"]),
                 "files": [c["file"] for c in manifest["chunks"]] + ["telemetry_manifest.json"],
                 "tables": manifest["tables"],
             }
 
-        return self._start("export", run)
+        async def guarded_run(job: Job) -> dict[str, Any]:
+            try:
+                return await run(job)
+            except BaseException:
+                shutil.rmtree(dest_dir, ignore_errors=True)
+                raise
+
+        job = self._start("export", guarded_run)
+        job.artifact_dir = dest_dir
+        return job
 
     # ── Rebuild derived tables ────────────────────────────────────
 

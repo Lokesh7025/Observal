@@ -359,7 +359,8 @@ async def test_modified_resume_state_is_rejected(tmp_path, route_httpx_to_stores
 
 
 @pytest.mark.parametrize(
-    "damage", ["duplicate_id", "duplicate_file", "traversal", "missing_file", "table_total", "parquet_row_count"]
+    "damage",
+    ["duplicate_id", "duplicate_file", "traversal", "missing_file", "extra_file", "table_total", "parquet_row_count"],
 )
 async def test_invalid_manifest_is_rejected_before_any_rows_are_written(tmp_path, route_httpx_to_stores, damage):
     export_dir = tmp_path / "legacy"
@@ -373,6 +374,8 @@ async def test_invalid_manifest_is_rejected_before_any_rows_are_written(tmp_path
         session_chunks[0]["file"] = "../outside.parquet"
     elif damage == "missing_file":
         (export_dir / session_chunks[0]["file"]).unlink()
+    elif damage == "extra_file":
+        (export_dir / "unlisted.parquet").write_bytes((export_dir / session_chunks[0]["file"]).read_bytes())
     elif damage == "table_total":
         manifest["tables"]["session_events"]["row_count"] += 1
     else:

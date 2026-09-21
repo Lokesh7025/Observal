@@ -177,27 +177,24 @@ Evidence:
 
 Sources: `8a306530`, `539fd2e0`, `4abcc570`
 
-Current PR #1748 gaps:
+PR #1748 now creates export and backup artifacts only beneath configured server-owned roots. HTTP callers receive opaque job handles and download artifacts through guarded endpoints; they cannot provide destination paths. Import staging is bounded by configured size and free-space limits and is removed on every exit path.
 
-- `/v1/export` accepts an arbitrary `dest_dir`.
-- `/v1/admin/backup` accepts an arbitrary `dest_path`.
-- Backup paths are interpolated into `ATTACH` SQL.
-- `/v1/import/chunk` streams until EOF without a service-level byte limit.
+- [x] Remove arbitrary filesystem destinations from the HTTP API.
+- [x] Generate export/backup destinations beneath configured server-owned roots.
+- [x] Return opaque job/file handles to callers.
+- [x] Verify all resolved paths remain inside the configured root.
+- [x] Ensure request-derived table names and path components never reach filesystem operations.
+- [x] Avoid direct path interpolation in SQL; escape safely where DuckDB requires a literal.
+- [x] Add a configurable maximum import chunk size.
+- [x] Enforce the limit while streaming and return 413.
+- [x] Check free space before accepting/importing large artifacts.
+- [x] Clean partial files after disconnects, cancellation, checksum failure, and oversized upload rejection.
 
-- [ ] Remove arbitrary filesystem destinations from the HTTP API.
-- [ ] Generate export/backup destinations beneath configured server-owned roots.
-- [ ] Return opaque job/file handles to callers.
-- [ ] Verify all resolved paths remain inside the configured root.
-- [ ] Ensure request-derived table names and path components never reach filesystem operations.
-- [ ] Avoid direct path interpolation in SQL; escape safely where DuckDB requires a literal.
-- [ ] Add a configurable maximum import chunk size.
-- [ ] Enforce the limit while streaming and return 413.
-- [ ] Check free space before accepting/importing large artifacts.
-- [ ] Clean partial files after disconnects, cancellation, checksum failure, and oversized upload rejection.
+Evidence:
 
-Evidence required:
-
-- Traversal, symlink, SQL-literal, oversized upload, and interrupted-upload tests.
+- Traversal and symlink download attempts are rejected.
+- Export and backup succeed with SQL-sensitive characters in configured roots.
+- Oversized, low-disk, interrupted, and checksum-failed uploads leave no staging files.
 
 ### 8. Query endpoint sandbox
 

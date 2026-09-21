@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import asyncio
 import hmac
-import os
 import shutil
 import tempfile
 from contextlib import asynccontextmanager
@@ -20,6 +19,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from loguru import logger as optic
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from pydantic import BaseModel, Field
+from starlette.background import BackgroundTask
 
 from telemetry_store import metrics
 from telemetry_store import writer as w
@@ -29,6 +29,87 @@ from telemetry_store.reader import QueryRejectedError, QueryTimeoutError, Reader
 from telemetry_store.settings import TelemetrySettings
 
 MAX_ROWS_PER_WRITE = 50_000
+MULTIPART_OVERHEAD_BYTES = 64 * 1024
+
+
+class ImportBodyLimitMiddleware:
+    """Bound import request bodies while they are read from the ASGI server."""
+
+    def __init__(self, app, *, max_chunk_bytes: int, temp_dir: Path, min_free_space_bytes: int):
+        self.app = app
+        self.max_body_bytes = max_chunk_bytes + MULTIPART_OVERHEAD_BYTES
+        self.temp_dir = temp_dir
+        self.min_free_space_bytes = min_free_space_bytes
+
+    async def __call__(self, scope, receive, send):
+        if scope.get("type") != "http" or scope.get("path") != "/v1/import/chunk":
+            await self.app(scope, receive, send)
+            return
+        headers = dict(scope.get("headers", []))
+        content_length = headers.get(b"content-length")
+        if content_length:
+            try:
+                declared_bytes = int(content_length)
+                if declared_bytes > self.max_body_bytes:
+                    response = JSONResponse(
+                        status_code=413,
+                        content={"error": {"code": "import_too_large", "message": "request exceeds import limit"}},
+                    )
+                    await response(scope, receive, send)
+                    return
+                if shutil.disk_usage(self.temp_dir).free < declared_bytes + self.min_free_space_bytes:
+                    response = JSONResponse(
+                        status_code=507,
+                        content={"error": {"code": "insufficient_storage", "message": "insufficient import space"}},
+                    )
+                    await response(scope, receive, send)
+                    return
+            except ValueError:
+                pass
+
+        received = 0
+        exceeded = False
+        insufficient_space = False
+        response_messages: list[dict[str, Any]] = []
+
+        async def limited_receive():
+            nonlocal exceeded, insufficient_space, received
+            message = await receive()
+            if message.get("type") == "http.request":
+                block_size = len(message.get("body", b""))
+                received += block_size
+                if received > self.max_body_bytes:
+                    exceeded = True
+                    return {"type": "http.disconnect"}
+                if shutil.disk_usage(self.temp_dir).free < block_size + self.min_free_space_bytes:
+                    insufficient_space = True
+                    return {"type": "http.disconnect"}
+            return message
+
+        async def capture_send(message):
+            response_messages.append(message)
+
+        try:
+            await self.app(scope, limited_receive, capture_send)
+        except Exception:
+            if not exceeded and not insufficient_space:
+                raise
+        if exceeded:
+            response = JSONResponse(
+                status_code=413,
+                content={"error": {"code": "import_too_large", "message": "request exceeds import limit"}},
+            )
+            await response(scope, receive, send)
+            return
+        if insufficient_space:
+            response = JSONResponse(
+                status_code=507,
+                content={"error": {"code": "insufficient_storage", "message": "insufficient import space"}},
+            )
+            await response(scope, receive, send)
+            return
+        for message in response_messages:
+            await send(message)
 
 
 # ── Models ────────────────────────────────────────────────────────
@@ -84,14 +165,7 @@ class RebuildRequest(BaseModel):
 
 class ExportRequest(BaseModel):
     tables: list[str]
-    #: Optional absolute path. When omitted the export lands under the store's own
-    #: export directory and chunks are fetched through ``GET /v1/export/{job_id}/files/{name}``.
-    dest_dir: str | None = None
     since: str | None = None
-
-
-class BackupRequest(BaseModel):
-    dest_path: str
 
 
 class BackfillStateRequest(BaseModel):
@@ -164,6 +238,12 @@ def create_app(settings: TelemetrySettings | None = None) -> FastAPI:
             await state.stop()
 
     app = FastAPI(title="Observal telemetry store", lifespan=lifespan, docs_url=None, redoc_url=None)
+    app.add_middleware(
+        ImportBodyLimitMiddleware,
+        max_chunk_bytes=settings.max_import_chunk_bytes,
+        temp_dir=settings.temp_dir,
+        min_free_space_bytes=settings.min_free_space_bytes,
+    )
     app.state.telemetry = state
 
     # ── Auth ──────────────────────────────────────────────────
@@ -364,12 +444,43 @@ def create_app(settings: TelemetrySettings | None = None) -> FastAPI:
         file: UploadFile = File(...),
     ):
         # Chunks are always uploaded; the store never opens caller-supplied paths.
+        upload_size = file.size
+        if upload_size is not None and upload_size > settings.max_import_chunk_bytes:
+            raise HTTPException(
+                status_code=413,
+                detail={"code": "import_too_large", "message": "telemetry import chunk exceeds the size limit"},
+            )
+        required_space = upload_size if upload_size is not None else min(settings.max_import_chunk_bytes, 1 << 20)
+        if shutil.disk_usage(settings.temp_dir).free < required_space + settings.min_free_space_bytes:
+            raise HTTPException(
+                status_code=507,
+                detail={"code": "insufficient_storage", "message": "insufficient space for telemetry import"},
+            )
+
         tmp_dir = Path(tempfile.mkdtemp(prefix="telemetry-chunk-", dir=str(settings.temp_dir)))
         parquet_path = tmp_dir / "chunk.parquet"
-        with parquet_path.open("wb") as out:
-            while block := await file.read(1 << 20):
-                out.write(block)
         try:
+            received = 0
+            with parquet_path.open("wb") as out:
+                while block := await file.read(1 << 20):
+                    received += len(block)
+                    if received > settings.max_import_chunk_bytes:
+                        raise HTTPException(
+                            status_code=413,
+                            detail={
+                                "code": "import_too_large",
+                                "message": "telemetry import chunk exceeds the size limit",
+                            },
+                        )
+                    if shutil.disk_usage(settings.temp_dir).free < len(block) + settings.min_free_space_bytes:
+                        raise HTTPException(
+                            status_code=507,
+                            detail={
+                                "code": "insufficient_storage",
+                                "message": "insufficient space for telemetry import",
+                            },
+                        )
+                    out.write(block)
             with metrics.write_latency.time():
                 return await state.writer.run(
                     w.import_chunk,
@@ -395,9 +506,8 @@ def create_app(settings: TelemetrySettings | None = None) -> FastAPI:
 
     @app.post("/v1/export", dependencies=[auth], status_code=202)
     async def export(req: ExportRequest):
-        dest = Path(req.dest_dir) if req.dest_dir else None
         try:
-            job = state.jobs.start_export(req.tables, dest, req.since, export_root=settings.export_dir)
+            job = state.jobs.start_export(req.tables, req.since, export_root=settings.export_dir)
         except ValueError as exc:
             raise HTTPException(status_code=422, detail={"code": "bad_request", "message": str(exc)}) from exc
         return job.to_dict()
@@ -407,15 +517,32 @@ def create_app(settings: TelemetrySettings | None = None) -> FastAPI:
         job = state.jobs.get(job_id)
         if job is None or job.kind != "export" or job.state != "done":
             raise HTTPException(status_code=404, detail={"code": "not_found", "message": job_id})
-        root = os.path.realpath(job.result["dest_dir"])
-        candidate = os.path.realpath(os.path.normpath(os.path.join(root, name)))
-        if not candidate.startswith(root + os.sep) or not os.path.isfile(candidate):
+        root = job.artifact_dir.resolve() if job.artifact_dir else None
+        candidate = (root / name).resolve() if root and name else None
+        if root is None or candidate is None or not candidate.is_relative_to(root) or not candidate.is_file():
             raise HTTPException(status_code=404, detail={"code": "not_found", "message": name})
-        return FileResponse(candidate, media_type="application/octet-stream", filename=os.path.basename(candidate))
+        return FileResponse(candidate, media_type="application/octet-stream", filename=candidate.name)
 
     @app.post("/v1/admin/backup", dependencies=[auth], status_code=202)
-    async def backup(req: BackupRequest):
-        return state.jobs.start_backup(Path(req.dest_path)).to_dict()
+    async def backup():
+        backup_root = settings.backup_dir or settings.db_path.parent / "backups"
+        return state.jobs.start_backup(backup_root).to_dict()
+
+    @app.get("/v1/admin/backup/{job_id}/file", dependencies=[auth])
+    async def backup_file(job_id: str):
+        job = state.jobs.get(job_id)
+        if job is None or job.kind != "backup" or job.state != "done" or job.artifact_file is None:
+            raise HTTPException(status_code=404, detail={"code": "not_found", "message": job_id})
+        root = (settings.backup_dir or settings.db_path.parent / "backups").resolve()
+        candidate = job.artifact_file.resolve()
+        if not candidate.is_relative_to(root) or not candidate.is_file():
+            raise HTTPException(status_code=404, detail={"code": "not_found", "message": job_id})
+        return FileResponse(
+            candidate,
+            media_type="application/octet-stream",
+            filename="telemetry.duckdb",
+            background=BackgroundTask(candidate.unlink, missing_ok=True),
+        )
 
     @app.get("/v1/jobs/{job_id}", dependencies=[auth])
     async def job_status(job_id: str):

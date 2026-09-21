@@ -3,15 +3,16 @@
 
 """Create an online, snapshot-consistent copy of the telemetry database.
 
-Usage (inside the telemetry container): ``python -m telemetry_store.backup /data/telemetry/backups/x.duckdb``
+Usage (inside the telemetry container): ``python -m telemetry_store.backup <dest_path>``
 
-Talks to the running service over HTTP so the single writer keeps ownership of
-the file; the copy is produced by ``COPY FROM DATABASE`` under one transaction.
-Exits non-zero on failure. No interactive timeout: the job is polled until done.
+The service creates the snapshot beneath its configured backup root. This
+trusted local helper downloads it to the requested destination afterward, so
+remote HTTP callers can never choose a server filesystem path.
 """
 
 from __future__ import annotations
 
+import hashlib
 import sys
 import time
 from pathlib import Path
@@ -31,26 +32,51 @@ def main(argv: list[str] | None = None) -> int:
     base = f"http://127.0.0.1:{settings.bind_port}"
     headers = {"Authorization": f"Bearer {settings.token}"} if settings.token else {}
     dest.parent.mkdir(parents=True, exist_ok=True)
-    with httpx.Client(base_url=base, headers=headers, timeout=60.0) as client:
-        resp = client.post("/v1/admin/backup", json={"dest_path": str(dest)})
-        if resp.status_code >= 400:
-            print(f"backup request failed: {resp.status_code} {resp.text[:300]}", file=sys.stderr)
-            return 1
-        job_id = resp.json()["id"]
-        last = None
-        while True:
-            job = client.get(f"/v1/jobs/{job_id}").json()
-            if job["message"] != last:
-                last = job["message"]
-                print(f"[{job['pct']:3d}%] {last}", flush=True)
-            if job["state"] == "done":
-                print(f"backup written: {job['result']['path']} ({job['result']['bytes']} bytes)")
-                print(f"sha256: {job['result']['sha256']}")
-                return 0
-            if job["state"] == "failed":
-                print(f"backup failed: {job.get('error')}", file=sys.stderr)
+    temporary = dest.with_suffix(dest.suffix + ".partial")
+    temporary.unlink(missing_ok=True)
+    try:
+        with httpx.Client(base_url=base, headers=headers, timeout=60.0) as client:
+            resp = client.post("/v1/admin/backup")
+            if resp.status_code >= 400:
+                print(f"backup request failed: {resp.status_code} {resp.text[:300]}", file=sys.stderr)
                 return 1
-            time.sleep(1.0)
+            job_id = resp.json()["id"]
+            last = None
+            while True:
+                job = client.get(f"/v1/jobs/{job_id}").json()
+                if job["message"] != last:
+                    last = job["message"]
+                    print(f"[{job['pct']:3d}%] {last}", flush=True)
+                if job["state"] == "done":
+                    break
+                if job["state"] == "failed":
+                    print(f"backup failed: {job.get('error')}", file=sys.stderr)
+                    return 1
+                time.sleep(1.0)
+
+            digest = hashlib.sha256()
+            size = 0
+            with client.stream("GET", f"/v1/admin/backup/{job_id}/file", timeout=None) as download:
+                if download.status_code >= 400:
+                    download.read()
+                    print(f"backup download failed: {download.status_code} {download.text[:300]}", file=sys.stderr)
+                    return 1
+                with temporary.open("wb") as output:
+                    for block in download.iter_bytes(1 << 20):
+                        output.write(block)
+                        digest.update(block)
+                        size += len(block)
+            expected = job["result"]
+            if size != expected["bytes"] or digest.hexdigest() != expected["sha256"]:
+                print("backup download failed integrity verification", file=sys.stderr)
+                return 1
+            temporary.chmod(0o600)
+            temporary.replace(dest)
+            print(f"backup written: {dest} ({size} bytes)")
+            print(f"sha256: {digest.hexdigest()}")
+            return 0
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 if __name__ == "__main__":

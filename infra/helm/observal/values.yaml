@@ -80,6 +80,8 @@ telemetry:
   threads: 4
   readThreads: 4
   queryTimeoutMs: 30000
+  maxImportChunkBytes: 1073741824
+  minFreeSpaceBytes: 268435456
   resources:
     limits:
       memory: 2Gi

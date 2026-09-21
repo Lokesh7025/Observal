@@ -15,6 +15,8 @@ import duckdb
 from filelock import FileLock, Timeout
 from loguru import logger as optic
 
+from telemetry_store.sql import sql_string_literal
+
 if TYPE_CHECKING:
     from telemetry_store.settings import TelemetrySettings
 
@@ -124,7 +126,7 @@ class Database:
         conn.execute(f"SET threads = {int(self.settings.threads)}")
         conn.execute("SET preserve_insertion_order = false")
         if not self.is_memory:
-            conn.execute(f"SET temp_directory = '{self.settings.temp_dir.as_posix()}'")
+            conn.execute(f"SET temp_directory = {sql_string_literal(str(self.settings.temp_dir))}")
             conn.execute(f"SET checkpoint_threshold = '{self.settings.checkpoint_threshold}'")
         self.conn = conn
         optic.info(

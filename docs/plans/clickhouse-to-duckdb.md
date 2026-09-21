@@ -131,7 +131,7 @@ All endpoints require `Authorization: Bearer <TELEMETRY_TOKEN>` (constant-time c
 | `POST /v1/import/chunk` | multipart: `manifest_entry` (migration_id, chunk_id, table, sha256, row_count) + Parquet body (always uploaded; the store never opens caller-supplied paths). Idempotent via `telemetry_import_ledger` (§4). |
 | `POST /v1/rebuild/derived` | `{session_keys?: [...], all?: true}` → rebuild `session_stats_agg` and `session_checkpoints` from `session_events`, in batches of 500 sessions per transaction; job-style (returns `job_id`, poll `GET /v1/jobs/{id}`). |
 | `POST /v1/export` | `{tables, dest_dir, since?: ts}` → `COPY (SELECT …) TO 'dest/<table>/<chunk>.parquet'` in ≤ 500 K-row chunks with SHA-256 manifest; job-style. |
-| `POST /v1/admin/backup` | `{dest_path}` → `ATTACH dest; COPY FROM DATABASE main TO backup; DETACH` (online, snapshot-consistent, no writer pause); job-style. |
+| `POST /v1/admin/backup` | Creates a snapshot under the configured server-owned backup root using safely quoted `ATTACH` + `COPY FROM DATABASE`; callers download it by opaque job ID. |
 | `POST /v1/admin/checkpoint` | `CHECKPOINT` |
 | `POST /v1/admin/pause-writes` / `resume-writes` | writer queue stops dequeuing; queued writers wait up to `TELEMETRY_WRITE_QUEUE_TIMEOUT_MS` (10 000) then 503 `writer_paused` with `Retry-After`. Used by the cutover only. |
 | `GET /v1/jobs/{id}` | `{state, pct, message, started_at, finished_at, error}` for export/backup/rebuild jobs. |
