@@ -103,6 +103,12 @@ variable "image_repo_api" {
   default     = "ghcr.io/observal/observal-api"
 }
 
+variable "image_repo_telemetry" {
+  description = "Container image repository for the dedicated DuckDB telemetry service."
+  type        = string
+  default     = "ghcr.io/observal/observal-telemetry"
+}
+
 variable "image_repo_web" {
   description = "Container image repository for the Next.js web frontend."
   type        = string

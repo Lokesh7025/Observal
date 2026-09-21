@@ -220,19 +220,20 @@ Evidence:
 
 Source: `afc184cd`
 
-Current PR #1748 gap: `duckdb`, `filelock`, `prometheus-client`, and `pyarrow` are base server dependencies, and the telemetry service uses the API image.
+The gap was real: the API image installed the DuckDB engine solely because telemetry reused that image. PR #1748 now uses a dedicated telemetry dependency group, Dockerfile, image, release artifact, Compose service, Helm image, and Terraform image variable. API/worker retain only the separate Arrow migration group because ClickHouse cutover and server-to-server validation genuinely read Parquet; they do not install DuckDB or filelock. `prometheus-client` may remain transitively present through API instrumentation, but it is a direct dependency only of the telemetry runtime.
 
-- [ ] Decide explicitly whether one shared image is an accepted deployment tradeoff.
-- [ ] Prefer a telemetry optional dependency group/build target.
-- [ ] Keep the DuckDB engine out of API, worker, and init images unless technically required.
-- [ ] Ensure the telemetry image contains all runtime files, migrations, timezone support, and backup tools.
-- [ ] Verify API and worker can import their telemetry HTTP client without importing DuckDB.
-- [ ] Build and boot both images in CI.
+- [x] Decide explicitly whether one shared image is an accepted deployment tradeoff.
+- [x] Prefer a telemetry optional dependency group/build target.
+- [x] Keep the DuckDB engine out of API, worker, and init images unless technically required.
+- [x] Ensure the telemetry image contains all runtime files, migrations, timezone support, and backup tools.
+- [x] Verify API and worker can import their telemetry HTTP client without importing DuckDB.
+- [x] Build and boot both images in CI.
 
-Evidence required:
+Evidence:
 
-- `import duckdb` fails in the API/worker image if image separation is selected.
-- Telemetry image boots, migrates, ingests, queries, exports, and backs up.
+- Docker CI asserts `duckdb` is absent while `services.telemetry.client` imports in API and worker images.
+- Docker CI asserts the dedicated telemetry image imports DuckDB/PyArrow and contains `001_baseline.sql`; the Compose E2E stack boots and exercises ingest/query/export/backup paths.
+- Release CI publishes and verifies multi-architecture `observal-telemetry` manifests alongside API and web images.
 
 ### 10. Migration checksum and schema drift detection
 

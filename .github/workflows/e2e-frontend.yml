@@ -9,6 +9,10 @@ on:
     paths:
       - 'web/**'
       - 'tests/e2e/**'
+      - 'docker/**'
+      - 'observal-server/telemetry_store/**'
+      - 'observal-server/pyproject.toml'
+      - 'observal-server/uv.lock'
       - '.github/workflows/e2e-frontend.yml'
 
 concurrency:

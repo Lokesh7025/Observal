@@ -298,15 +298,18 @@ jobs:
           API_IMAGE_COUNT="$(grep -c "image: ghcr.io/observal/observal-api:${VERSION}" chart-dist/rendered.yaml)"
           test "$API_IMAGE_COUNT" -ge 3
           grep -q "image: ghcr.io/observal/observal-web:${VERSION}" chart-dist/rendered.yaml
+          grep -q "image: ghcr.io/observal/observal-telemetry:${VERSION}" chart-dist/rendered.yaml
 
           helm template observal "chart-dist/observal-${VERSION}.tgz" \
             --namespace observal \
             --set api.image.tag=custom-api \
             --set worker.image.tag=custom-worker \
+            --set telemetry.image.tag=custom-telemetry \
             --set web.image.tag=custom-web > chart-dist/rendered-overrides.yaml
 
           grep -q "image: ghcr.io/observal/observal-api:custom-api" chart-dist/rendered-overrides.yaml
           grep -q "image: ghcr.io/observal/observal-api:custom-worker" chart-dist/rendered-overrides.yaml
+          grep -q "image: ghcr.io/observal/observal-telemetry:custom-telemetry" chart-dist/rendered-overrides.yaml
           grep -q "image: ghcr.io/observal/observal-web:custom-web" chart-dist/rendered-overrides.yaml
 
 # ── Job 6: Docker build ───────────────────────────────────────────────────────
@@ -331,11 +334,32 @@ jobs:
 
       - name: Create stub .env
         if: needs.changes.outputs.docker == 'true'
-        run: touch ../.env
+        run: printf 'TELEMETRY_TOKEN=ci-telemetry-token\n' > ../.env
 
       - name: Build images
         if: needs.changes.outputs.docker == 'true'
         run: docker compose build
+
+      - name: Verify telemetry dependency boundary
+        if: needs.changes.outputs.docker == 'true'
+        run: |
+          docker compose run --rm --no-deps --entrypoint /app/.venv/bin/python observal-api -c \
+            "import importlib.util; import services.telemetry.client; assert importlib.util.find_spec('duckdb') is None"
+          docker compose run --rm --no-deps --entrypoint /app/.venv/bin/python observal-worker -c \
+            "import importlib.util; import services.telemetry.client; assert importlib.util.find_spec('duckdb') is None"
+          docker compose run --rm --no-deps --entrypoint /app/.venv/bin/python observal-telemetry -c \
+            "import duckdb, pyarrow, telemetry_store; from telemetry_store.db import SCHEMA_DIR; assert (SCHEMA_DIR / '001_baseline.sql').is_file()"
+
+      - name: Boot dedicated telemetry image
+        if: needs.changes.outputs.docker == 'true'
+        run: |
+          docker compose up -d observal-telemetry
+          for attempt in $(seq 1 30); do
+            curl --fail --silent http://127.0.0.1:8125/v1/health && exit 0
+            sleep 2
+          done
+          docker compose logs observal-telemetry
+          exit 1
 
 # ── Job 7: Dependency audit ─────────────────────────────────────────────────
   dependency-audit:

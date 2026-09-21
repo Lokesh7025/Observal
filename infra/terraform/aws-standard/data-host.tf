@@ -40,7 +40,7 @@ locals {
     region                           = var.region
     ssm_prefix                       = local.ssm_prefix
     db_password                      = random_password.db.result
-    telemetry_image                  = "${var.image_repo_api}:${var.image_tag}"
+    telemetry_image                  = "${var.image_repo_telemetry}:${var.image_tag}"
     enable_legacy_clickhouse         = var.enable_legacy_clickhouse
     data_volume_size_gb              = local.effective_data_volume_size_gb
     log_group                        = aws_cloudwatch_log_group.data_host.name

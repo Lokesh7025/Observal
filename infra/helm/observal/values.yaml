@@ -67,12 +67,12 @@ postgresql:
     size: 10Gi
     storageClassName: ""
 
-# Single-writer DuckDB telemetry store (same image as the API). One replica only.
+# Single-writer DuckDB telemetry store. One replica only.
 telemetry:
   enabled: true
   externalUrl: ""
   image:
-    repository: ghcr.io/observal/observal-api
+    repository: ghcr.io/observal/observal-telemetry
     tag: ""
     pullPolicy: IfNotPresent
   # DuckDB memory ceiling; keep ~25% headroom below resources.limits.memory.

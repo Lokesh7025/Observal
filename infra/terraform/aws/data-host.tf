@@ -54,7 +54,7 @@ locals {
     region                           = var.region
     ssm_prefix                       = local.ssm_prefix
     image_tag                        = var.image_tag
-    image_repo_api                   = var.image_repo_api
+    image_repo_telemetry             = var.image_repo_telemetry
     log_group                        = aws_cloudwatch_log_group.data_host.name
     backups_bucket                   = aws_s3_bucket.backups.bucket
     grafana_admin_user               = "admin"

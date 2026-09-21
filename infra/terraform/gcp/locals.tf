@@ -12,11 +12,13 @@ locals {
 
   ar_prefix = "${var.region}-docker.pkg.dev/${var.project_id}/${google_artifact_registry_repository.ghcr_proxy.repository_id}"
 
-  image_repo_api_effective = trimprefix(var.image_repo_api, "ghcr.io/")
-  image_repo_web_effective = trimprefix(var.image_repo_web, "ghcr.io/")
+  image_repo_api_effective       = trimprefix(var.image_repo_api, "ghcr.io/")
+  image_repo_telemetry_effective = trimprefix(var.image_repo_telemetry, "ghcr.io/")
+  image_repo_web_effective       = trimprefix(var.image_repo_web, "ghcr.io/")
 
-  image_api = "${local.ar_prefix}/${local.image_repo_api_effective}:${var.image_tag}"
-  image_web = "${local.ar_prefix}/${local.image_repo_web_effective}:${var.image_tag}"
+  image_api       = "${local.ar_prefix}/${local.image_repo_api_effective}:${var.image_tag}"
+  image_telemetry = "${local.ar_prefix}/${local.image_repo_telemetry_effective}:${var.image_tag}"
+  image_web       = "${local.ar_prefix}/${local.image_repo_web_effective}:${var.image_tag}"
 
   database_url   = "postgresql+asyncpg://${google_sql_user.app.name}:${random_password.db.result}@${google_sql_database_instance.postgres.private_ip_address}:5432/${google_sql_database.app.name}"
   redis_url      = "redis://${google_redis_instance.main.host}:${google_redis_instance.main.port}"

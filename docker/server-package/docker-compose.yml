@@ -101,8 +101,8 @@ services:
       - observal-net
 
   observal-telemetry:
-    # Single-writer DuckDB telemetry store. Same image as the API; one process only.
-    image: ghcr.io/observal/observal-api:${OBSERVAL_VERSION:-latest}
+    # Dedicated single-writer DuckDB telemetry image; one process only.
+    image: ghcr.io/observal/observal-telemetry:${OBSERVAL_VERSION:-latest}
     command: ["/app/.venv/bin/python", "-m", "telemetry_store"]
     group_add:
       - "${OBSERVAL_SECRET_GID:-1000}"

@@ -61,7 +61,7 @@ resource "azurerm_linux_virtual_machine" "clickhouse" {
   }
 
   custom_data = base64encode(templatefile("${path.module}/cloud-init.yaml.tftpl", {
-    telemetry_image                  = "${var.image_repo_api}:${var.image_tag}"
+    telemetry_image                  = "${var.image_repo_telemetry}:${var.image_tag}"
     telemetry_token                  = random_password.telemetry_token.result
     enable_legacy_clickhouse         = var.enable_legacy_clickhouse
     clickhouse_password              = random_password.clickhouse.result

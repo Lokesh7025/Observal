@@ -41,7 +41,7 @@ flowchart TB
 | `observal-api`        | built from `docker/Dockerfile.api`  | 8000       | FastAPI backend           |
 | `observal-web`        | built from `docker/Dockerfile.web`  | 3000       | Next.js web UI            |
 | `observal-db`         | `postgres:16`                       | 5432       | Registry, users, config   |
-| `observal-telemetry` | `ghcr.io/observal/observal-api` (`python -m telemetry_store`) | 8125 | Session, audit, and security events (single-writer DuckDB) |
+| `observal-telemetry` | `ghcr.io/observal/observal-telemetry` | 8125 | Session, audit, and security events (single-writer DuckDB) |
 | `observal-redis`      | `redis:7-alpine`                    | 6379       | Job queue (arq) + pub/sub |
 | `observal-worker`     | built from `docker/Dockerfile.api`  | (internal) | Background async jobs     |
 | `observal-grafana`    | `grafana/grafana-oss:11.6.5`        | 3001       | Dashboards (optional)     |

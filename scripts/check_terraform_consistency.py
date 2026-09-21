@@ -80,6 +80,12 @@ DOCKER_COMPOSE_ONLY = {
     "POSTGRES_USER",
     "POSTGRES_PASSWORD",
     "SEED_DEMO_ACCOUNTS",
+    # Telemetry-service-only settings. Terraform data-host templates use the
+    # same safe defaults; these .env knobs apply to Compose deployments.
+    "TELEMETRY_BACKUP_DIR",
+    "TELEMETRY_EXPORT_DIR",
+    "TELEMETRY_MAX_IMPORT_CHUNK_BYTES",
+    "TELEMETRY_MIN_FREE_SPACE_BYTES",
 }
 
 

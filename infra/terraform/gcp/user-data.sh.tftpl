@@ -36,7 +36,7 @@ chmod +x /usr/libexec/docker/cli-plugins/docker-compose
 cat > "$${DATA_DIR}/docker-compose.yml" <<'COMPOSE'
 services:
   telemetry:
-    # Single-writer DuckDB telemetry store (same image as the API, one process).
+    # Dedicated single-writer DuckDB telemetry service (one process).
     image: ${telemetry_image}
     container_name: observal-telemetry
     command: ["/app/.venv/bin/python", "-m", "telemetry_store"]

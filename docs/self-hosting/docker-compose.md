@@ -40,7 +40,7 @@ With Prometheus and Grafana:
 COMPOSE_PROFILES=grafana docker compose -f docker/docker-compose.yml -f docker/docker-compose.observability.yml up --build -d
 ```
 
-First build takes a few minutes (pulls images, builds `observal-api` and `observal-web`). Subsequent starts are fast.
+First build takes a few minutes (pulls images and builds `observal-api`, `observal-telemetry`, and `observal-web`). Subsequent starts are fast.
 
 ## 3. Verify health
 

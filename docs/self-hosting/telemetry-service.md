@@ -3,7 +3,7 @@
 
 # Telemetry service
 
-`observal-telemetry` is the single-writer DuckDB service that stores session events, session summaries, audit and security events, and webhook deliveries. It runs from the same image as the API (`python -m telemetry_store`) as exactly one process and exposes an HTTP API on port 8125.
+`observal-telemetry` is the single-writer DuckDB service that stores session events, session summaries, audit and security events, and webhook deliveries. It runs from the dedicated `ghcr.io/observal/observal-telemetry` image as exactly one process and exposes an HTTP API on port 8125. API, worker, and init images do not contain the DuckDB engine.
 
 ```
 api / worker / grafana / cli ──HTTP :8125──▶ observal-telemetry ──▶ /data/telemetry/observal.duckdb

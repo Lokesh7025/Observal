@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import ast
 import re
+import tomllib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -83,6 +84,23 @@ def test_no_clickhouse_code_outside_the_legacy_cutover_path():
             if re.search(r"clickhouse", line, re.IGNORECASE):
                 offenders.append(f"{rel}:{lineno}: {stripped[:100]}")
     assert not offenders, "ClickHouse references outside the allow-list:\n" + "\n".join(offenders)
+
+
+def test_telemetry_engine_dependencies_are_not_in_server_base_runtime():
+    project = tomllib.loads((SERVER / "pyproject.toml").read_text())
+    base = "\n".join(project["project"]["dependencies"]).lower()
+    assert "duckdb" not in base and "filelock" not in base and "pyarrow" not in base
+    telemetry = "\n".join(project["dependency-groups"]["telemetry"]).lower()
+    assert all(package in telemetry for package in ("duckdb", "filelock", "prometheus-client", "pyarrow"))
+    assert "pyarrow" in "\n".join(project["dependency-groups"]["migration"]).lower()
+
+    compose = (ROOT / "docker" / "docker-compose.yml").read_text()
+    packaged = (ROOT / "docker" / "server-package" / "docker-compose.yml").read_text()
+    helm = (ROOT / "infra" / "helm" / "observal" / "values.yaml").read_text()
+    assert "docker/Dockerfile.telemetry" in compose
+    assert "ghcr.io/observal/observal-telemetry" in compose
+    assert "ghcr.io/observal/observal-telemetry" in packaged
+    assert "ghcr.io/observal/observal-telemetry" in helm
 
 
 def test_only_the_telemetry_store_opens_duckdb():

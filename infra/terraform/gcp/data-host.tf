@@ -64,7 +64,7 @@ resource "google_compute_instance" "data_host" {
   }
 
   metadata_startup_script = templatefile("${path.module}/user-data.sh.tftpl", {
-    telemetry_image                  = local.image_api
+    telemetry_image                  = local.image_telemetry
     telemetry_token                  = random_password.telemetry_token.result
     enable_legacy_clickhouse         = var.enable_legacy_clickhouse
     clickhouse_password              = random_password.clickhouse.result

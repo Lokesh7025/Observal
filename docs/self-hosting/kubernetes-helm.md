@@ -79,6 +79,8 @@ helm install observal oci://ghcr.io/observal/charts/observal \
 | `worker.image.repository` | Worker container image repository | `ghcr.io/observal/observal-api` |
 | `worker.image.tag` | Worker container image tag. Defaults to the chart app version when empty. | `""` |
 | `worker.replicas` | Replicas for background job worker | `1` |
+| `telemetry.image.repository` | Dedicated telemetry container image repository | `ghcr.io/observal/observal-telemetry` |
+| `telemetry.image.tag` | Telemetry image tag. Defaults to the chart app version when empty. | `""` |
 | `web.image.repository` | Web UI container image repository | `ghcr.io/observal/observal-web` |
 | `web.image.tag` | Web UI container image tag. Defaults to the chart app version when empty. | `""` |
 | `web.replicas` | Replicas for Web UI deployment | `1` |

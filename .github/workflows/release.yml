@@ -259,7 +259,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        image: [api, web]
+        image: [api, telemetry, web]
         arch: [amd64, arm64]
         include:
           - arch: amd64
@@ -317,7 +317,7 @@ jobs:
       packages: write
     strategy:
       matrix:
-        image: [api, web]
+        image: [api, telemetry, web]
     steps:
       - name: Download digests
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
@@ -793,6 +793,7 @@ jobs:
           retry sh -c "npm view 'observal-pi@$VERSION' version | grep -qx '$VERSION'"
           echo "$GH_TOKEN" | helm registry login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
           retry docker buildx imagetools inspect "${{ env.IMAGE_PREFIX }}-api:$VERSION"
+          retry docker buildx imagetools inspect "${{ env.IMAGE_PREFIX }}-telemetry:$VERSION"
           retry docker buildx imagetools inspect "${{ env.IMAGE_PREFIX }}-web:$VERSION"
           retry helm pull oci://ghcr.io/observal/charts/observal --version "$VERSION" --destination /tmp
           retry sh -c "uvx --refresh --from 'observal-cli==$PYTHON_VERSION' observal --version | grep -F '$PYTHON_VERSION'"

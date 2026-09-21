@@ -39,6 +39,7 @@ def test_default_render_has_telemetry_and_no_clickhouse():
     telemetry = sets["observal-telemetry"]
     assert telemetry["spec"]["replicas"] == 1
     container = telemetry["spec"]["template"]["spec"]["containers"][0]
+    assert container["image"].startswith("ghcr.io/observal/observal-telemetry:")
     assert container["command"] == ["/app/.venv/bin/python", "-m", "telemetry_store"]
     assert container["readinessProbe"]["httpGet"]["path"] == "/v1/health"
     secret = _named(docs, "Secret")["observal-secret"]["stringData"]
