@@ -19,6 +19,7 @@ data:
             <enabled>false</enabled>
             <send_logical_errors>false</send_logical_errors>
         </send_crash_reports>
+        <remote_url_allow_hosts></remote_url_allow_hosts>
         <merge_tree>
             <parts_to_delay_insert>200</parts_to_delay_insert>
             <parts_to_throw_insert>500</parts_to_throw_insert>

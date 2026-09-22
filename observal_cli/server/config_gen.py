@@ -137,6 +137,7 @@ def generate_clickhouse_config() -> Path:
                 <enabled>false</enabled>
                 <send_logical_errors>false</send_logical_errors>
             </send_crash_reports>
+            <remote_url_allow_hosts></remote_url_allow_hosts>
 
             <mark_cache_size>5368709120</mark_cache_size>
 
