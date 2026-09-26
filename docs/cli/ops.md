@@ -19,6 +19,7 @@ The dead `ops metrics`, legacy `ops spans`, and synthetic `ops telemetry test` c
 | `rate-delete` | Delete the caller's feedback |
 | `feedback` | Show aggregate and individual feedback |
 | `traces` | List current sessions or fetch their details |
+| `export-trace` | Export sessions as OpenTelemetry traces |
 | `telemetry status` | Check server event counts and local outbox health |
 | `logs` | Follow local or remote development logs |
 | `insights list` | List Agent insight reports |
@@ -112,6 +113,17 @@ Default JSON returns the direct session summary array. Turn and span JSON fetch 
 ```
 
 `--turn` renders prompts and tool calls. `--span` includes full assistant and tool-result detail. Detail failures are surfaced rather than replaced with incomplete summaries.
+
+## Export traces
+
+`export-trace` converts sessions to OpenTelemetry traces through `GET /api/v1/sessions/{session_id}/otlp`. It prints the OTLP/JSON request, writes it to a file, or pushes it to an OTLP/HTTP endpoint such as Langfuse or LangSmith.
+
+```bash
+observal ops export-trace <session-id> --file trace.json --output json
+observal ops export-trace --recent 20 --include-content --endpoint https://cloud.langfuse.com/api/public/otel --header "Authorization=Basic $LANGFUSE_AUTH"
+```
+
+Prompts, responses, and tool payloads are only exported with `--include-content`. See [OpenTelemetry export](../integrations/opentelemetry-export.md) for destinations and the span mapping.
 
 ## Telemetry status
 

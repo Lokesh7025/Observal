@@ -18,6 +18,7 @@ from tempfile import NamedTemporaryFile
 from urllib.parse import quote
 from uuid import UUID
 
+import httpx
 import typer
 from rich import print as rprint
 from rich.table import Table
@@ -1600,6 +1601,201 @@ def _traces_impl(platform, days, limit, turn, span, output):
         _render_sessions_detail(sessions, full=span)
     else:
         _render_sessions_summary(sessions)
+
+
+# ── Trace export (OpenTelemetry) ────────────────────────
+
+_OTLP_TRACES_PATH = "/v1/traces"
+
+
+@ops_app.command(name="export-trace")
+def _export_trace(
+    session_ids: list[str] | None = typer.Argument(None, help="Session IDs to export"),
+    recent: int | None = typer.Option(
+        None, "--recent", "-n", min=1, max=200, help="Also export the N most recent sessions"
+    ),
+    include_content: bool = typer.Option(
+        False, "--include-content", help="Include prompts, responses and tool input/output"
+    ),
+    file: Path | None = typer.Option(None, "--file", "-f", help="Write the OTLP/JSON request to this file"),
+    endpoint: str | None = typer.Option(
+        None, "--endpoint", "-e", help="OTLP/HTTP endpoint to push to (/v1/traces is appended)"
+    ),
+    header: list[str] | None = typer.Option(
+        None, "--header", "-H", help="Header sent to --endpoint as KEY=VALUE (repeatable)"
+    ),
+    output: OutputMode = typer.Option("table", "--output", "-o"),
+):
+    """Export sessions as OpenTelemetry traces (OTLP/JSON).
+
+    Without --file or --endpoint, the OTLP/JSON request is printed to stdout.
+    With --endpoint, each session is sent to <endpoint>/v1/traces, so it can
+    go straight to Langfuse, LangSmith, Phoenix or an OpenTelemetry Collector.
+    Prompts, responses and tool payloads are left out unless --include-content
+    is set. Re-exporting a session reuses the same trace and span IDs.
+
+    Examples:
+
+        observal ops export-trace 3f2b9c1e-7a4d-4e8b-9c1a-2d5e6f7a8b9c --file trace.json --output json
+
+        observal ops export-trace --recent 20 --include-content --endpoint https://cloud.langfuse.com/api/public/otel --header "Authorization=Basic $LANGFUSE_AUTH"
+
+        observal ops export-trace --recent 5 --endpoint https://api.smith.langchain.com/otel --header "x-api-key=$LANGSMITH_API_KEY"
+    """
+    _export_trace_impl(session_ids or [], recent, include_content, file, endpoint, header or [], output)
+
+
+def _export_trace_impl(session_ids, recent, include_content, file, endpoint, header, output):
+    operation = "Export traces"
+    headers = _parse_otlp_headers(header)
+    if headers and not endpoint:
+        fail(
+            ErrorCategory.USAGE,
+            "--header only applies with --endpoint.",
+            operation=operation,
+            resource="header",
+            remediation="Add --endpoint, or drop --header.",
+        )
+
+    ids = [sid.strip() for sid in session_ids if sid.strip()]
+    if recent:
+        with _command_progress(output, "Querying sessions..."):
+            sessions = client.get("/api/v1/sessions", params={"limit": recent})
+        ids += [str(s["session_id"]) for s in sessions if s.get("session_id")]
+    ids = list(dict.fromkeys(ids))
+    if not ids:
+        fail(
+            ErrorCategory.USAGE,
+            "No sessions to export.",
+            operation=operation,
+            resource="session",
+            remediation="Pass session IDs or --recent N. List sessions with `observal ops traces`.",
+        )
+
+    params = {"include_content": "true" if include_content else "false"}
+    exported: list[tuple[str, dict]] = []
+    with _command_progress(output, "Exporting traces..."):
+        for sid in ids:
+            request = client.get(
+                f"/api/v1/sessions/{quote(sid, safe='')}/otlp",
+                params=params,
+                operation=operation,
+                resource=f"session {sid}",
+            )
+            exported.append((sid, request))
+    merged = {"resourceSpans": [rs for _sid, request in exported for rs in request.get("resourceSpans", [])]}
+
+    if not file and not endpoint:
+        output_json(merged)
+        return
+
+    if file:
+        file.write_text(json.dumps(merged, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    results = [{"session_id": sid, "spans": _otlp_span_count(request)} for sid, request in exported]
+    url = _otlp_traces_url(endpoint) if endpoint else None
+    if url:
+        with _command_progress(output, "Pushing traces..."):
+            for result, (_sid, request) in zip(results, exported, strict=True):
+                reply = _post_otlp(url, headers, request)
+                partial = reply.get("partialSuccess") or {}
+                result["rejected_spans"] = int(partial.get("rejectedSpans") or 0)
+
+    summary = {
+        "sessions": len(results),
+        "spans": sum(r["spans"] for r in results),
+        "include_content": include_content,
+        "file": str(file) if file else None,
+        "endpoint": url,
+        "results": results,
+    }
+    if output == "json":
+        output_json(summary)
+        return
+
+    destinations = [d for d in (str(file) if file else None, url) if d]
+    rprint(
+        f"[green]Exported {summary['sessions']} session(s), {summary['spans']} spans, "
+        f"to {esc(' and '.join(destinations))}[/green]"
+    )
+    for result in results:
+        if result.get("rejected_spans"):
+            rprint(
+                f"[yellow]{esc(result['session_id'])}: endpoint rejected {result['rejected_spans']} "
+                f"of {result['spans']} spans[/yellow]"
+            )
+    if not include_content:
+        rprint("[dim]Prompts, responses and tool payloads were left out. Add --include-content to send them.[/dim]")
+
+
+def _parse_otlp_headers(values: list[str]) -> dict[str, str]:
+    headers: dict[str, str] = {}
+    for value in values:
+        key, sep, header_value = value.partition("=")
+        if not sep or not key.strip():
+            # Never echo the value: headers usually carry credentials.
+            fail(
+                ErrorCategory.USAGE,
+                "Invalid --header: expected KEY=VALUE.",
+                operation="Export traces",
+                resource="header",
+                remediation='Pass headers like --header "Authorization=Basic <token>".',
+            )
+        headers[key.strip()] = header_value.strip()
+    return headers
+
+
+def _otlp_traces_url(endpoint: str) -> str:
+    """Resolve a base OTLP/HTTP endpoint to its traces URL, as OTLP exporters do."""
+    url = endpoint.strip().rstrip("/")
+    return url if url.endswith(_OTLP_TRACES_PATH) else url + _OTLP_TRACES_PATH
+
+
+def _otlp_span_count(request: dict) -> int:
+    return sum(
+        len(scope.get("spans", []))
+        for resource in request.get("resourceSpans", [])
+        for scope in resource.get("scopeSpans", [])
+    )
+
+
+def _post_otlp(url: str, headers: dict[str, str], payload: dict) -> dict:
+    operation = "Push traces"
+    try:
+        response = httpx.post(url, json=payload, headers=headers, timeout=30.0)
+    except httpx.HTTPError as exc:
+        fail(
+            ErrorCategory.UNAVAILABLE,
+            f"Could not reach {url}.",
+            operation=operation,
+            resource=url,
+            remediation="Check the endpoint URL and your network connection.",
+            detail=type(exc).__name__,
+        )
+    if response.status_code >= 400:
+        if response.status_code in (401, 403):
+            category = ErrorCategory.AUTH
+            remediation = "Check the credentials passed with --header."
+        elif response.status_code < 500:
+            category = ErrorCategory.VALIDATION
+            remediation = "Check that the endpoint accepts OTLP/HTTP JSON traces."
+        else:
+            category = ErrorCategory.UNAVAILABLE
+            remediation = "The endpoint failed; try again later."
+        fail(
+            category,
+            f"{url} rejected the traces (HTTP {response.status_code}).",
+            operation=operation,
+            resource=url,
+            remediation=remediation,
+            http_status=response.status_code,
+            detail=response.text[:300],
+        )
+    try:
+        reply = response.json() if response.content else {}
+    except ValueError:
+        return {}
+    return reply if isinstance(reply, dict) else {}
 
 
 def _render_sessions_summary(sessions: list[dict]):

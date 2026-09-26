@@ -19,6 +19,7 @@ from typer.main import get_command
 from typer.testing import CliRunner
 
 from observal_cli import cmd_ops as ops
+from observal_cli.errors import CliError, ErrorCategory
 from observal_cli.install_detector import InstallInfo, InstallMethod
 from observal_cli.main import app as cli_app
 from observal_cli.upgrade_lock import UpgradeLockError
@@ -1531,7 +1532,7 @@ def test_every_remaining_ops_workflow_has_output_and_dead_commands_are_removed()
                 yield name, child
 
     rows = list(leaves(command))
-    assert len(rows) == 11
+    assert len(rows) == 12
     assert all(any(parameter.name == "output" for parameter in leaf.params) for _name, leaf in rows)
     assert "metrics" not in command.commands
     assert "spans" not in command.commands
@@ -1792,3 +1793,180 @@ def test_admin_json_validation_uses_shared_error_boundary(arguments):
     assert result.exit_code == 7
     assert result.stdout == ""
     assert json.loads(result.stderr)["error"]["category"] == "validation"
+
+
+# ── export-trace ────────────────────────────────────────
+
+
+def _otlp(session_id: str, spans: int = 2) -> dict:
+    return {
+        "resourceSpans": [
+            {
+                "resource": {"attributes": []},
+                "scopeSpans": [{"spans": [{"name": f"{session_id}-{i}"} for i in range(spans)]}],
+            }
+        ]
+    }
+
+
+def _fake_session_get(calls: list, sessions: list[dict] | None = None):
+    def fake_get(path, params=None, **kwargs):
+        calls.append((path, params))
+        if path == "/api/v1/sessions":
+            return sessions or []
+        session_id = path.removeprefix("/api/v1/sessions/").removesuffix("/otlp")
+        return _otlp(session_id)
+
+    return fake_get
+
+
+def test_export_trace_prints_merged_request_and_dedupes_ids(cli, monkeypatch):
+    calls = []
+    monkeypatch.setattr(ops.client, "get", _fake_session_get(calls))
+
+    ops._export_trace_impl(["a", " a ", "b/c"], None, False, None, None, [], "table")
+
+    assert calls == [
+        ("/api/v1/sessions/a/otlp", {"include_content": "false"}),
+        ("/api/v1/sessions/b%2Fc/otlp", {"include_content": "false"}),
+    ]
+    [printed] = cli.json
+    assert [rs["scopeSpans"][0]["spans"][0]["name"] for rs in printed["resourceSpans"]] == ["a-0", "b%2Fc-0"]
+
+
+def test_export_trace_recent_adds_listed_sessions_and_writes_file(cli, monkeypatch, tmp_path):
+    calls = []
+    listed = [{"session_id": "a"}, {"session_id": "z"}, {"session_id": ""}]
+    monkeypatch.setattr(ops.client, "get", _fake_session_get(calls, listed))
+    target = tmp_path / "trace.json"
+
+    ops._export_trace_impl(["a"], 3, True, target, None, [], "json")
+
+    assert calls == [
+        ("/api/v1/sessions", {"limit": 3}),
+        ("/api/v1/sessions/a/otlp", {"include_content": "true"}),
+        ("/api/v1/sessions/z/otlp", {"include_content": "true"}),
+    ]
+    written = json.loads(target.read_text(encoding="utf-8"))
+    assert len(written["resourceSpans"]) == 2
+    assert cli.json == [
+        {
+            "sessions": 2,
+            "spans": 4,
+            "include_content": True,
+            "file": str(target),
+            "endpoint": None,
+            "results": [{"session_id": "a", "spans": 2}, {"session_id": "z", "spans": 2}],
+        }
+    ]
+
+
+def test_export_trace_pushes_each_session_to_the_traces_url(cli, monkeypatch):
+    calls = []
+    posts = []
+    monkeypatch.setattr(ops.client, "get", _fake_session_get(calls))
+
+    def fake_post(url, json=None, headers=None, timeout=None):
+        posts.append((url, json, headers))
+        body = {"partialSuccess": {"rejectedSpans": 1}} if json == _otlp("b") else {}
+        return SimpleNamespace(status_code=200, content=b"{}", json=lambda: body, text="")
+
+    monkeypatch.setattr(ops.httpx, "post", fake_post)
+
+    ops._export_trace_impl(
+        ["a", "b"],
+        None,
+        False,
+        None,
+        "https://cloud.langfuse.com/api/public/otel/",
+        ["Authorization=Basic cGs6c2s=", "x-langfuse-ingestion-version = 4"],
+        "table",
+    )
+
+    headers = {"Authorization": "Basic cGs6c2s=", "x-langfuse-ingestion-version": "4"}
+    assert posts == [
+        ("https://cloud.langfuse.com/api/public/otel/v1/traces", _otlp("a"), headers),
+        ("https://cloud.langfuse.com/api/public/otel/v1/traces", _otlp("b"), headers),
+    ]
+    text = cli.text()
+    assert "Exported 2 session(s), 4 spans" in text
+    assert "b: endpoint rejected 1 of 2 spans" in text
+    assert "--include-content" in text
+    assert "cGs6c2s" not in text
+
+
+@pytest.mark.parametrize(
+    ("endpoint", "expected"),
+    [
+        ("https://api.smith.langchain.com/otel", "https://api.smith.langchain.com/otel/v1/traces"),
+        ("http://collector:4318/v1/traces", "http://collector:4318/v1/traces"),
+        (" http://collector:4318/ ", "http://collector:4318/v1/traces"),
+    ],
+)
+def test_otlp_traces_url_follows_exporter_convention(endpoint, expected):
+    assert ops._otlp_traces_url(endpoint) == expected
+
+
+@pytest.mark.parametrize(
+    ("session_ids", "recent", "endpoint", "header", "category"),
+    [
+        ([], None, None, [], ErrorCategory.USAGE),
+        (["  "], None, None, [], ErrorCategory.USAGE),
+        (["a"], None, None, ["Authorization=Basic x"], ErrorCategory.USAGE),
+        (["a"], None, "https://x", ["no-separator-secret"], ErrorCategory.USAGE),
+        (["a"], None, "https://x", ["=value"], ErrorCategory.USAGE),
+    ],
+)
+def test_export_trace_rejects_bad_arguments_before_fetching(cli, session_ids, recent, endpoint, header, category):
+    with pytest.raises(CliError) as raised:
+        ops._export_trace_impl(session_ids, recent, False, None, endpoint, header, "table")
+
+    assert raised.value.category == category
+    assert "secret" not in raised.value.message
+
+
+@pytest.mark.parametrize(
+    ("status", "category"),
+    [
+        (401, ErrorCategory.AUTH),
+        (403, ErrorCategory.AUTH),
+        (400, ErrorCategory.VALIDATION),
+        (503, ErrorCategory.UNAVAILABLE),
+    ],
+)
+def test_post_otlp_maps_http_failures(monkeypatch, status, category):
+    response = SimpleNamespace(status_code=status, content=b"nope", json=lambda: {}, text="nope")
+    monkeypatch.setattr(ops.httpx, "post", lambda *args, **kwargs: response)
+
+    with pytest.raises(CliError) as raised:
+        ops._post_otlp("https://x/v1/traces", {}, {})
+
+    assert raised.value.category == category
+    assert raised.value.http_status == status
+
+
+def test_post_otlp_maps_connection_errors_and_tolerates_empty_bodies(monkeypatch):
+    def refuse(*args, **kwargs):
+        raise ops.httpx.ConnectError("refused")
+
+    monkeypatch.setattr(ops.httpx, "post", refuse)
+    with pytest.raises(CliError) as raised:
+        ops._post_otlp("https://x/v1/traces", {}, {})
+    assert raised.value.category == ErrorCategory.UNAVAILABLE
+
+    def bad_json():
+        raise ValueError("not json")
+
+    empty = SimpleNamespace(status_code=200, content=b"", json=bad_json, text="")
+    monkeypatch.setattr(ops.httpx, "post", lambda *args, **kwargs: empty)
+    assert ops._post_otlp("https://x/v1/traces", {}, {}) == {}
+    garbled = SimpleNamespace(status_code=200, content=b"x", json=bad_json, text="x")
+    monkeypatch.setattr(ops.httpx, "post", lambda *args, **kwargs: garbled)
+    assert ops._post_otlp("https://x/v1/traces", {}, {}) == {}
+
+
+def test_export_trace_is_registered_on_ops():
+    result = runner.invoke(cli_app, ["ops", "export-trace", "--help"])
+    assert result.exit_code == 0
+    assert "--include-content" in result.stdout
+    assert "--endpoint" in result.stdout
