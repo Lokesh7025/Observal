@@ -10,7 +10,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, call
 
 import pytest
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Response
 from httpx import ASGITransport, AsyncClient
 from redis.exceptions import RedisError
 
@@ -819,7 +819,9 @@ async def test_otlp_export_is_not_found_for_invisible_or_empty_sessions(monkeypa
     monkeypatch.setattr(sessions, "_ch_json", query)
 
     with pytest.raises(HTTPException) as raised:
-        await sessions.export_session_otlp("session", include_content=False, current_user=_user())
+        await sessions.export_session_otlp(
+            "session", Response(), include_content=False, encoding="json", current_user=_user()
+        )
 
     assert raised.value.status_code == 404
     sql, params = query.await_args_list[0].args
@@ -843,7 +845,10 @@ async def test_otlp_export_builds_trace_from_visible_rows(monkeypatch):
     monkeypatch.setattr(sessions, "_ch_json", query)
     monkeypatch.setattr(sessions, "async_session", _session_factory(_db(_result(scalar="Reviewer"))))
 
-    result = await sessions.export_session_otlp("session", include_content=True, current_user=_user())
+    response = Response()
+    result = await sessions.export_session_otlp(
+        "session", response, include_content=True, encoding="json", current_user=_user()
+    )
 
     params = {
         "param_sid": "session",
@@ -865,6 +870,7 @@ async def test_otlp_export_builds_trace_from_visible_rows(monkeypatch):
     assert root_attrs["observal.agent.version"] == {"stringValue": "1.2.0"}
     assert root_attrs["input.value"] == {"stringValue": "hello"}
     assert by_name["invoke_agent subagent"]["parentSpanId"] == by_name["invoke_agent Reviewer"]["spanId"]
+    assert response.headers["x-observal-span-count"] == str(len(spans)) == "5"
 
 
 @pytest.mark.asyncio
@@ -878,11 +884,47 @@ async def test_otlp_export_route_is_distinct_from_session_detail(monkeypatch):
         response = await client.get("/api/v1/sessions/session/otlp")
 
     assert response.status_code == 200
+    assert response.headers["content-type"] == "application/json"
+    assert response.headers["x-observal-span-count"] == "3"
     spans = response.json()["resourceSpans"][0]["scopeSpans"][0]["spans"]
     assert {span["name"] for span in spans} == {"invoke_agent claude-code", "turn 1", "chat m1"}
     # Content stays out unless the caller asks for it.
     keys = {attr["key"] for span in spans for attr in span["attributes"]}
-    assert not keys & {"input.value", "output.value"}
+    assert not keys & {"input.value", "output.value", "gen_ai.output.messages"}
+
+
+@pytest.mark.asyncio
+async def test_otlp_export_route_serves_protobuf(monkeypatch):
+    from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import ExportTraceServiceRequest
+
+    from services.otel_export import trace_id_for
+
+    identity = {"project_id": "project-a", "user_id": str(USER_ID), "harness": "claude-code"}
+    monkeypatch.setattr(sessions, "_ch_json", AsyncMock(side_effect=[[identity], OTLP_ROWS, []]))
+    monkeypatch.setattr(sessions, "async_session", _session_factory(_db(_result(scalar=None))))
+
+    async with _api_client(_user()) as client:
+        response = await client.get("/api/v1/sessions/session/otlp?encoding=protobuf")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "application/x-protobuf"
+    assert response.headers["x-observal-span-count"] == "3"
+    decoded = ExportTraceServiceRequest.FromString(response.content)
+    spans = decoded.resource_spans[0].scope_spans[0].spans
+    assert {span.name for span in spans} == {"invoke_agent claude-code", "turn 1", "chat m1"}
+    assert {span.trace_id for span in spans} == {bytes.fromhex(trace_id_for("session"))}
+
+
+@pytest.mark.asyncio
+async def test_otlp_export_route_rejects_unknown_encoding(monkeypatch):
+    query = AsyncMock()
+    monkeypatch.setattr(sessions, "_ch_json", query)
+
+    async with _api_client(_user()) as client:
+        response = await client.get("/api/v1/sessions/session/otlp?encoding=grpc")
+
+    assert response.status_code == 422
+    query.assert_not_awaited()
 
 
 @pytest.mark.asyncio

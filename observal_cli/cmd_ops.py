@@ -1606,6 +1606,11 @@ def _traces_impl(platform, days, limit, turn, span, output):
 # ── Trace export (OpenTelemetry) ────────────────────────
 
 _OTLP_TRACES_PATH = "/v1/traces"
+# OTLP/HTTP protocol -> (server encoding, request content type).
+_OTLP_PROTOCOLS = {
+    "http/protobuf": ("protobuf", "application/x-protobuf"),
+    "http/json": ("json", "application/json"),
+}
 
 
 @ops_app.command(name="export-trace")
@@ -1617,36 +1622,40 @@ def _export_trace(
     include_content: bool = typer.Option(
         False, "--include-content", help="Include prompts, responses and tool input/output"
     ),
-    file: Path | None = typer.Option(None, "--file", "-f", help="Write the OTLP/JSON request to this file"),
+    file: Path | None = typer.Option(None, "--file", "-f", help="Write OTLP/JSON Lines to this file"),
     endpoint: str | None = typer.Option(
         None, "--endpoint", "-e", help="OTLP/HTTP endpoint to push to (/v1/traces is appended)"
     ),
     header: list[str] | None = typer.Option(
         None, "--header", "-H", help="Header sent to --endpoint as KEY=VALUE (repeatable)"
     ),
+    protocol: str = typer.Option(
+        "http/protobuf", "--protocol", help="OTLP/HTTP encoding for --endpoint: http/protobuf or http/json"
+    ),
     output: OutputMode = typer.Option("table", "--output", "-o"),
 ):
-    """Export sessions as OpenTelemetry traces (OTLP/JSON).
+    """Export sessions as OpenTelemetry traces (OTLP).
 
-    Without --file or --endpoint, the OTLP/JSON request is printed to stdout.
-    With --endpoint, each session is sent to <endpoint>/v1/traces, so it can
-    go straight to Langfuse, LangSmith, Phoenix or an OpenTelemetry Collector.
-    Prompts, responses and tool payloads are left out unless --include-content
-    is set. Re-exporting a session reuses the same trace and span IDs.
+    Without --file or --endpoint, OTLP/JSON Lines (one request per session)
+    are printed to stdout. With --endpoint, each session is sent to
+    <endpoint>/v1/traces, so any OTLP/HTTP receiver can ingest it; route
+    gRPC-only backends through an OpenTelemetry Collector. Prompts, responses
+    and tool payloads are left out unless --include-content is set.
 
     Examples:
 
-        observal ops export-trace 3f2b9c1e-7a4d-4e8b-9c1a-2d5e6f7a8b9c --file trace.json --output json
+        observal ops export-trace 3f2b9c1e-7a4d-4e8b-9c1a-2d5e6f7a8b9c --file traces.jsonl --output json
+
+        observal ops export-trace --recent 20 --endpoint http://localhost:4318
 
         observal ops export-trace --recent 20 --include-content --endpoint https://cloud.langfuse.com/api/public/otel --header "Authorization=Basic $LANGFUSE_AUTH"
-
-        observal ops export-trace --recent 5 --endpoint https://api.smith.langchain.com/otel --header "x-api-key=$LANGSMITH_API_KEY"
     """
-    _export_trace_impl(session_ids or [], recent, include_content, file, endpoint, header or [], output)
+    _export_trace_impl(session_ids or [], recent, include_content, file, endpoint, header or [], protocol, output)
 
 
-def _export_trace_impl(session_ids, recent, include_content, file, endpoint, header, output):
+def _export_trace_impl(session_ids, recent, include_content, file, endpoint, header, protocol, output):
     operation = "Export traces"
+    protocol = _command_choice(protocol, tuple(_OTLP_PROTOCOLS), "OTLP protocol", operation)
     headers = _parse_otlp_headers(header)
     if headers and not endpoint:
         fail(
@@ -1672,34 +1681,47 @@ def _export_trace_impl(session_ids, recent, include_content, file, endpoint, hea
             remediation="Pass session IDs or --recent N. List sessions with `observal ops traces`.",
         )
 
-    params = {"include_content": "true" if include_content else "false"}
-    exported: list[tuple[str, dict]] = []
+    encoding, content_type = _OTLP_PROTOCOLS[protocol]
+    url = _otlp_traces_url(endpoint) if endpoint else None
+    need_json = url is None or file is not None or encoding == "json"
+    results: list[dict] = []
+    lines: list[str] = []
     with _command_progress(output, "Exporting traces..."):
         for sid in ids:
-            request = client.get(
-                f"/api/v1/sessions/{quote(sid, safe='')}/otlp",
-                params=params,
-                operation=operation,
-                resource=f"session {sid}",
-            )
-            exported.append((sid, request))
-    merged = {"resourceSpans": [rs for _sid, request in exported for rs in request.get("resourceSpans", [])]}
+            path = f"/api/v1/sessions/{quote(sid, safe='')}/otlp"
+            result: dict = {"session_id": sid}
+            body: bytes | None = None
+            if need_json:
+                body, response_headers = client.get_bytes(
+                    path,
+                    params={"include_content": str(include_content).lower(), "encoding": "json"},
+                    operation=operation,
+                    resource=f"session {sid}",
+                )
+                lines.append(json.dumps(json.loads(body), ensure_ascii=False, separators=(",", ":")))
+                result["spans"] = int(response_headers.get("x-observal-span-count", 0))
+            if url:
+                if encoding != "json":
+                    body, response_headers = client.get_bytes(
+                        path,
+                        params={"include_content": str(include_content).lower(), "encoding": encoding},
+                        operation=operation,
+                        resource=f"session {sid}",
+                    )
+                    result["spans"] = int(response_headers.get("x-observal-span-count", 0))
+                rejected, message = _post_otlp(url, headers, body, content_type, protocol)
+                result["rejected_spans"] = rejected
+                if message:
+                    result["message"] = message
+            results.append(result)
 
-    if not file and not endpoint:
-        output_json(merged)
+    if not file and not url:
+        for line in lines:
+            print(line)
         return
 
     if file:
-        file.write_text(json.dumps(merged, ensure_ascii=False, indent=2), encoding="utf-8")
-
-    results = [{"session_id": sid, "spans": _otlp_span_count(request)} for sid, request in exported]
-    url = _otlp_traces_url(endpoint) if endpoint else None
-    if url:
-        with _command_progress(output, "Pushing traces..."):
-            for result, (_sid, request) in zip(results, exported, strict=True):
-                reply = _post_otlp(url, headers, request)
-                partial = reply.get("partialSuccess") or {}
-                result["rejected_spans"] = int(partial.get("rejectedSpans") or 0)
+        file.write_text("".join(line + "\n" for line in lines), encoding="utf-8")
 
     summary = {
         "sessions": len(results),
@@ -1707,6 +1729,7 @@ def _export_trace_impl(session_ids, recent, include_content, file, endpoint, hea
         "include_content": include_content,
         "file": str(file) if file else None,
         "endpoint": url,
+        "protocol": protocol if url else None,
         "results": results,
     }
     if output == "json":
@@ -1720,9 +1743,10 @@ def _export_trace_impl(session_ids, recent, include_content, file, endpoint, hea
     )
     for result in results:
         if result.get("rejected_spans"):
+            detail = f": {result['message']}" if result.get("message") else ""
             rprint(
                 f"[yellow]{esc(result['session_id'])}: endpoint rejected {result['rejected_spans']} "
-                f"of {result['spans']} spans[/yellow]"
+                f"of {result['spans']} spans{esc(detail)}[/yellow]"
             )
     if not include_content:
         rprint("[dim]Prompts, responses and tool payloads were left out. Add --include-content to send them.[/dim]")
@@ -1751,18 +1775,11 @@ def _otlp_traces_url(endpoint: str) -> str:
     return url if url.endswith(_OTLP_TRACES_PATH) else url + _OTLP_TRACES_PATH
 
 
-def _otlp_span_count(request: dict) -> int:
-    return sum(
-        len(scope.get("spans", []))
-        for resource in request.get("resourceSpans", [])
-        for scope in resource.get("scopeSpans", [])
-    )
-
-
-def _post_otlp(url: str, headers: dict[str, str], payload: dict) -> dict:
+def _post_otlp(url: str, headers: dict[str, str], body: bytes, content_type: str, protocol: str) -> tuple[int, str]:
+    """POST one OTLP request; return (rejected spans, receiver message) from its partial-success reply."""
     operation = "Push traces"
     try:
-        response = httpx.post(url, json=payload, headers=headers, timeout=30.0)
+        response = httpx.post(url, content=body, headers={**headers, "Content-Type": content_type}, timeout=30.0)
     except httpx.HTTPError as exc:
         fail(
             ErrorCategory.UNAVAILABLE,
@@ -1776,9 +1793,13 @@ def _post_otlp(url: str, headers: dict[str, str], payload: dict) -> dict:
         if response.status_code in (401, 403):
             category = ErrorCategory.AUTH
             remediation = "Check the credentials passed with --header."
+        elif response.status_code == 415:
+            other = next(name for name in _OTLP_PROTOCOLS if name != protocol)
+            category = ErrorCategory.VALIDATION
+            remediation = f"The endpoint does not accept {protocol}. Retry with --protocol {other}."
         elif response.status_code < 500:
             category = ErrorCategory.VALIDATION
-            remediation = "Check that the endpoint accepts OTLP/HTTP JSON traces."
+            remediation = "Check that the URL is an OTLP/HTTP traces endpoint."
         else:
             category = ErrorCategory.UNAVAILABLE
             remediation = "The endpoint failed; try again later."
@@ -1791,11 +1812,62 @@ def _post_otlp(url: str, headers: dict[str, str], payload: dict) -> dict:
             http_status=response.status_code,
             detail=response.text[:300],
         )
+    if "protobuf" in response.headers.get("content-type", ""):
+        return _protobuf_partial_success(response.content)
     try:
         reply = response.json() if response.content else {}
     except ValueError:
-        return {}
-    return reply if isinstance(reply, dict) else {}
+        return 0, ""
+    partial = reply.get("partialSuccess") if isinstance(reply, dict) else None
+    if not isinstance(partial, dict):
+        return 0, ""
+    return int(partial.get("rejectedSpans") or 0), str(partial.get("errorMessage") or "")
+
+
+def _protobuf_fields(data: bytes):
+    """Yield (field number, value) for varint and length-delimited protobuf fields."""
+    pos = 0
+    while pos < len(data):
+        key, pos = _protobuf_varint(data, pos)
+        field, wire_type = key >> 3, key & 7
+        if wire_type == 0:
+            value, pos = _protobuf_varint(data, pos)
+        elif wire_type == 2:
+            length, pos = _protobuf_varint(data, pos)
+            value, pos = data[pos : pos + length], pos + length
+        elif wire_type in (1, 5):
+            pos += 8 if wire_type == 1 else 4
+            continue
+        else:
+            return
+        yield field, value
+
+
+def _protobuf_varint(data: bytes, pos: int) -> tuple[int, int]:
+    result = shift = 0
+    while True:
+        byte = data[pos]
+        pos += 1
+        result |= (byte & 0x7F) << shift
+        if byte < 0x80:
+            return result, pos
+        shift += 7
+
+
+def _protobuf_partial_success(body: bytes) -> tuple[int, str]:
+    """Read ExportTraceServiceResponse.partial_success (rejected_spans = 1, error_message = 2)."""
+    rejected, message = 0, ""
+    try:
+        for field, value in _protobuf_fields(body):
+            if field == 1 and isinstance(value, bytes):
+                for inner_field, inner_value in _protobuf_fields(value):
+                    if inner_field == 1 and isinstance(inner_value, int):
+                        rejected = inner_value
+                    elif inner_field == 2 and isinstance(inner_value, bytes):
+                        message = inner_value.decode("utf-8", errors="replace")
+    except IndexError:
+        return 0, ""
+    return rejected, message
 
 
 def _render_sessions_summary(sessions: list[dict]):

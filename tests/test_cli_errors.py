@@ -503,7 +503,7 @@ def test_team_visibility_json_failure_uses_audited_context(monkeypatch):
 
 
 def test_all_cli_api_calls_have_custom_error_context():
-    methods = {"get", "get_text", "get_with_headers", "request_json", "post", "put", "patch", "delete"}
+    methods = {"get", "get_bytes", "get_text", "get_with_headers", "request_json", "post", "put", "patch", "delete"}
     missing = []
     cli_root = Path(__file__).resolve().parents[1] / "observal_cli"
     paths = [*cli_root.glob("cmd_*.py"), cli_root / "lockfile_reconcile.py"]
@@ -923,14 +923,16 @@ def test_empty_post_and_delete_responses_return_empty_dict(monkeypatch, method, 
 
 
 def _invoke_wrapper(name: str):
-    if name in {"get", "get_text", "get_with_headers"}:
+    if name in {"get", "get_bytes", "get_text", "get_with_headers"}:
         return getattr(client, name)("/api/v1/items", params={"page": 1})
     if name == "delete":
         return client.delete("/api/v1/items/id")
     return getattr(client, name)("/api/v1/items/id", json_data={"name": "example"})
 
 
-@pytest.mark.parametrize("wrapper", ["get", "get_text", "get_with_headers", "post", "put", "patch", "delete"])
+@pytest.mark.parametrize(
+    "wrapper", ["get", "get_bytes", "get_text", "get_with_headers", "post", "put", "patch", "delete"]
+)
 @pytest.mark.parametrize(
     ("failure", "expected_category"),
     [

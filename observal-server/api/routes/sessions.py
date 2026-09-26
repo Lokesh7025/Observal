@@ -20,8 +20,9 @@ import asyncio
 import uuid as _uuid
 from dataclasses import dataclass
 from itertools import groupby
+from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from fastapi_cache.decorator import cache
 from loguru import logger as optic
 from sqlalchemy import select
@@ -475,20 +476,23 @@ async def get_session(
 @router.get("/{session_id}/otlp")
 async def export_session_otlp(
     session_id: str,
+    response: Response,
     include_content: bool = Query(False, description="Include prompt, response and tool payload text"),
+    encoding: Literal["json", "protobuf"] = Query("json", description="OTLP encoding of the response body"),
     current_user: User = Depends(require_role(UserRole.user)),
 ):
-    """Export one session as an OpenTelemetry trace (OTLP/JSON ExportTraceServiceRequest).
+    """Export one session as an OpenTelemetry trace (an OTLP ExportTraceServiceRequest).
 
-    The body can be POSTed as-is to any OTLP/HTTP traces endpoint, such as
-    Langfuse, LangSmith, Phoenix or an OpenTelemetry Collector.
+    The body can be POSTed unchanged to any OTLP/HTTP ``/v1/traces`` endpoint
+    that accepts the chosen encoding.  ``X-Observal-Span-Count`` carries the
+    number of spans.
     """
-    optic.trace("session_id={}, include_content={}", session_id, include_content)
+    optic.trace("session_id={}, include_content={}, encoding={}", session_id, include_content, encoding)
     loaded = await _load_session_rows(session_id, current_user)
     if loaded is None or not loaded.rows:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    from services.otel_export import SessionTrace, build_otlp_request
+    from services.otel_export import SessionTrace, build_otlp_request, encode_protobuf, span_count
     from services.session_parsers import parse_raw_events
 
     rows = loaded.rows
@@ -505,7 +509,7 @@ async def export_session_otlp(
         )
         for sub_sid, spawned_by, sub_rows in _group_subagent_rows(loaded.sub_rows)
     ]
-    return build_otlp_request(
+    request = build_otlp_request(
         SessionTrace(session_id=session_id, harness=harness, rows=rows, events=parse_raw_events(rows)),
         user_id=str(loaded.identity.get("user_id") or ""),
         agent_id=agent_id,
@@ -514,6 +518,11 @@ async def export_session_otlp(
         subagents=subagents,
         include_content=include_content,
     )
+    count_header = {"X-Observal-Span-Count": str(span_count(request))}
+    if encoding == "protobuf":
+        return Response(content=encode_protobuf(request), media_type="application/x-protobuf", headers=count_header)
+    response.headers.update(count_header)
+    return request
 
 
 @router.post("/{session_id}/bind-agent")

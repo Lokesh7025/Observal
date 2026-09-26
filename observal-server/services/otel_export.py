@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Lokesh Selvam <lokeshselvam7025@gmail.com>
 # SPDX-License-Identifier: Apache-2.0
 
-"""Export stored sessions as OpenTelemetry traces (OTLP/JSON).
+"""Export stored sessions as OpenTelemetry traces (OTLP).
 
 Sessions are stored as raw harness transcript lines in ``session_events``.
 This module derives an OTLP ``ExportTraceServiceRequest`` from them at read
@@ -22,9 +22,15 @@ Span tree per session::
       invoke_agent subagent         (subagent sessions, same trace)
 
 Attributes follow the OpenTelemetry GenAI semantic conventions
-(``gen_ai.*``) plus ``input.value`` / ``output.value``, which Langfuse,
-LangSmith and Phoenix all read.  Transcripts carry one timestamp per record,
-not start/end pairs, so span durations are derived from neighbouring records.
+(``gen_ai.*``) and nothing vendor specific.  Content, when requested, is set
+on the standard ``gen_ai.input.messages`` / ``gen_ai.output.messages`` and
+``gen_ai.tool.call.*`` attributes, with an ``input.value`` / ``output.value``
+copy because many backends only read that pair.  Transcripts carry one
+timestamp per record, not start/end pairs, so span durations are derived from
+neighbouring records.
+
+The request is built in the OTLP/JSON shape; :func:`encode_protobuf` turns it
+into the binary protobuf encoding, the OTLP/HTTP default.
 
 Trace and span IDs are hashes of the session ID and a stable per-span key, so
 re-exporting a session produces the same IDs.  Backends that upsert by span ID
@@ -33,6 +39,7 @@ update in place; append-only stores such as Jaeger keep both copies.
 
 from __future__ import annotations
 
+import base64
 import bisect
 import hashlib
 import json
@@ -324,6 +331,18 @@ class _SessionWalker:
         self._ensure_turn(ts).children.append(tool)
 
 
+def _semconv_input_tokens(tokens: dict[str, int]) -> int:
+    """Total input tokens as the GenAI conventions define them.
+
+    Observal stores ``input_tokens`` without cache reads and writes (the
+    Anthropic convention its insights also assume).  ``gen_ai.usage.input_tokens``
+    includes them, and backends derive uncached input by subtracting the
+    ``cache_*`` counts, so they are added back here.
+    """
+    cache_writes = tokens.get("cache_creation_tokens", 0) or tokens.get("cache_write_tokens", 0)
+    return tokens.get("input_tokens", 0) + tokens.get("cache_read_tokens", 0) + cache_writes
+
+
 def _is_error(attrs: dict) -> bool:
     return str(attrs.get("success", "")).lower() == "false" or str(attrs.get("is_error", "")).lower() == "true"
 
@@ -386,6 +405,16 @@ class _SpanWriter:
 
     def content(self, value: str) -> str | None:
         return _clip(value) if self.include_content and value else None
+
+    def messages(self, role: str, parts: list[dict], finish_reason: str | None = None) -> str | None:
+        """Encode one GenAI semconv message (``gen_ai.*.messages``) as a JSON string."""
+        if not self.include_content or not parts:
+            return None
+        clipped = [{**part, "content": _clip(part["content"])} if "content" in part else part for part in parts]
+        message: dict = {"role": role, "parts": clipped}
+        if finish_reason:
+            message["finish_reason"] = finish_reason
+        return json.dumps([message], ensure_ascii=False)
 
     def add(
         self,
@@ -457,28 +486,40 @@ def _write_session(
                 text = "\n\n".join(t for t in child.texts if t)
                 if text:
                     turn_output = text
-                output = text or (
-                    json.dumps(
-                        [{"name": tool.name, "arguments": _json_or_text(tool.input)} for tool in child.tool_calls]
-                    )
-                    if child.tool_calls
-                    else ""
+                tool_calls = [
+                    {
+                        "type": "tool_call",
+                        "id": tool.tool_id or None,
+                        "name": tool.name,
+                        "arguments": _json_or_text(tool.input),
+                    }
+                    for tool in child.tool_calls
+                ]
+                output = text or (json.dumps(tool_calls, ensure_ascii=False) if tool_calls else "")
+                parts = (
+                    [{"type": "reasoning", "content": t} for t in child.thinking if t]
+                    + [{"type": "text", "content": t} for t in child.texts if t]
+                    + tool_calls
                 )
-                input_tokens = child.tokens.get("input_tokens", 0)
+                if child.finish_reasons:
+                    finish_reason = child.finish_reasons[-1]
+                else:
+                    finish_reason = "tool_call" if tool_calls else "stop"
+                input_tokens = _semconv_input_tokens(child.tokens)
                 output_tokens = child.tokens.get("output_tokens", 0)
                 attributes: dict[str, object] = {
                     "gen_ai.operation.name": "chat",
-                    "langfuse.observation.type": "generation",
-                    "langsmith.span.kind": "llm",
                     "gen_ai.request.model": child.model,
                     "gen_ai.response.model": child.model,
                     "gen_ai.response.finish_reasons": child.finish_reasons or None,
+                    "gen_ai.output.messages": writer.messages("assistant", parts, finish_reason),
                     "output.value": writer.content(output),
-                    "observal.reasoning": writer.content("\n\n".join(t for t in child.thinking if t)),
                 }
                 for source, key in _TOKEN_KEYS.items():
-                    if child.tokens.get(source):
+                    if source != "input_tokens" and child.tokens.get(source):
                         attributes[key] = child.tokens[source]
+                if input_tokens:
+                    attributes["gen_ai.usage.input_tokens"] = input_tokens
                 if input_tokens or output_tokens:
                     attributes["gen_ai.usage.total_tokens"] = input_tokens + output_tokens
                 writer.add(
@@ -503,10 +544,10 @@ def _write_session(
                     end_ns=end,
                     attributes={
                         "gen_ai.operation.name": "execute_tool",
-                        "langfuse.observation.type": "tool",
-                        "langsmith.span.kind": "tool",
                         "gen_ai.tool.name": child.name,
                         "gen_ai.tool.call.id": child.tool_id,
+                        "gen_ai.tool.call.arguments": writer.content(child.input),
+                        "gen_ai.tool.call.result": writer.content(child.output),
                         "input.value": writer.content(child.input),
                         "output.value": writer.content(child.output),
                     },
@@ -523,7 +564,6 @@ def _write_session(
             start_ns=min(turn_times),
             end_ns=max(turn_times),
             attributes={
-                "langsmith.span.kind": "chain",
                 "observal.turn.index": turn.index,
                 "input.value": writer.content(turn.prompt),
                 "output.value": writer.content(turn_output),
@@ -545,10 +585,14 @@ def _write_session(
         attributes={
             **session_attributes,
             "gen_ai.operation.name": "invoke_agent",
-            "langfuse.observation.type": "agent",
-            "langsmith.span.kind": "chain",
             "observal.session.id": sid,
             "observal.harness": trace.harness,
+            "gen_ai.input.messages": writer.messages(
+                "user", [{"type": "text", "content": first_prompt}] if first_prompt else []
+            ),
+            "gen_ai.output.messages": writer.messages(
+                "assistant", [{"type": "text", "content": last_output}] if last_output else [], "stop"
+            ),
             "input.value": writer.content(first_prompt),
             "output.value": writer.content(last_output),
         },
@@ -566,7 +610,7 @@ def build_otlp_request(
     subagents: list[SessionTrace] | None = None,
     include_content: bool = False,
 ) -> dict:
-    """Build an OTLP/JSON ``ExportTraceServiceRequest`` for one session.
+    """Build an OTLP ``ExportTraceServiceRequest`` for one session, in the OTLP/JSON shape.
 
     Prompt, response and tool payload text is only included when
     ``include_content`` is set; structure, timing, models, token usage and
@@ -581,7 +625,6 @@ def build_otlp_request(
         session_attributes={
             "session.id": session.session_id,
             "gen_ai.conversation.id": session.session_id,
-            "langsmith.metadata.session_id": session.session_id,
             "user.id": user_id,
             "gen_ai.agent.id": agent_id,
             "gen_ai.agent.name": agent_name,
@@ -612,3 +655,43 @@ def build_otlp_request(
             }
         ]
     }
+
+
+def span_count(request: dict) -> int:
+    return sum(
+        len(scope.get("spans", []))
+        for resource in request.get("resourceSpans", [])
+        for scope in resource.get("scopeSpans", [])
+    )
+
+
+def encode_protobuf(request: dict) -> bytes:
+    """Serialize an OTLP/JSON request to the binary protobuf encoding.
+
+    OTLP/JSON writes trace and span IDs as hex, while the generic protobuf
+    JSON mapping expects base64 for ``bytes`` fields, so IDs are converted
+    before parsing.
+    """
+    from google.protobuf.json_format import ParseDict
+    from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import ExportTraceServiceRequest
+
+    def span_ids_base64(span: dict) -> dict:
+        converted = dict(span)
+        for key in ("traceId", "spanId", "parentSpanId"):
+            if converted.get(key):
+                converted[key] = base64.b64encode(bytes.fromhex(converted[key])).decode()
+        return converted
+
+    shaped = {
+        "resourceSpans": [
+            {
+                **resource,
+                "scopeSpans": [
+                    {**scope, "spans": [span_ids_base64(span) for span in scope.get("spans", [])]}
+                    for scope in resource.get("scopeSpans", [])
+                ],
+            }
+            for resource in request.get("resourceSpans", [])
+        ]
+    }
+    return ParseDict(shaped, ExportTraceServiceRequest()).SerializeToString()

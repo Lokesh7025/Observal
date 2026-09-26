@@ -8,12 +8,15 @@ from __future__ import annotations
 import json
 
 import pytest
+from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import ExportTraceServiceRequest
 
 from services.otel_export import (
     MAX_CONTENT_CHARS,
     STATUS_CODE_ERROR,
     SessionTrace,
     build_otlp_request,
+    encode_protobuf,
+    span_count,
     to_unix_nanos,
     trace_id_for,
 )
@@ -148,7 +151,7 @@ def test_claude_session_becomes_agent_turn_chat_and_tool_spans():
 
     session_attrs = _attrs(session)
     assert session_attrs["session.id"] == "sess-1"
-    assert session_attrs["langsmith.metadata.session_id"] == "sess-1"
+    assert session_attrs["gen_ai.conversation.id"] == "sess-1"
     assert session_attrs["user.id"] == "user-1"
     assert session_attrs["gen_ai.agent.name"] == "reviewer"
     assert session_attrs["gen_ai.operation.name"] == "invoke_agent"
@@ -156,27 +159,42 @@ def test_claude_session_becomes_agent_turn_chat_and_tool_spans():
 
     chat_attrs = _attrs(first_chat)
     assert chat_attrs["gen_ai.operation.name"] == "chat"
-    assert chat_attrs["langfuse.observation.type"] == "generation"
     assert chat_attrs["gen_ai.request.model"] == "claude-sonnet-5"
-    assert chat_attrs["gen_ai.usage.input_tokens"] == "100"
+    # Observal stores input without cache; the GenAI conventions count cache reads and writes as input.
+    assert chat_attrs["gen_ai.usage.input_tokens"] == "150"
     assert chat_attrs["gen_ai.usage.output_tokens"] == "20"
     assert chat_attrs["gen_ai.usage.cache_read.input_tokens"] == "50"
-    assert chat_attrs["gen_ai.usage.total_tokens"] == "120"
+    assert chat_attrs["gen_ai.usage.total_tokens"] == "170"
     assert chat_attrs["gen_ai.response.finish_reasons"] == ["tool_use"]
 
     tool_attrs = _attrs(tool)
     assert tool_attrs["gen_ai.tool.name"] == "Bash"
     assert tool_attrs["gen_ai.tool.call.id"] == "toolu_1"
-    assert tool_attrs["langfuse.observation.type"] == "tool"
+    assert tool_attrs["gen_ai.operation.name"] == "execute_tool"
     assert "status" not in tool
 
     resource = {item["key"]: item["value"] for item in request["resourceSpans"][0]["resource"]["attributes"]}
     assert resource["service.name"] == {"stringValue": "claude-code"}
 
 
+def test_only_standard_and_observal_attributes_are_emitted():
+    spans = _spans(build_otlp_request(_claude_trace(), user_id="u", include_content=True))
+    keys = {key for span in spans for key in _attrs(span)}
+    vendor = {key for key in keys if not key.startswith(("gen_ai.", "observal.", "session.", "user."))}
+    # input.value / output.value is the widely read OpenInference pair, kept as a compatibility copy.
+    assert vendor == {"input.value", "output.value"}
+
+
 def test_content_is_excluded_unless_requested():
     without = _spans(build_otlp_request(_claude_trace()))
-    content_keys = {"input.value", "output.value", "observal.reasoning"}
+    content_keys = {
+        "input.value",
+        "output.value",
+        "gen_ai.input.messages",
+        "gen_ai.output.messages",
+        "gen_ai.tool.call.arguments",
+        "gen_ai.tool.call.result",
+    }
     assert not any(content_keys & set(_attrs(span)) for span in without)
 
     named = _by_name(_spans(build_otlp_request(_claude_trace(), include_content=True)))
@@ -189,6 +207,54 @@ def test_content_is_excluded_unless_requested():
     assert _attrs(tool)["output.value"] == "a.md"
     assert _attrs(session)["input.value"] == "List the files"
     assert _attrs(session)["output.value"] == "Found a.md."
+    assert json.loads(_attrs(session)["gen_ai.input.messages"]) == [
+        {"role": "user", "parts": [{"type": "text", "content": "List the files"}]}
+    ]
+    assert json.loads(_attrs(session)["gen_ai.output.messages"]) == [
+        {"role": "assistant", "parts": [{"type": "text", "content": "Found a.md."}], "finish_reason": "stop"}
+    ]
+    assert json.loads(_attrs(tool)["gen_ai.tool.call.arguments"]) == {"command": "ls"}
+    assert _attrs(tool)["gen_ai.tool.call.result"] == "a.md"
+
+    first_chat, second_chat = sorted(named["chat claude-sonnet-5"], key=lambda s: int(s["startTimeUnixNano"]))
+    assert json.loads(_attrs(first_chat)["gen_ai.output.messages"]) == [
+        {
+            "role": "assistant",
+            "parts": [
+                {"type": "text", "content": "Listing now."},
+                {"type": "tool_call", "id": "toolu_1", "name": "Bash", "arguments": {"command": "ls"}},
+            ],
+            "finish_reason": "tool_use",
+        }
+    ]
+    assert json.loads(_attrs(second_chat)["gen_ai.output.messages"])[0]["parts"] == [
+        {"type": "text", "content": "Found a.md."}
+    ]
+
+
+def test_reasoning_is_a_semconv_message_part():
+    events = [
+        {"timestamp": "2026-09-26 10:00:00.000", "event_name": "hook_userpromptsubmit", "attributes": {}},
+        {
+            "timestamp": "2026-09-26 10:00:01.000",
+            "event_name": "hook_assistant_thinking",
+            "attributes": {"tool_response": "Think first."},
+        },
+        {
+            "timestamp": "2026-09-26 10:00:02.000",
+            "event_name": "hook_assistant_response",
+            "attributes": {"tool_response": "Done."},
+        },
+    ]
+    trace = SessionTrace(session_id="s", harness="claude-code", rows=[], events=events)
+    [chat] = _by_name(_spans(build_otlp_request(trace, include_content=True)))["chat"]
+    assert json.loads(_attrs(chat)["gen_ai.output.messages"]) == [
+        {
+            "role": "assistant",
+            "parts": [{"type": "reasoning", "content": "Think first."}, {"type": "text", "content": "Done."}],
+            "finish_reason": "stop",
+        }
+    ]
 
 
 def test_export_is_deterministic_so_reexports_overwrite():
@@ -206,7 +272,11 @@ def test_tool_only_response_lists_its_tool_calls_as_output():
     ]
     trace = SessionTrace(session_id="s", harness="codex", rows=[], events=events)
     [chat] = _by_name(_spans(build_otlp_request(trace, include_content=True)))["chat"]
-    assert json.loads(_attrs(chat)["output.value"]) == [{"name": "shell", "arguments": {"cmd": "ls"}}]
+    call = {"type": "tool_call", "id": "c1", "name": "shell", "arguments": {"cmd": "ls"}}
+    assert json.loads(_attrs(chat)["output.value"]) == [call]
+    assert json.loads(_attrs(chat)["gen_ai.output.messages"]) == [
+        {"role": "assistant", "parts": [call], "finish_reason": "tool_call"}
+    ]
 
 
 def test_separate_result_records_close_tools_and_split_model_calls():
@@ -387,3 +457,23 @@ def test_session_without_parseable_events_still_exports_a_root_span():
 )
 def test_to_unix_nanos(value, expected):
     assert to_unix_nanos(value) == expected
+
+
+def test_protobuf_encoding_matches_the_json_request():
+    request = build_otlp_request(_claude_trace(), user_id="user-1", include_content=True)
+    decoded = ExportTraceServiceRequest.FromString(encode_protobuf(request))
+
+    json_spans = _spans(request)
+    [resource_spans] = decoded.resource_spans
+    [scope_spans] = resource_spans.scope_spans
+    assert span_count(request) == len(json_spans) == len(scope_spans.spans)
+    assert resource_spans.resource.attributes[0].value.string_value == "claude-code"
+    for proto_span, json_span in zip(scope_spans.spans, json_spans, strict=True):
+        assert proto_span.trace_id == bytes.fromhex(trace_id_for("sess-1"))
+        assert proto_span.span_id.hex() == json_span["spanId"]
+        assert proto_span.parent_span_id.hex() == json_span.get("parentSpanId", "")
+        assert proto_span.name == json_span["name"]
+        assert proto_span.start_time_unix_nano == int(json_span["startTimeUnixNano"])
+    chat = next(span for span in scope_spans.spans if span.name.startswith("chat"))
+    usage = {a.key: a.value.int_value for a in chat.attributes if a.key == "gen_ai.usage.input_tokens"}
+    assert usage == {"gen_ai.usage.input_tokens": 150}

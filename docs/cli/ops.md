@@ -116,14 +116,14 @@ Default JSON returns the direct session summary array. Turn and span JSON fetch 
 
 ## Export traces
 
-`export-trace` converts sessions to OpenTelemetry traces through `GET /api/v1/sessions/{session_id}/otlp`. It prints the OTLP/JSON request, writes it to a file, or pushes it to an OTLP/HTTP endpoint such as Langfuse or LangSmith.
+`export-trace` converts sessions to OpenTelemetry traces through `GET /api/v1/sessions/{session_id}/otlp`. It prints OTLP/JSON Lines, writes them to a file, or pushes each session to any OTLP/HTTP endpoint, using `http/protobuf` by default or `http/json` with `--protocol`.
 
 ```bash
-observal ops export-trace <session-id> --file trace.json --output json
-observal ops export-trace --recent 20 --include-content --endpoint https://cloud.langfuse.com/api/public/otel --header "Authorization=Basic $LANGFUSE_AUTH"
+observal ops export-trace <session-id> --file traces.jsonl --output json
+observal ops export-trace --recent 20 --endpoint http://localhost:4318
 ```
 
-Prompts, responses, and tool payloads are only exported with `--include-content`. See [OpenTelemetry export](../integrations/opentelemetry-export.md) for destinations and the span mapping.
+Prompts, responses, and tool payloads are only exported with `--include-content`. See [OpenTelemetry export](../integrations/opentelemetry-export.md) for protocols, verified receivers, and the span mapping.
 
 ## Telemetry status
 
