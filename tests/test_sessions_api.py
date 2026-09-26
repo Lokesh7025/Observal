@@ -783,6 +783,108 @@ async def test_session_parser_failure_propagates(monkeypatch):
         await sessions.get_session("session", after_offset=None, current_user=_user())
 
 
+OTLP_ROWS = [
+    {
+        "line_offset": 0,
+        "timestamp": "2026-09-26 10:00:00.000",
+        "event_type": "user_prompt",
+        "tool_id": None,
+        "harness": "claude-code",
+        "agent_id": str(AGENT_ID),
+        "agent_version": "1.2.0",
+        "raw_line": '{"type": "user", "timestamp": "2026-09-26T10:00:00Z", "message": {"content": "hello"}}',
+        "ingested_at": "2026-09-26 10:01:00.000",
+    },
+    {
+        "line_offset": 1,
+        "timestamp": "2026-09-26 10:00:03.000",
+        "event_type": "assistant_text",
+        "tool_id": None,
+        "harness": "claude-code",
+        "agent_id": str(AGENT_ID),
+        "agent_version": "1.2.0",
+        "raw_line": (
+            '{"type": "assistant", "timestamp": "2026-09-26T10:00:03Z", "message": {"model": "m1", '
+            '"usage": {"input_tokens": 5, "output_tokens": 2}, "content": [{"type": "text", "text": "hi"}]}}'
+        ),
+        "ingested_at": "2026-09-26 10:01:00.000",
+    },
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("found", [[], [{"project_id": "p", "user_id": str(USER_ID), "harness": "cursor"}]])
+async def test_otlp_export_is_not_found_for_invisible_or_empty_sessions(monkeypatch, found):
+    query = AsyncMock(side_effect=[found, [], []])
+    monkeypatch.setattr(sessions, "_ch_json", query)
+
+    with pytest.raises(HTTPException) as raised:
+        await sessions.export_session_otlp("session", include_content=False, current_user=_user())
+
+    assert raised.value.status_code == 404
+    sql, params = query.await_args_list[0].args
+    assert _sql(sql) == _sql(IDENTITY_SQL_USER)
+    assert params == {"param_sid": "session", "param_uid": str(USER_ID)}
+
+
+@pytest.mark.asyncio
+async def test_otlp_export_builds_trace_from_visible_rows(monkeypatch):
+    identity = {"project_id": "project-a", "user_id": str(USER_ID), "harness": "claude-code"}
+    child = {
+        "session_id": "child",
+        "line_offset": 0,
+        "timestamp": "2026-09-26 10:00:01.000",
+        "event_type": "user_prompt",
+        "parent_uuid": "spawn-1",
+        "harness": "claude-code",
+        "raw_line": '{"type": "user", "timestamp": "2026-09-26T10:00:01Z", "message": {"content": "sub task"}}',
+    }
+    query = AsyncMock(side_effect=[[identity], OTLP_ROWS, [child]])
+    monkeypatch.setattr(sessions, "_ch_json", query)
+    monkeypatch.setattr(sessions, "async_session", _session_factory(_db(_result(scalar="Reviewer"))))
+
+    result = await sessions.export_session_otlp("session", include_content=True, current_user=_user())
+
+    params = {
+        "param_sid": "session",
+        "param_pid": "project-a",
+        "param_uid": str(USER_ID),
+        "param_harness": "claude-code",
+    }
+    assert [(_sql(item.args[0]), item.args[1]) for item in query.await_args_list] == [
+        (_sql(IDENTITY_SQL_USER), {"param_sid": "session", "param_uid": str(USER_ID)}),
+        (_sql(MAIN_SQL), params),
+        (_sql(SUB_SQL), params),
+    ]
+    spans = result["resourceSpans"][0]["scopeSpans"][0]["spans"]
+    by_name = {span["name"]: span for span in spans}
+    assert set(by_name) == {"invoke_agent Reviewer", "turn 1", "chat m1", "invoke_agent subagent"}
+    root_attrs = {a["key"]: a["value"] for a in by_name["invoke_agent Reviewer"]["attributes"]}
+    assert root_attrs["user.id"] == {"stringValue": str(USER_ID)}
+    assert root_attrs["gen_ai.agent.id"] == {"stringValue": str(AGENT_ID)}
+    assert root_attrs["observal.agent.version"] == {"stringValue": "1.2.0"}
+    assert root_attrs["input.value"] == {"stringValue": "hello"}
+    assert by_name["invoke_agent subagent"]["parentSpanId"] == by_name["invoke_agent Reviewer"]["spanId"]
+
+
+@pytest.mark.asyncio
+async def test_otlp_export_route_is_distinct_from_session_detail(monkeypatch):
+    identity = {"project_id": "project-a", "user_id": str(USER_ID), "harness": "claude-code"}
+    query = AsyncMock(side_effect=[[identity], OTLP_ROWS, []])
+    monkeypatch.setattr(sessions, "_ch_json", query)
+    monkeypatch.setattr(sessions, "async_session", _session_factory(_db(_result(scalar=None))))
+
+    async with _api_client(_user()) as client:
+        response = await client.get("/api/v1/sessions/session/otlp")
+
+    assert response.status_code == 200
+    spans = response.json()["resourceSpans"][0]["scopeSpans"][0]["spans"]
+    assert {span["name"] for span in spans} == {"invoke_agent claude-code", "turn 1", "chat m1"}
+    # Content stays out unless the caller asks for it.
+    keys = {attr["key"] for span in spans for attr in span["attributes"]}
+    assert not keys & {"input.value", "output.value"}
+
+
 @pytest.mark.asyncio
 async def test_bind_session_agent_checks_owner_and_sets_expiring_binding(monkeypatch):
     ownership = AsyncMock(return_value=[{"1": 1}])
@@ -888,6 +990,7 @@ async def test_unexpected_binding_service_failure_propagates(monkeypatch):
         ("get", "/api/v1/sessions/summary"),
         ("get", "/api/v1/sessions/stats"),
         ("get", "/api/v1/sessions/session-id"),
+        ("get", "/api/v1/sessions/session-id/otlp"),
         ("post", "/api/v1/sessions/session-id/bind-agent?agent_name=agent"),
     ],
 )

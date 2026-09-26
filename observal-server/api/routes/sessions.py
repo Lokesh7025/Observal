@@ -18,6 +18,8 @@ raw JSONL rows into frontend-friendly event dicts.
 
 import asyncio
 import uuid as _uuid
+from dataclasses import dataclass
+from itertools import groupby
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi_cache.decorator import cache
@@ -308,15 +310,21 @@ async def sessions_stats(current_user: User = Depends(require_role(UserRole.admi
     }
 
 
-@router.get("/{session_id}")
-async def get_session(
-    session_id: str,
-    after_offset: int | None = Query(
-        None, ge=0, description="Return only events after this line_offset (incremental fetch)"
-    ),
-    current_user: User = Depends(require_role(UserRole.user)),
-):
-    optic.trace("session_id={}, after_offset={}", session_id, after_offset)
+@dataclass
+class _SessionRows:
+    identity: dict
+    rows: list[dict]
+    sub_rows: list[dict]
+
+
+async def _load_session_rows(
+    session_id: str, current_user: User, after_offset: int | None = None
+) -> _SessionRows | None:
+    """Fetch a session's rendered rows and its subagents' rows.
+
+    Non-admins only see their own sessions.  Returns None when no visible
+    session matches *session_id*.
+    """
     is_admin = _has_admin_trace_access(current_user)
     identity_params: dict[str, str] = {"param_sid": session_id}
     identity_user_filter = ""
@@ -329,7 +337,7 @@ async def get_session(
         identity_params,
     )
     if not identity_rows:
-        return {"session_id": session_id, "harness": "", "events": []}
+        return None
 
     identity = identity_rows[0]
     params: dict[str, str] = {
@@ -381,7 +389,51 @@ async def get_session(
         _ch_json(_main_sql, params),
         _ch_json(_sub_sql, _sub_params),
     )
+    return _SessionRows(identity=identity, rows=rows, sub_rows=sub_rows_all)
 
+
+def _group_subagent_rows(sub_rows_all: list[dict]) -> list[tuple[str, str | None, list[dict]]]:
+    """Group subagent rows by session as ``(session_id, spawned_by, rows)``.
+
+    Each subagent's first row carries parent_uuid pointing at the Agent
+    tool_call in the parent that spawned it.
+    """
+    sub_rows_all.sort(key=lambda r: r["session_id"])
+    grouped = []
+    for sub_sid, sub_rows in groupby(sub_rows_all, key=lambda r: r["session_id"]):
+        sub_rows_list = list(sub_rows)
+        grouped.append((sub_sid, sub_rows_list[0].get("parent_uuid"), sub_rows_list))
+    return grouped
+
+
+async def _resolve_agent_name(agent_id: str | None) -> str | None:
+    if not agent_id:
+        return None
+    try:
+        from models.agent import Agent
+
+        async with async_session() as db:
+            result = await db.execute(select(Agent.name).where(Agent.id == _uuid.UUID(agent_id)))
+            return result.scalar_one_or_none()
+    except Exception:
+        optic.opt(exception=True).warning("Agent name resolution failed")
+    return None
+
+
+@router.get("/{session_id}")
+async def get_session(
+    session_id: str,
+    after_offset: int | None = Query(
+        None, ge=0, description="Return only events after this line_offset (incremental fetch)"
+    ),
+    current_user: User = Depends(require_role(UserRole.user)),
+):
+    optic.trace("session_id={}, after_offset={}", session_id, after_offset)
+    loaded = await _load_session_rows(session_id, current_user, after_offset)
+    if loaded is None:
+        return {"session_id": session_id, "harness": "", "events": []}
+
+    rows = loaded.rows
     if not rows:
         if after_offset is not None:
             # Incremental fetch with no new data
@@ -391,16 +443,7 @@ async def get_session(
     harness = rows[0].get("harness", "claude-code")
     agent_id = next((r.get("agent_id") for r in rows if r.get("agent_id")), None)
     agent_version = next((r.get("agent_version") for r in rows if r.get("agent_version")), None)
-    agent_name = None
-    if agent_id:
-        try:
-            from models.agent import Agent
-
-            async with async_session() as db:
-                result = await db.execute(select(Agent.name).where(Agent.id == _uuid.UUID(agent_id)))
-                agent_name = result.scalar_one_or_none()
-        except Exception:
-            optic.opt(exception=True).warning("Agent name resolution failed")
+    agent_name = await _resolve_agent_name(agent_id)
 
     # Track max line_offset for incremental fetch cursor
     max_offset = max(int(r.get("line_offset", 0)) for r in rows) if rows else (after_offset or 0)
@@ -410,28 +453,12 @@ async def get_session(
 
     events = parse_raw_events(rows)
 
-    # sub_rows_all was fetched concurrently above alongside the main query.
-    # Each subagent's first row carries parent_uuid pointing at the Agent
-    # tool_call in the parent that spawned it - the frontend uses this to
-    # nest the subagent inline at the right position.
-    subagent_sessions = []
-    if sub_rows_all:
-        # Group by session_id
-        from itertools import groupby
-
-        sub_rows_all.sort(key=lambda r: r["session_id"])
-        for sub_sid, sub_rows in groupby(sub_rows_all, key=lambda r: r["session_id"]):
-            sub_rows_list = list(sub_rows)
-            # first row's parent_uuid links to the Agent tool_call in the parent
-            spawned_by = sub_rows_list[0].get("parent_uuid") if sub_rows_list else None
-            sub_events = parse_raw_events(sub_rows_list)
-            subagent_sessions.append(
-                {
-                    "session_id": sub_sid,
-                    "spawned_by": spawned_by,
-                    "events": sub_events,
-                }
-            )
+    # The frontend uses spawned_by to nest each subagent inline at the
+    # position of the Agent tool_call that spawned it.
+    subagent_sessions = [
+        {"session_id": sub_sid, "spawned_by": spawned_by, "events": parse_raw_events(sub_rows)}
+        for sub_sid, spawned_by, sub_rows in _group_subagent_rows(loaded.sub_rows)
+    ]
     return {
         "session_id": session_id,
         "service_name": harness,
@@ -443,6 +470,50 @@ async def get_session(
         "subagent_sessions": subagent_sessions,
         "max_offset": max_offset,
     }
+
+
+@router.get("/{session_id}/otlp")
+async def export_session_otlp(
+    session_id: str,
+    include_content: bool = Query(False, description="Include prompt, response and tool payload text"),
+    current_user: User = Depends(require_role(UserRole.user)),
+):
+    """Export one session as an OpenTelemetry trace (OTLP/JSON ExportTraceServiceRequest).
+
+    The body can be POSTed as-is to any OTLP/HTTP traces endpoint, such as
+    Langfuse, LangSmith, Phoenix or an OpenTelemetry Collector.
+    """
+    optic.trace("session_id={}, include_content={}", session_id, include_content)
+    loaded = await _load_session_rows(session_id, current_user)
+    if loaded is None or not loaded.rows:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    from services.otel_export import SessionTrace, build_otlp_request
+    from services.session_parsers import parse_raw_events
+
+    rows = loaded.rows
+    harness = str(loaded.identity.get("harness") or rows[0].get("harness") or "")
+    agent_id = next((r.get("agent_id") for r in rows if r.get("agent_id")), None)
+    agent_version = next((r.get("agent_version") for r in rows if r.get("agent_version")), None)
+    subagents = [
+        SessionTrace(
+            session_id=sub_sid,
+            harness=str(sub_rows[0].get("harness") or harness),
+            rows=sub_rows,
+            events=parse_raw_events(sub_rows),
+            spawned_by=spawned_by,
+        )
+        for sub_sid, spawned_by, sub_rows in _group_subagent_rows(loaded.sub_rows)
+    ]
+    return build_otlp_request(
+        SessionTrace(session_id=session_id, harness=harness, rows=rows, events=parse_raw_events(rows)),
+        user_id=str(loaded.identity.get("user_id") or ""),
+        agent_id=agent_id,
+        agent_name=await _resolve_agent_name(agent_id),
+        agent_version=agent_version,
+        subagents=subagents,
+        include_content=include_content,
+    )
 
 
 @router.post("/{session_id}/bind-agent")
