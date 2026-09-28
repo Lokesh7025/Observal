@@ -20,7 +20,9 @@ class SkillResource(BaseModel):
 class SkillFileDeclaration(BaseModel):
     """Content-free manifest entry, including SKILL.md and legacy script."""
 
+    model_config = ConfigDict(extra="forbid", strict=True)
+
     path: str
     size: int = Field(ge=0)
-    sha256: str
+    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     mode: Literal["0644", "0755"]

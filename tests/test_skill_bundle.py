@@ -9,15 +9,16 @@ from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
+from sqlalchemy import inspect
 
 from models.skill import SkillListing, SkillVersion
-from schemas.skill_resources import SkillResource
+from schemas.skill_resources import SkillFileDeclaration, SkillResource
 from services.skill_bundle import MAX_BUNDLE_BYTES, MAX_FILE_BYTES, validate_bundle_path, validate_skill_bundle
 from services.skill_validator import SkillValidationError
 
 
 def bundle(**changes):
-    values = {"delivery_mode": "registry_direct", "skill_md_content": "# Example\n"}
+    values = {"delivery_mode": "registry_direct", "skill_md_content": "# Example\n", "extra_files": []}
     values.update(changes)
     return validate_skill_bundle(**values)
 
@@ -37,8 +38,25 @@ def test_schema_defaults_and_listing_accessor():
     version = SkillVersion(extra_files=[resource.model_dump()])
     listing.latest_version = version
     assert listing.extra_files == [resource.model_dump()]
+    listing.extra_files[0]["path"] = "lost-change"
+    assert version.extra_files[0]["path"] == "templates/empty.txt"
     listing.extra_files = []
     assert version.extra_files == []
+    assert inspect(version).attrs.extra_files.history.has_changes()
+
+
+def test_manifest_rejects_invalid_digest_mode_and_size():
+    expected = bundle()[0].declaration.model_dump()
+    for patch in (
+        {"sha256": "bad"},
+        {"sha256": "F" * 64},
+        {"size": -1},
+        {"size": True},
+        {"mode": "0777"},
+        {"content": "secret"},
+    ):
+        with pytest.raises(ValidationError):
+            SkillFileDeclaration.model_validate(expected | patch)
 
 
 def test_binary_empty_and_metadata():
@@ -54,6 +72,20 @@ def test_binary_empty_and_metadata():
     ]
 
 
+@pytest.mark.parametrize(
+    "suffix, expected", [(".sh", "0755"), (".bash", "0755"), (".py", "0755"), (".rb", "0755"), (".txt", "0644")]
+)
+def test_legacy_script_mode_matches_cli_suffixes(suffix, expected):
+    assert bundle(script_filename="run" + suffix, script_content="")[1].declaration.mode == expected
+
+
+def test_empty_binary_file_and_explicit_executable_resource():
+    files = bundle(extra_files=[{"path": "bin/tool", "content": "", "encoding": "base64", "executable": True}])
+    assert files[1].content == b""
+    assert files[1].declaration.size == 0
+    assert files[1].declaration.mode == "0755"
+
+
 def test_fixture_entire_file_set_for_both_install_surfaces():
     fixture = json.loads((Path(__file__).parent / "fixtures/skill_bundle_contract.json").read_text())
     payload = fixture["submit"]
@@ -62,10 +94,19 @@ def test_fixture_entire_file_set_for_both_install_surfaces():
     )
     declarations = [file.declaration.model_dump() for file in files]
     assert fixture["standalone"]["config_snippet"]["skill"]["files"] == declarations
-    assert fixture["agent"]["config_snippet"]["skills"][0]["files"] == declarations
-    assert fixture["edit"]["extra_files"] == []  # omitted inherits; [] clears
+    assert fixture["agent"]["config_snippet"]["skill_components"][0]["files"] == declarations
+    for component in (
+        fixture["standalone"]["config_snippet"]["skill"],
+        fixture["agent"]["config_snippet"]["skill_components"][0],
+    ):
+        assert component["destination"] + "/SKILL.md" == fixture["standalone"]["config_snippet"]["skills"]["path"]
+        assert component["version_id"] == fixture["standalone"]["version_id"]
+        assert component["extra_files"] == payload["extra_files"]
+    assert fixture["edit"]["extra_files"] == []  # [] clears
+    assert "extra_files" not in fixture["edit_inherit"]  # omitted inherits
     assert fixture["release"]["extra"]["extra_files"] == payload["extra_files"]
-    assert fixture["request_features"] == ["skill_extra_files_v1"]
+    assert fixture["standalone_request"]["supported_features"] == ["skill_extra_files_v1"]
+    assert fixture["agent_request"]["supported_features"] == ["skill_extra_files_v1"]
 
 
 @pytest.mark.parametrize(
@@ -86,6 +127,11 @@ def test_fixture_entire_file_set_for_both_install_surfaces():
         "NUL.txt",
         "com1",
         "LPT².txt",
+        "CONIN$",
+        "CONOUT$.txt",
+        "NUL .txt",
+        "COM1 .log",
+        "LPT² .bin",
         "x:y",
         "a?b",
         "a\x00b",
@@ -206,14 +252,22 @@ def test_invalid_legacy_fields(kwargs):
 
 
 def test_git_compatibility_and_inherited_effective_bundle():
-    assert validate_skill_bundle(delivery_mode="git_fetch", skill_md_content=None) == ()
+    assert validate_skill_bundle(delivery_mode="git_fetch", skill_md_content=None, extra_files=[]) == ()
     with pytest.raises(SkillValidationError, match="both be set"):
-        validate_skill_bundle(delivery_mode="git_fetch", skill_md_content=None, script_filename="old")
+        validate_skill_bundle(delivery_mode="git_fetch", skill_md_content=None, script_filename="old", extra_files=[])
     with pytest.raises(SkillValidationError, match="git_fetch"):
         validate_skill_bundle(
             delivery_mode="git_fetch", skill_md_content=None, extra_files=[SkillResource(path="a", content="")]
         )
+    assert (
+        validate_skill_bundle(
+            delivery_mode="git_fetch", skill_md_content=None, script_filename="go.sh", script_content="", extra_files=[]
+        )
+        == ()
+    )
     assert len(bundle(extra_files=[])) == 1
     assert len(bundle(extra_files=[{"path": "a", "content": ""}])) == 2
     with pytest.raises(SkillValidationError):
-        validate_skill_bundle(delivery_mode="unknown", skill_md_content="x")
+        validate_skill_bundle(delivery_mode="unknown", skill_md_content="x", extra_files=[])
+    with pytest.raises(SkillValidationError, match="list"):
+        bundle(extra_files=None)

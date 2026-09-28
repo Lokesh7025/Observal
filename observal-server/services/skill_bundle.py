@@ -28,7 +28,7 @@ MAX_BUNDLE_BYTES = 4 * 1024 * 1024
 MAX_PATH_BYTES = 240
 MAX_SEGMENT_BYTES = 100
 MAX_DEPTH = 12
-_RESERVED = re.compile(r"^(?:CON|PRN|AUX|NUL|COM[1-9¹²³]|LPT[1-9¹²³])(?:\..*)?$", re.IGNORECASE)
+_RESERVED = re.compile(r"(?:CON|PRN|AUX|NUL|CONIN\$|CONOUT\$|COM[1-9¹²³]|LPT[1-9¹²³])", re.IGNORECASE)
 _UNSAFE = re.compile(r'[<>:"|?*\\]')
 
 
@@ -71,7 +71,7 @@ def validate_bundle_path(path: str) -> str:
             or len(part.encode("utf-16-le")) // 2 > MAX_SEGMENT_BYTES
             or part.endswith((" ", "."))
             or _UNSAFE.search(part)
-            or _RESERVED.fullmatch(part)
+            or _RESERVED.fullmatch(part.partition(".")[0].rstrip(" "))
             or part.casefold() == ".git"
             or any(ord(c) < 32 or ord(c) == 127 or unicodedata.category(c) in {"Cc", "Cf"} for c in part)
         ):
@@ -100,23 +100,25 @@ def validate_skill_bundle(
     skill_md_content: str | None,
     script_content: str | None = None,
     script_filename: str | None = None,
-    extra_files: list[SkillResource | dict[str, Any]] | None = None,
+    extra_files: list[SkillResource | dict[str, Any]],
     enforce_limits: bool = True,
 ) -> tuple[SkillBundleFile, ...]:
     """Return the entire decoded file set; raise SkillValidationError on invalid input.
 
-    `extra_files=None` means no extras in the effective bundle, NOT inheritance.
-    Callers perform inheritance before calling this function. Only previously
+    Pass the effective extra_files list explicitly. An omitted request field
+    inherits before calling this function; [] explicitly clears it. Only previously
     stored, unchanged versions may use enforce_limits=False; paths and decoding
     always receive validation. A git_fetch skill has no locally written bundle.
     """
-    if extra_files is not None and not isinstance(extra_files, list):
+    if not isinstance(extra_files, list):
         raise SkillValidationError("extra_files must be a list")
     if (script_content is None) != (script_filename is None):
         raise SkillValidationError("script_content and script_filename must both be set or cleared")
     if delivery_mode == "git_fetch":
         if extra_files:
             raise SkillValidationError("git_fetch cannot contain extra_files")
+        # Preserve historical git_fetch metadata: the clone, not these inline
+        # fields, determines the installed files. They must still be coherent.
         return ()
     if delivery_mode != "registry_direct":
         raise SkillValidationError("Unknown skill delivery mode")
@@ -127,7 +129,7 @@ def validate_skill_bundle(
         validate_skill_md_content_frontmatter(skill_md_content)
     except UnicodeError as exc:
         raise SkillValidationError("SKILL.md is not valid UTF-8") from exc
-    resources = extra_files or []
+    resources = extra_files
     if enforce_limits and len(resources) > MAX_EXTRA_FILES:
         raise SkillValidationError("Too many extra_files")
     files = [SkillBundleFile("SKILL.md", md)]

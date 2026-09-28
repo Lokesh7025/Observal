@@ -31,6 +31,9 @@ def downgrade() -> None:
     # Refuse to destroy stored resources inadvertently; an operator must explicitly
     # remove resource-bearing versions before downgrading.
     bind = op.get_bind()
+    # Serialize the check with writers until the transactional DDL commits;
+    # otherwise an insert between the check and DROP could lose resources.
+    bind.execute(sa.text("LOCK TABLE skill_versions IN ACCESS EXCLUSIVE MODE"))
     if bind.execute(sa.text("SELECT 1 FROM skill_versions WHERE extra_files::jsonb <> '[]'::jsonb LIMIT 1")).first():
         raise RuntimeError("Cannot downgrade: skill_versions.extra_files contains resources")
     op.drop_column("skill_versions", "extra_files")

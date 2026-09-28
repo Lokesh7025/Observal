@@ -40,11 +40,16 @@ def test_downgrade_only_if_no_resource_bearing_rows(monkeypatch):
     bind.execute.return_value.first.return_value = None
     migration, op = _migration(monkeypatch, bind)
     migration.downgrade()
-    assert "extra_files::jsonb <> '[]'::jsonb" in str(bind.execute.call_args.args[0])
+    assert [str(call.args[0]) for call in bind.execute.call_args_list] == [
+        "LOCK TABLE skill_versions IN ACCESS EXCLUSIVE MODE",
+        "SELECT 1 FROM skill_versions WHERE extra_files::jsonb <> '[]'::jsonb LIMIT 1",
+    ]
     op.drop_column.assert_called_once_with("skill_versions", "extra_files")
 
     bind.execute.return_value.first.return_value = (1,)
     op.reset_mock()
+    bind.execute.reset_mock()
     with pytest.raises(RuntimeError, match="contains resources"):
         migration.downgrade()
+    assert str(bind.execute.call_args_list[0].args[0]).startswith("LOCK TABLE")
     op.drop_column.assert_not_called()

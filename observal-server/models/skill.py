@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import uuid
+from copy import deepcopy
 from datetime import UTC, datetime
 
 from sqlalchemy import Boolean, DateTime, Enum, ForeignKey, Index, Integer, String, Text, UniqueConstraint
@@ -179,7 +180,9 @@ class SkillListing(Base):
 
     @property
     def extra_files(self) -> list[dict]:
-        return self.latest_version.extra_files if self.latest_version else []
+        # JSON columns are not mutable-tracked: prevent in-place edits that
+        # appear to work but disappear when the session commits.
+        return deepcopy(self.latest_version.extra_files) if self.latest_version else []
 
     @extra_files.setter
     def extra_files(self, value: list[dict]) -> None:
