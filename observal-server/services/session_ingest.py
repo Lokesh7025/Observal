@@ -110,11 +110,15 @@ def _usage_codex(parsed: dict) -> dict:
     info = payload.get("info", {})
     if not isinstance(info, dict):
         info = {}
-    usage = info.get("last_token_usage") or info.get("total_token_usage") or {}
-    cached = int(usage.get("cached_input_tokens") or 0)
+    usage = info.get("last_token_usage")
+    if not isinstance(usage, dict) or not usage:
+        usage = info.get("total_token_usage")
+    if not isinstance(usage, dict):
+        usage = {}
+    cached = token_count(usage, "cached_input_tokens")
     return {
-        "input_tokens": uncached_input_tokens(int(usage.get("input_tokens") or 0), cached),
-        "output_tokens": int(usage.get("output_tokens") or 0),
+        "input_tokens": uncached_input_tokens(token_count(usage, "input_tokens"), cached),
+        "output_tokens": token_count(usage, "output_tokens"),
         "cache_read_tokens": cached,
         "cache_write_tokens": 0,
         "model": "",
@@ -146,11 +150,11 @@ def _usage_copilot_cli(parsed: dict) -> dict:
 
 def _copilot_usage(data: dict) -> dict:
     """Copilot usage counts cache reads and writes inside inputTokens."""
-    cache_read = int(data.get("cacheReadTokens") or 0)
-    cache_write = int(data.get("cacheWriteTokens") or 0)
+    cache_read = token_count(data, "cacheReadTokens")
+    cache_write = token_count(data, "cacheWriteTokens")
     return {
-        "input_tokens": uncached_input_tokens(int(data.get("inputTokens") or 0), cache_read, cache_write),
-        "output_tokens": int(data.get("outputTokens") or 0),
+        "input_tokens": uncached_input_tokens(token_count(data, "inputTokens"), cache_read, cache_write),
+        "output_tokens": token_count(data, "outputTokens"),
         "cache_read_tokens": cache_read,
         "cache_write_tokens": cache_write,
         "model": str(data.get("model") or ""),

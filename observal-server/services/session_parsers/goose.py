@@ -213,10 +213,12 @@ def _token_attributes(metadata: Any) -> dict[str, str]:
             ("outputTokens", "output_tokens"),
             ("cacheReadTokens", "cache_read_tokens"),
             ("cacheWriteTokens", "cache_creation_tokens"),
-            ("cost", "cost"),
         ):
-            if usage.get(key):
-                attributes[name] = str(usage[key])
+            count = token_count(usage, key)
+            if count:
+                attributes[name] = str(count)
+        if usage.get("cost"):
+            attributes["cost"] = str(usage["cost"])
     inference = metadata.get("inference")
     if isinstance(inference, dict):
         model = inference.get("resolvedModel") or inference.get("requestedModel")

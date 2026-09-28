@@ -49,10 +49,10 @@ def dict_field(parsed: dict, key: str) -> dict:
 
 
 def token_count(usage: dict, key: str) -> int:
-    """Return a token count from a usage dict, or 0 when it is missing or not numeric."""
+    """Return a non-negative token count, or 0 for malformed transcript values."""
     try:
-        return int(usage.get(key) or 0)
-    except (TypeError, ValueError):
+        return max(int(usage.get(key) or 0), 0)
+    except (TypeError, ValueError, OverflowError):
         return 0
 
 

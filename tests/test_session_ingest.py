@@ -597,6 +597,32 @@ def test_usage_extraction_is_harness_specific(harness: str, parsed: dict, expect
             {"payload": {"info": {"total_token_usage": {"input_tokens": 9, "output_tokens": 6}}}},
             (9, 6, 0, 0, ""),
         ),
+        ({"payload": {"info": {"last_token_usage": ["not a mapping"]}}}, (0, 0, 0, 0, "")),
+        (
+            {
+                "payload": {
+                    "info": {
+                        "last_token_usage": "invalid",
+                        "total_token_usage": {"input_tokens": 12, "cached_input_tokens": 4},
+                    }
+                }
+            },
+            (8, 0, 4, 0, ""),
+        ),
+        (
+            {
+                "payload": {
+                    "info": {
+                        "last_token_usage": {
+                            "input_tokens": 42,
+                            "cached_input_tokens": -2,
+                            "output_tokens": float("inf"),
+                        }
+                    }
+                }
+            },
+            (42, 0, 0, 0, ""),
+        ),
     ],
 )
 def test_codex_usage_tolerates_payload_variants(parsed: dict, expected: tuple):
@@ -624,6 +650,36 @@ def test_copilot_usage_without_token_fields_is_zeroed():
         "cache_write_tokens": 0,
         "model": "",
     }
+
+
+@pytest.mark.parametrize(
+    ("harness", "parsed", "expected"),
+    [
+        (
+            "copilot-cli",
+            {
+                "data": {
+                    "inputTokens": "42",
+                    "cacheReadTokens": "many",
+                    "cacheWriteTokens": -3,
+                    "outputTokens": float("inf"),
+                }
+            },
+            (42, 0, 0, 0),
+        ),
+        (
+            "copilot",
+            {"event": {"data": {"inputTokens": "many", "cacheReadTokens": 7, "outputTokens": 2}}},
+            (0, 2, 7, 0),
+        ),
+    ],
+)
+def test_copilot_usage_tolerates_malformed_counts(harness: str, parsed: dict, expected: tuple[int, ...]):
+    usage = session_ingest._extract_usage_tokens(parsed, harness)
+    assert (
+        tuple(usage[key] for key in ("input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens"))
+        == expected
+    )
 
 
 @pytest.mark.parametrize(

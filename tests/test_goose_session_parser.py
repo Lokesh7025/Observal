@@ -314,6 +314,17 @@ def test_parse_rows_reports_input_tokens_without_cache():
     assert attributes["cache_creation_tokens"] == "1000"
 
 
+def test_parse_rows_ignores_malformed_token_attributes():
+    usage = {"inputTokens": 8, "outputTokens": "many", "cacheReadTokens": -4, "cacheWriteTokens": [2]}
+    events = parse_raw_events([_row(_message("assistant", [_TOOL_REQUEST], metadata={"usage": usage}))])
+
+    attributes = events[1]["attributes"]
+    assert attributes["input_tokens"] == "8"
+    assert "output_tokens" not in attributes
+    assert "cache_read_tokens" not in attributes
+    assert "cache_creation_tokens" not in attributes
+
+
 def test_parse_rows_emits_orphan_tool_results_standalone():
     events = parse_raw_events(
         [

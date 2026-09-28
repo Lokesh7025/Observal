@@ -123,7 +123,7 @@ def _handle_event_msg(parsed: dict, ts: str, harness: str, events: list[dict]) -
                 "body": "token_count",
                 "attributes": {
                     "input_tokens": str(uncached_input_tokens(token_count(usage, "input_tokens"), cached)),
-                    "output_tokens": str(usage.get("output_tokens", 0)),
+                    "output_tokens": str(token_count(usage, "output_tokens")),
                     "cache_read_tokens": str(cached),
                     "model": model,
                 },

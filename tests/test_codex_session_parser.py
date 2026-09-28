@@ -61,6 +61,7 @@ def test_token_count_falls_back_to_total_usage():
         (None, "0", "0"),
         ({"last_token_usage": {"input_tokens": 5, "cached_input_tokens": 9}}, "0", "9"),
         ({"last_token_usage": {"input_tokens": "many", "cached_input_tokens": [1]}}, "0", "0"),
+        ({"last_token_usage": {"input_tokens": 25, "cached_input_tokens": -3, "output_tokens": "many"}}, "25", "0"),
     ],
 )
 def test_token_count_tolerates_malformed_usage(info, input_tokens: str, cache_read_tokens: str):
@@ -68,3 +69,4 @@ def test_token_count_tolerates_malformed_usage(info, input_tokens: str, cache_re
 
     assert events[0]["attributes"]["input_tokens"] == input_tokens
     assert events[0]["attributes"]["cache_read_tokens"] == cache_read_tokens
+    assert events[0]["attributes"]["output_tokens"] == "0"
