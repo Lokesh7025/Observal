@@ -178,6 +178,16 @@ class SkillListing(Base):
         self.latest_version.delivery_mode = value
 
     @property
+    def extra_files(self) -> list[dict]:
+        return self.latest_version.extra_files if self.latest_version else []
+
+    @extra_files.setter
+    def extra_files(self, value: list[dict]) -> None:
+        if not self.latest_version:
+            raise RuntimeError(f"{type(self).__name__} has no latest_version; cannot set extra_files")
+        self.latest_version.extra_files = value
+
+    @property
     def script_content(self) -> str | None:
         return self.latest_version.script_content if self.latest_version else None
 
@@ -279,6 +289,9 @@ class SkillVersion(Base):
     delivery_mode: Mapped[str] = mapped_column(String(20), server_default="git_fetch", nullable=False)
     script_content: Mapped[str | None] = mapped_column(Text, nullable=True)
     script_filename: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # Phase 2 must project/defer this field on list and lock queries. Do not
+    # defer it globally yet: version publishing snapshots all loaded columns.
+    extra_files: Mapped[list[dict]] = mapped_column(JSON, nullable=False, default=list, server_default="[]")
     validated: Mapped[bool] = mapped_column(Boolean, default=False)
     target_agents: Mapped[list] = mapped_column(JSON, default=list)
     task_type: Mapped[str] = mapped_column(String(100), nullable=False)

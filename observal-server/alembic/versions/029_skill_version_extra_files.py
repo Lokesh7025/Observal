@@ -1,0 +1,36 @@
+# SPDX-FileCopyrightText: 2026 Kaushik Kumar <kaushikrjpm10@gmail.com>
+# SPDX-License-Identifier: Apache-2.0
+
+"""Store direct skill resources on each immutable skill version.
+
+Revision ID: 029_skill_version_extra_files
+Revises: 028_agent_component_pins
+"""
+
+import sqlalchemy as sa
+from sqlalchemy.dialects import postgresql
+
+from alembic import op
+
+revision = "029_skill_version_extra_files"
+down_revision = "028_agent_component_pins"
+branch_labels = None
+depends_on = None
+
+
+def upgrade() -> None:
+    # A constant server default backfills old rows and also protects old writers
+    # during a rolling deploy. Keep the default for legacy inserts.
+    op.add_column(
+        "skill_versions",
+        sa.Column("extra_files", postgresql.JSON(), nullable=False, server_default=sa.text("'[]'::json")),
+    )
+
+
+def downgrade() -> None:
+    # Refuse to destroy stored resources inadvertently; an operator must explicitly
+    # remove resource-bearing versions before downgrading.
+    bind = op.get_bind()
+    if bind.execute(sa.text("SELECT 1 FROM skill_versions WHERE extra_files::jsonb <> '[]'::jsonb LIMIT 1")).first():
+        raise RuntimeError("Cannot downgrade: skill_versions.extra_files contains resources")
+    op.drop_column("skill_versions", "extra_files")
