@@ -17,8 +17,10 @@ from loguru import logger as optic
 from pydantic import BaseModel
 from sqlalchemy import String, cast, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import defaultload, defer
 
 from api.deps import get_current_user, get_db, resolve_prefix_id
+from api.routes._skill_lock import lock_skill_version, should_promote_skill_version
 from api.sanitize import escape_like
 from models.agent import Agent, AgentStatus, AgentVersion
 from models.component_bundle import ComponentBundle
@@ -34,6 +36,7 @@ from services.editing_lock import is_actively_editing
 from services.inbox import sources as inbox
 from services.redis import publish as redis_publish
 from services.security_events import EventType, SecurityEvent, Severity, emit_security_event
+from services.skill_bundle import needs_bundle_delivery
 from services.teamspace import ReviewScope, can_review, review_scope
 
 router = APIRouter(prefix="/api/v1/review", tags=["review"])
@@ -134,13 +137,27 @@ def _check_team_filter(team_id: uuid.UUID | None, scope: ReviewScope) -> None:
     raise HTTPException(status_code=403, detail="You do not review for this teamspace")
 
 
+_SKILL_REVIEW_LOOKUP_OPTIONS = (
+    defaultload(SkillListing.latest_version)
+    .defer(SkillVersion.extra_files)
+    .defer(SkillVersion.skill_md_content)
+    .defer(SkillVersion.script_content),
+    defaultload(SkillListing.versions)
+    .defer(SkillVersion.extra_files)
+    .defer(SkillVersion.skill_md_content)
+    .defer(SkillVersion.script_content),
+)
+
+
 async def _find_listing(listing_id: str, db: AsyncSession):
-    """Find a listing by ID, prefix, or name across all component types."""
+    """Find a listing by ID, prefix, or name without preloading skill bodies."""
     optic.trace("listing_id={}", listing_id)
     hits = []
     for listing_type, model in LISTING_MODELS.items():
         try:
-            listing = await resolve_prefix_id(model, listing_id, db)
+            listing = await resolve_prefix_id(
+                model, listing_id, db, load_options=_SKILL_REVIEW_LOOKUP_OPTIONS if model is SkillListing else None
+            )
             hits.append((listing_type, listing))
         except HTTPException as e:
             if e.status_code == 400 and "too short" not in str(e.detail):
@@ -158,7 +175,10 @@ async def _find_listing(listing_id: str, db: AsyncSession):
 
     # Fallback: name-based lookup
     for listing_type, model in LISTING_MODELS.items():
-        result = await db.execute(select(model).where(model.name == listing_id))
+        stmt = select(model).where(model.name == listing_id)
+        if model is SkillListing:
+            stmt = stmt.options(*_SKILL_REVIEW_LOOKUP_OPTIONS)
+        result = await db.execute(stmt)
         listing = result.scalar_one_or_none()
         if listing:
             return listing_type, listing
@@ -260,6 +280,15 @@ async def _query_pending_components(
         # This ensures version updates appear in the queue after first approval.
         pending_versions_stmt = (
             select(version_model)
+            .options(
+                *(
+                    defer(SkillVersion.extra_files),
+                    defer(SkillVersion.skill_md_content),
+                    defer(SkillVersion.script_content),
+                )
+                if listing_type == "skill"
+                else ()
+            )
             .where(version_model.status == ListingStatus.pending)
             .order_by(version_model.released_at.desc())
         )
@@ -279,7 +308,19 @@ async def _query_pending_components(
         # Load the listings. A listing this caller may not review is dropped here,
         # before anything about it reaches the response: a global reviewer who is
         # not in the team must not even learn a team-private item's name.
-        listings_result = await db.execute(select(model).where(model.id.in_(list(seen_listings.keys()))))
+        listing_stmt = select(model).where(model.id.in_(list(seen_listings.keys())))
+        if listing_type == "skill":
+            listing_stmt = listing_stmt.options(
+                defaultload(SkillListing.latest_version)
+                .defer(SkillVersion.extra_files)
+                .defer(SkillVersion.skill_md_content)
+                .defer(SkillVersion.script_content),
+                defaultload(SkillListing.versions)
+                .defer(SkillVersion.extra_files)
+                .defer(SkillVersion.skill_md_content)
+                .defer(SkillVersion.script_content),
+            )
+        listings_result = await db.execute(listing_stmt)
         listings_map = {r.id: r for r in listings_result.scalars().all() if _in_scope(r, scope, team_id)}
 
         for listing_id, pv in seen_listings.items():
@@ -619,6 +660,30 @@ async def get_review(
     return result
 
 
+async def _lock_skill_decision(db, listing, current_user, version=None, *, approval=True):
+    """Read fresh bytes/status after acquiring the writer's listing/version locks."""
+    target = version or listing.latest_version
+    if target is None:
+        raise HTTPException(status_code=409, detail="Skill has no reviewable version")
+    latest_id, locked = await lock_skill_version(db, listing.id, target.id)
+    await db.refresh(listing, attribute_names=["team_id", "is_private", "submitted_by", "co_authors"])
+    _authorize_item(listing, await _require_review_scope(db, current_user))
+    if version is None and latest_id != locked.id:
+        raise HTTPException(status_code=409, detail="Skill version changed during review")
+    if locked.status != ListingStatus.pending:
+        raise HTTPException(status_code=409, detail="Skill version is no longer pending")
+    if approval:
+        _refuse_unreviewable_skill(listing, locked)
+    return latest_id, locked
+
+
+def _refuse_unreviewable_skill(listing, version=None):
+    if isinstance(listing, SkillListing):
+        candidates = [version] if version is not None else listing.versions
+        if any(needs_bundle_delivery(ver) for ver in candidates if ver is not None):
+            raise HTTPException(status_code=409, detail="Resource-bearing skill versions cannot yet be reviewed")
+
+
 @router.post("/{listing_id}/approve")
 async def approve(
     listing_id: str,
@@ -640,6 +705,11 @@ async def approve(
             None,
         )
 
+    latest_id = None
+    if listing_type == "skill":
+        latest_id, locked = await _lock_skill_decision(db, listing, current_user, pending_ver)
+        if pending_ver is not None:
+            pending_ver = locked
     if pending_ver:
         if is_actively_editing(pending_ver):
             raise HTTPException(status_code=409, detail="Cannot approve: the owner is currently editing this item")
@@ -652,9 +722,10 @@ async def approve(
         # Update latest_version_id via raw UPDATE to avoid circular dependency
         # between listing.latest_version_id and version.listing_id
         listing_cls = LISTING_MODELS[listing_type]
-        await db.execute(
-            update(listing_cls).where(listing_cls.id == listing.id).values(latest_version_id=pending_ver.id)
-        )
+        if listing_type != "skill" or await should_promote_skill_version(db, latest_id, pending_ver):
+            await db.execute(
+                update(listing_cls).where(listing_cls.id == listing.id).values(latest_version_id=pending_ver.id)
+            )
     else:
         # Fallback: legacy path for listings without versioning
         if listing.latest_version and is_actively_editing(listing.latest_version):
@@ -703,6 +774,10 @@ async def reject(
             None,
         )
 
+    if listing_type == "skill":
+        _, locked = await _lock_skill_decision(db, listing, current_user, pending_ver, approval=False)
+        if pending_ver is not None:
+            pending_ver = locked
     if pending_ver:
         if is_actively_editing(pending_ver):
             raise HTTPException(status_code=409, detail="Cannot reject: the owner is currently editing this item")
@@ -946,8 +1021,16 @@ async def _bundle_listings(bundle_id: uuid.UUID, db: AsyncSession, scope: Review
     """Load every listing in a bundle, refusing the bundle if one is out of scope."""
     listings = []
     for model in LISTING_MODELS.values():
-        result = await db.execute(select(model).where(model.bundle_id == bundle_id))
-        for listing in result.scalars().all():
+        stmt = select(model).where(model.bundle_id == bundle_id)
+        if model is SkillListing:
+            stmt = stmt.options(*_SKILL_REVIEW_LOOKUP_OPTIONS)
+        result = await db.execute(stmt)
+        rows = result.scalars().all()
+        # Bulk skill decisions use UUID order too; never acquire overlapping
+        # bundle and bulk locks in opposing orders.
+        if model is SkillListing:
+            rows = sorted(rows, key=lambda listing: listing.id)
+        for listing in rows:
             _authorize_item(listing, scope)
             listings.append(listing)
     return listings
@@ -967,6 +1050,10 @@ async def approve_bundle(
 
     count = 0
     for listing in await _bundle_listings(bundle_id, db, scope):
+        if isinstance(listing, SkillListing):
+            _, locked = await _lock_skill_decision(db, listing, current_user)
+            if locked.status != ListingStatus.pending:
+                raise HTTPException(status_code=409, detail="Skill version is no longer pending")
         if listing.latest_version and is_actively_editing(listing.latest_version):
             raise HTTPException(
                 status_code=409,
@@ -1004,6 +1091,10 @@ async def reject_bundle(
 
     count = 0
     for listing in await _bundle_listings(bundle_id, db, scope):
+        if isinstance(listing, SkillListing):
+            _, locked = await _lock_skill_decision(db, listing, current_user, approval=False)
+            if locked.status != ListingStatus.pending:
+                raise HTTPException(status_code=409, detail="Skill version is no longer pending")
         if listing.latest_version and is_actively_editing(listing.latest_version):
             raise HTTPException(
                 status_code=409,
@@ -1132,15 +1223,25 @@ async def approve_mcp_with_skills(
     )
 
     approved_skill_ids: list[str] = []
+    # A canonical lock order prevents opposing batches from deadlocking.
+    skill_uuids = set()
     for sid in req.skill_ids:
         try:
-            skill_uuid = uuid.UUID(sid)
+            skill_uuids.add(uuid.UUID(sid))
         except ValueError:
             continue
-        skill = (await db.execute(select(SkillListing).where(SkillListing.id == skill_uuid))).scalar_one_or_none()
+    for skill_uuid in sorted(skill_uuids):
+        skill = (
+            await db.execute(
+                select(SkillListing).options(*_SKILL_REVIEW_LOOKUP_OPTIONS).where(SkillListing.id == skill_uuid)
+            )
+        ).scalar_one_or_none()
         if skill:
             _authorize_item(skill, scope)
         if skill and skill.status == ListingStatus.pending:
+            await _lock_skill_decision(db, skill, current_user)
+            if skill.status != ListingStatus.pending:
+                raise HTTPException(status_code=409, detail="Skill version is no longer pending")
             skill.status = ListingStatus.approved
             skill.rejection_reason = None
             await inbox.on_review_decided(

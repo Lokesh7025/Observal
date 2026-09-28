@@ -1,5 +1,6 @@
 # SPDX-FileCopyrightText: 2026 Observal Contributors
 # SPDX-FileCopyrightText: 2026 Shaan Narendran <shaannaren06@gmail.com>
+# SPDX-FileCopyrightText: 2026 Kaushik <kaushikrjpm10@gmail.com>
 # SPDX-License-Identifier: Apache-2.0
 
 from __future__ import annotations
@@ -187,6 +188,13 @@ def _prepare_new_rows(db):
         current.created_at = NOW
         current.download_count = 0
         current.validated = bool(current.validated)
+
+
+def _mock_skill_lock(monkeypatch, listing):
+    """Unit-route mock; integration tests exercise the real ordered row locks."""
+    monkeypatch.setattr(
+        skill, "lock_skill_version", AsyncMock(return_value=(listing.latest_version_id, listing.latest_version))
+    )
 
 
 def _refresh_new_listing(db, listing):
@@ -624,6 +632,8 @@ class TestListAndDetail:
         listing = _listing()
         resolve = AsyncMock(return_value=listing)
         monkeypatch.setattr(skill, "resolve_visible_listing", resolve)
+        authorized = AsyncMock(return_value=(listing, listing.latest_version))
+        monkeypatch.setattr(skill, "_authorized_version", authorized)
         user = _user()
 
         response = await skill.get_skill("Alice/Review-Skill", db, user)
@@ -635,38 +645,42 @@ class TestListAndDetail:
             "Alice/Review-Skill",
             db,
             user,
-            require_status=ListingStatus.approved,
+            load_options=skill._BODY_FREE_LISTING,
         )
+        authorized.assert_awaited_once_with(str(listing.id), listing.latest_version_id, db, user)
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
         ("user", "status", "expected_permission"),
         [
             (_user(), ListingStatus.pending, "owner"),
-            (_user(role=UserRole.reviewer), ListingStatus.rejected, "view"),
+            (_user(role=UserRole.reviewer), ListingStatus.pending, "view"),
         ],
     )
     async def test_owner_and_reviewer_can_read_unapproved_detail(self, monkeypatch, user, status, expected_permission):
         db = _db()
         listing = _listing(status=status, submitted_by=USER_ID if expected_permission == "owner" else OTHER_USER_ID)
-        resolve = AsyncMock(side_effect=[None, listing])
+        resolve = AsyncMock(return_value=listing)
         monkeypatch.setattr(skill, "resolve_visible_listing", resolve)
+        monkeypatch.setattr(skill, "_authorized_version", AsyncMock(return_value=(listing, listing.latest_version)))
 
         response = await skill.get_skill("alice/review-skill", db, user)
 
         assert response.status == status
         assert response.user_permission == expected_permission
-        assert resolve.await_args_list == [
-            call(SkillListing, "alice/review-skill", db, user, require_status=ListingStatus.approved),
-            call(SkillListing, "alice/review-skill", db, user),
-        ]
+        resolve.assert_awaited_once_with(
+            SkillListing, "alice/review-skill", db, user, load_options=skill._BODY_FREE_LISTING
+        )
 
     @pytest.mark.asyncio
     async def test_unapproved_nonowner_and_missing_detail_share_404(self, monkeypatch):
         db = _db()
         listing = _listing(status=ListingStatus.pending)
-        resolve = AsyncMock(side_effect=[None, listing])
+        resolve = AsyncMock(return_value=listing)
         monkeypatch.setattr(skill, "resolve_visible_listing", resolve)
+        monkeypatch.setattr(
+            skill, "_authorized_version", AsyncMock(side_effect=HTTPException(404, "Skill version not found"))
+        )
 
         with pytest.raises(HTTPException) as hidden:
             await skill.get_skill(
@@ -674,7 +688,7 @@ class TestListAndDetail:
                 db,
                 _user(),
             )
-        _http_error(hidden, 404, "Listing not found")
+        _http_error(hidden, 404, "Skill version not found")
 
         resolve.side_effect = [None, None]
         with pytest.raises(HTTPException) as missing:
@@ -1010,6 +1024,7 @@ class TestDraftCreationAndUpdates:
         version.editing_by = OTHER_USER_ID
         version.editing_since = datetime.now(UTC) - timedelta(hours=1)
         original_name = listing.name
+        _mock_skill_lock(monkeypatch, listing)
 
         async def flush():
             assert listing.name == original_name
@@ -1078,7 +1093,9 @@ class TestDraftCreationAndUpdates:
         assert (version.is_editing, version.editing_by, version.editing_since) == (False, None, None)
         db.flush.assert_awaited_once()
         commit.assert_awaited_once_with(db, "skill")
-        db.refresh.assert_awaited_once_with(listing)
+        assert db.refresh.await_count == 2
+        db.refresh.assert_any_await(listing, attribute_names=["submitted_by", "co_authors", "team_id", "is_private"])
+        db.refresh.assert_any_await(listing)
         assert (response.name, response.slash_command, response.status) == (
             "Renamed Skill",
             "new-review",
@@ -1090,6 +1107,7 @@ class TestDraftCreationAndUpdates:
         db = _db()
         listing = _listing(status=ListingStatus.draft, submitted_by=USER_ID, slash_command="old")
         listing.latest_version.skill_md_content = "# Plain skill"
+        _mock_skill_lock(monkeypatch, listing)
         monkeypatch.setattr(skill, "resolve_listing", AsyncMock(return_value=listing))
         monkeypatch.setattr(skill, "commit_or_name_conflict", AsyncMock())
 
@@ -1144,6 +1162,7 @@ class TestDraftCreationAndUpdates:
         version.is_editing = True
         version.editing_by = OTHER_USER_ID
         version.editing_since = datetime.now(UTC)
+        _mock_skill_lock(monkeypatch, listing)
         monkeypatch.setattr(skill, "resolve_listing", AsyncMock(return_value=listing))
         commit = AsyncMock()
         monkeypatch.setattr(skill, "commit_or_name_conflict", commit)
@@ -1167,7 +1186,7 @@ class TestEditingLocks:
         db = _db()
         listing = _listing(status=ListingStatus.pending, submitted_by=USER_ID)
         locked = listing.latest_version
-        db.execute.return_value = _result(locked)
+        db.execute.side_effect = [_result(listing.latest_version_id), _result(locked)]
         monkeypatch.setattr(skill, "resolve_listing", AsyncMock(return_value=listing))
         commit = AsyncMock()
         monkeypatch.setattr(skill, "commit_or_name_conflict", commit)
@@ -1175,6 +1194,8 @@ class TestEditingLocks:
         response = await skill.start_edit_skill("alice/review-skill", db, _user())
 
         assert response == {"status": "locked"}
+        assert "skill_listings" in _sql(db.execute.await_args_list[0].args[0])
+        assert _sql(db.execute.await_args_list[0].args[0]).endswith("FOR UPDATE")
         stmt = db.execute.await_args.args[0]
         assert "WHERE skill_versions.id =" in _sql(stmt)
         assert _sql(stmt).endswith("FOR UPDATE")
@@ -1225,6 +1246,7 @@ class TestEditingLocks:
         version.is_editing = True
         version.editing_by = USER_ID
         version.editing_since = NOW
+        _mock_skill_lock(monkeypatch, listing)
         monkeypatch.setattr(skill, "resolve_listing", AsyncMock(return_value=listing))
         commit = AsyncMock()
         monkeypatch.setattr(skill, "commit_or_name_conflict", commit)
@@ -1263,6 +1285,7 @@ class TestEditingLocks:
         listing.latest_version.is_editing = True
         listing.latest_version.editing_by = OTHER_USER_ID
         listing.latest_version.editing_since = NOW
+        _mock_skill_lock(monkeypatch, listing)
         monkeypatch.setattr(skill, "resolve_listing", AsyncMock(return_value=listing))
         with pytest.raises(HTTPException) as wrong_holder:
             await skill.cancel_edit_skill(str(LISTING_ID), db, _user())
@@ -1282,6 +1305,7 @@ class TestSubmitDraftAndLifecycle:
             slash_command=None,
         )
         events = []
+        _mock_skill_lock(monkeypatch, listing)
         monkeypatch.setattr(skill, "datetime", FrozenDateTime)
         monkeypatch.setattr(skill, "resolve_listing", AsyncMock(return_value=listing))
         decide = AsyncMock(return_value=auto_approved)
@@ -1290,7 +1314,7 @@ class TestSubmitDraftAndLifecycle:
         monkeypatch.setattr(skill, "publish_auto_approves_for_entity", decide)
         monkeypatch.setattr(skill.inbox, "on_publish", publish)
         monkeypatch.setattr(skill, "commit_or_name_conflict", commit)
-        db.refresh.side_effect = lambda row: events.append("refresh")
+        db.refresh.side_effect = lambda row, **kwargs: events.append("auth" if kwargs else "refresh")
 
         response = await skill.submit_skill_draft("alice/review-skill", db, _user())
 
@@ -1303,7 +1327,7 @@ class TestSubmitDraftAndLifecycle:
         else:
             assert listing.latest_version.reviewed_by is None
         assert response.status == expected_status
-        assert events == ["inbox", "commit", "refresh"]
+        assert events == ["auth", "inbox", "commit", "refresh"]
         decide.assert_awaited_once_with(listing, _user(), db)
         publish.assert_awaited_once_with(
             db,
@@ -1332,6 +1356,7 @@ class TestSubmitDraftAndLifecycle:
             listing.latest_version = None
         if mode == "nodescription":
             listing.latest_version.description = ""
+            _mock_skill_lock(monkeypatch, listing)
         monkeypatch.setattr(skill, "resolve_listing", AsyncMock(return_value=listing))
         monkeypatch.setattr(
             skill,
@@ -1358,6 +1383,7 @@ class TestSubmitDraftAndLifecycle:
             submitted_by=USER_ID,
             skill_md_content="---\nname: [broken\n---\n",
         )
+        _mock_skill_lock(monkeypatch, listing)
         monkeypatch.setattr(skill, "resolve_listing", AsyncMock(return_value=listing))
         decide = AsyncMock()
         monkeypatch.setattr(skill, "publish_auto_approves_for_entity", decide)

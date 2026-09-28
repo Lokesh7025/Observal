@@ -1,5 +1,6 @@
 # SPDX-FileCopyrightText: 2026 Hari Srinivasan <harisrini21@gmail.com>
 # SPDX-FileCopyrightText: 2026 Shaan Narendran <shaannaren06@gmail.com>
+# SPDX-FileCopyrightText: 2026 Kaushik <kaushikrjpm10@gmail.com>
 # SPDX-License-Identifier: Apache-2.0
 
 """Focused contracts and failure coverage for the review routes."""
@@ -349,7 +350,8 @@ async def test_find_listing_resolves_unique_prefix_and_reports_cross_type_ambigu
     mcp = SimpleNamespace(id=uuid.UUID(int=10))
     skill = SimpleNamespace(id=uuid.UUID(int=11))
 
-    async def resolve(model, identifier, database):
+    async def resolve(model, identifier, database, *, load_options=None):
+        assert load_options == (review._SKILL_REVIEW_LOOKUP_OPTIONS if model is review.SkillListing else None)
         assert identifier == "abcd"
         assert database is db
         if model is review.LISTING_MODELS["mcp"]:
@@ -409,7 +411,7 @@ async def test_find_listing_falls_back_to_exact_name_with_exact_queries(monkeypa
 async def test_find_listing_short_canonical_and_malformed_identifiers_use_name_fallback(monkeypatch, identifier):
     db = _db()
 
-    async def too_short_or_missing(model, value, database):
+    async def too_short_or_missing(model, value, database, *, load_options=None):
         detail = "Prefix is too short" if value == "x" else "missing"
         status = 400 if value == "x" else 404
         raise HTTPException(status_code=status, detail=detail)
@@ -429,7 +431,7 @@ async def test_find_listing_returns_unique_uuid_hit_and_propagates_database_fail
     listing = SimpleNamespace(id=uuid.UUID(int=13))
     calls = []
 
-    async def resolve(model, identifier, database):
+    async def resolve(model, identifier, database, *, load_options=None):
         calls.append(model)
         if model is review.LISTING_MODELS["hook"]:
             return listing
@@ -1040,6 +1042,8 @@ async def test_approve_each_component_type_updates_version_then_notifies_and_com
     db = _db()
     actor = _actor(user_id=SUBMITTER_ID)
     listing, version = _orm_listing(listing_type, team_id=TEAM_ID)
+    if listing_type == "skill":
+        monkeypatch.setattr(review, "lock_skill_version", AsyncMock(return_value=(version.id, version)))
     events = []
     decision_boundaries.scope.return_value = PUBLIC_TEAM_SCOPE
     monkeypatch.setattr(review, "_find_listing", AsyncMock(return_value=(listing_type, listing)))
@@ -1047,7 +1051,7 @@ async def test_approve_each_component_type_updates_version_then_notifies_and_com
     db.execute.side_effect = lambda statement: events.append("update") or _result()
     decision_boundaries.decide.side_effect = lambda *args, **kwargs: events.append("inbox")
     db.commit.side_effect = lambda: events.append("commit")
-    db.refresh.side_effect = lambda row: events.append("refresh")
+    db.refresh.side_effect = lambda row, **kwargs: events.append("auth" if kwargs else "refresh")
     decision_boundaries.invalidate.side_effect = lambda namespace: events.append("cache")
     decision_boundaries.create_task.side_effect = lambda awaitable: events.append("publish")
 
@@ -1063,7 +1067,15 @@ async def test_approve_each_component_type_updates_version_then_notifies_and_com
     assert version.rejection_reason is None
     assert version.reviewed_by == actor.id
     assert version.reviewed_at == NOW
-    assert events == ["flush", "update", "inbox", "commit", "refresh", "cache", "publish"]
+    assert events == (["auth"] if listing_type == "skill" else []) + [
+        "flush",
+        "update",
+        "inbox",
+        "commit",
+        "refresh",
+        "cache",
+        "publish",
+    ]
     statement = db.execute.await_args.args[0]
     assert f"UPDATE {review.LISTING_MODELS[listing_type].__tablename__}" in _sql(statement)
     assert _params(statement) == {
@@ -1190,6 +1202,8 @@ async def test_reject_each_component_type_records_reason_notifies_and_cascades(
     db = _db()
     actor = _actor(user_id=SUBMITTER_ID)
     listing, version = _orm_listing(listing_type, team_id=TEAM_ID)
+    if listing_type == "skill":
+        monkeypatch.setattr(review, "lock_skill_version", AsyncMock(return_value=(version.id, version)))
     events = []
     decision_boundaries.scope.return_value = PUBLIC_TEAM_SCOPE
     monkeypatch.setattr(review, "_find_listing", AsyncMock(return_value=(listing_type, listing)))
@@ -1197,7 +1211,7 @@ async def test_reject_each_component_type_records_reason_notifies_and_cascades(
     db.commit.side_effect = lambda: events.append("commit")
     cascade = AsyncMock(side_effect=lambda *args: events.append("cascade"))
     monkeypatch.setattr("services.insights.self_learn.handle_component_rejection", cascade)
-    db.refresh.side_effect = lambda row: events.append("refresh")
+    db.refresh.side_effect = lambda row, **kwargs: events.append("auth" if kwargs else "refresh")
     decision_boundaries.invalidate.side_effect = lambda namespace: events.append("cache")
     decision_boundaries.create_task.side_effect = lambda awaitable: events.append("publish")
     request = ReviewActionRequest(reason="needs changes")
@@ -1214,7 +1228,15 @@ async def test_reject_each_component_type_records_reason_notifies_and_cascades(
     assert version.rejection_reason == "needs changes"
     assert version.reviewed_by == actor.id
     assert version.reviewed_at == NOW
-    assert events == ["inbox", "commit", "cascade", "commit", "refresh", "cache", "publish"]
+    assert events == (["auth"] if listing_type == "skill" else []) + [
+        "inbox",
+        "commit",
+        "cascade",
+        "commit",
+        "refresh",
+        "cache",
+        "publish",
+    ]
     decision_boundaries.decide.assert_awaited_once_with(
         db,
         listing,
@@ -1572,6 +1594,19 @@ async def test_bundle_loader_scope_failure_stops_before_any_endpoint_mutation():
 
 
 @pytest.mark.asyncio
+async def test_bundle_skill_listing_order_is_canonical():
+    db = _db()
+    first, _ = _orm_listing("skill", index=1)
+    second, _ = _orm_listing("skill", index=2)
+    db.execute.side_effect = [
+        _result(scalars=[second, first]) if model is review.SkillListing else _result()
+        for model in review.LISTING_MODELS.values()
+    ]
+    listings = await review._bundle_listings(uuid.UUID(int=999), db, ADMIN_SCOPE)
+    assert [row.id for row in listings] == sorted((first.id, second.id))
+
+
+@pytest.mark.asyncio
 async def test_approve_bundle_decides_every_listing_type_in_one_commit(
     monkeypatch,
     decision_boundaries,
@@ -1586,6 +1621,12 @@ async def test_approve_bundle_decides_every_listing_type_in_one_commit(
     ]
     db.execute.return_value = _result(scalar=bundle)
     monkeypatch.setattr(review, "_bundle_listings", AsyncMock(return_value=listings))
+    skill_listing = next(row for row in listings if isinstance(row, review.SkillListing))
+    monkeypatch.setattr(
+        review,
+        "lock_skill_version",
+        AsyncMock(return_value=(skill_listing.latest_version_id, skill_listing.latest_version)),
+    )
 
     result = await review.approve_bundle(bundle_id, db, actor)
 
@@ -1623,6 +1664,12 @@ async def test_reject_bundle_decides_every_listing_type_with_shared_reason(
     db.execute.return_value = _result(scalar=bundle)
     monkeypatch.setattr(review, "_bundle_listings", AsyncMock(return_value=listings))
 
+    skill_listing = next(row for row in listings if isinstance(row, review.SkillListing))
+    monkeypatch.setattr(
+        review,
+        "lock_skill_version",
+        AsyncMock(return_value=(skill_listing.latest_version_id, skill_listing.latest_version)),
+    )
     result = await review.reject_bundle(
         bundle_id,
         ReviewActionRequest(reason="bundle policy"),
@@ -1822,6 +1869,7 @@ async def test_bulk_approve_mcp_skips_malformed_missing_and_nonpending_skills(
         _result(scalar=approved),
     ]
     request = review.McpBulkApproveRequest(skill_ids=["malformed", str(pending.id), str(missing_id), str(approved.id)])
+    monkeypatch.setattr(review, "lock_skill_version", AsyncMock(return_value=(pending.latest_version_id, _pending)))
 
     result = await review.approve_mcp_with_skills(str(mcp.id), request, db, actor)
 
@@ -1834,6 +1882,7 @@ async def test_bulk_approve_mcp_skips_malformed_missing_and_nonpending_skills(
     assert pending.status is ListingStatus.approved
     assert approved.status is ListingStatus.approved
     assert db.execute.await_count == 3
+    assert db.refresh.await_count == 2  # Reauthorize the skill, then refresh the MCP response.
     assert decision_boundaries.decide.await_args_list == [
         call(
             db,
@@ -1855,7 +1904,28 @@ async def test_bulk_approve_mcp_skips_malformed_missing_and_nonpending_skills(
         ),
     ]
     db.commit.assert_awaited_once()
-    db.refresh.assert_awaited_once_with(mcp)
+    db.refresh.assert_any_await(mcp)
+
+
+@pytest.mark.asyncio
+async def test_bulk_skill_locks_use_canonical_order(monkeypatch, decision_boundaries):
+    db = _db()
+    mcp, _ = _orm_listing("mcp")
+    first, _ = _orm_listing("skill", index=1)
+    second, _ = _orm_listing("skill", index=2)
+    by_id = {str(row.id): row for row in (first, second)}
+    ordered = sorted((first.id, second.id))
+    db.execute.side_effect = [_result(scalar=by_id[str(uid)]) for uid in ordered]
+    monkeypatch.setattr(review, "_find_listing", AsyncMock(return_value=("mcp", mcp)))
+    lock = AsyncMock(
+        side_effect=lambda _db, _listing_id, version_id: (version_id, by_id[str(_listing_id)].latest_version)
+    )
+    monkeypatch.setattr(review, "lock_skill_version", lock)
+
+    await review.approve_mcp_with_skills(
+        str(mcp.id), review.McpBulkApproveRequest(skill_ids=[str(ordered[1]), str(ordered[0])]), db, _actor()
+    )
+    assert [call.args[1] for call in lock.await_args_list] == ordered
 
 
 @pytest.mark.asyncio

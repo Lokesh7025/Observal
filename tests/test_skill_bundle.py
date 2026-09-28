@@ -226,7 +226,9 @@ def test_per_file_and_bundle_boundaries():
     )
     with pytest.raises(SkillValidationError, match="bundle"):
         bundle(
-            skill_md_content="x" * (MAX_BUNDLE_BYTES - MAX_FILE_BYTES + 1),
+            skill_md_content="x" * MAX_FILE_BYTES,
+            script_filename="small.sh",
+            script_content="x",
             extra_files=[{"path": "a", "content": "x" * MAX_FILE_BYTES}],
         )
     assert len(bundle(extra_files=[{"path": f"{i}", "content": ""} for i in range(128)])) == 129
@@ -249,6 +251,15 @@ def test_per_file_and_bundle_boundaries():
 def test_invalid_legacy_fields(kwargs):
     with pytest.raises(SkillValidationError):
         bundle(**kwargs)
+
+
+def test_document_and_legacy_script_obey_per_file_cap_on_new_writes():
+    with pytest.raises(SkillValidationError, match="per-file"):
+        bundle(skill_md_content="x" * (MAX_FILE_BYTES + 1))
+    with pytest.raises(SkillValidationError, match="per-file"):
+        bundle(script_filename="large.sh", script_content="x" * (MAX_FILE_BYTES + 1))
+    # Existing stored rows can still be read under historical grandfathering.
+    assert len(bundle(script_filename="large.sh", script_content="x" * (MAX_FILE_BYTES + 1), enforce_limits=False)) == 2
 
 
 def test_git_compatibility_and_inherited_effective_bundle():

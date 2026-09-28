@@ -1,4 +1,5 @@
 # SPDX-FileCopyrightText: 2026 Hari Srinivasan <harisrini21@gmail.com>
+# SPDX-FileCopyrightText: 2026 Kaushik <kaushikrjpm10@gmail.com>
 # SPDX-License-Identifier: Apache-2.0
 
 """Canonical registry identifier resolution."""
@@ -284,6 +285,19 @@ async def update_registry_visibility(
                 status_code=409,
                 detail="Agent visibility conflicts with one or more component visibility settings",
             )
+
+    if item_type == "skill" and (req.visibility == "team") != listing.is_private:
+        # Rewriting listing-wide visibility changes every version's reviewed
+        # identity. Until all-version re-review is implemented, do not strand
+        # saved folder revisions or expose them through a legacy transition.
+        await db.execute(select(SkillListing.id).where(SkillListing.id == listing.id).with_for_update())
+        tracked = await db.scalar(
+            select(SkillVersion.id)
+            .where(SkillVersion.listing_id == listing.id, SkillVersion.content_revision.is_not(None))
+            .limit(1)
+        )
+        if tracked is not None:
+            raise HTTPException(status_code=409, detail="Skill folder visibility requires global version re-review")
 
     was_private = bool(listing.is_private)
     if destination_team is not None and team_id is None:

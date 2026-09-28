@@ -48,6 +48,17 @@ class SkillBundleFile:
         )
 
 
+def needs_bundle_delivery(version: Any) -> bool:
+    """Current installers omit extras and an empty named legacy script.
+
+    Neither can be reported as a successful install until the complete-file
+    contract is emitted and both clients materialize all declared files.
+    """
+    return version.delivery_mode == "registry_direct" and bool(
+        version.extra_files or (version.script_filename is not None and version.script_content == "")
+    )
+
+
 def validate_bundle_path(path: str) -> str:
     """Reject paths unsafe on POSIX, Windows, or case-insensitive filesystems."""
     if not isinstance(path, str) or not path or path.startswith("/") or unicodedata.normalize("NFC", path) != path:
@@ -112,7 +123,11 @@ def validate_skill_bundle(
     """
     if not isinstance(extra_files, list):
         raise SkillValidationError("extra_files must be a list")
-    if (script_content is None) != (script_filename is None):
+    if (script_content is None) != (script_filename is None) and not (
+        delivery_mode == "git_fetch" and not enforce_limits
+    ):
+        # Old git rows may contain one orphaned inline script field. The clone
+        # determines installed bytes; only unchanged stored rows are grandfathered.
         raise SkillValidationError("script_content and script_filename must both be set or cleared")
     if delivery_mode == "git_fetch":
         if extra_files:
@@ -168,6 +183,8 @@ def validate_skill_bundle(
         seen.add(key)
     if any(other.startswith(path + "/") for path in seen for other in seen):
         raise SkillValidationError("Skill file collides with a directory")
+    if enforce_limits and any(len(file.content) > MAX_FILE_BYTES for file in files):
+        raise SkillValidationError("Skill file exceeds per-file limit")
     if enforce_limits and sum(len(file.content) for file in files) > MAX_BUNDLE_BYTES:
         raise SkillValidationError("Skill bundle exceeds decoded size limit")
     return tuple(files)

@@ -13,21 +13,25 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from loguru import logger as optic
 from sqlalchemy import String, cast, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import defaultload
 
 from api.deps import (
     apply_registry_scope,
     apply_visibility_filter,
+    check_listing_visibility_async,
     commit_or_name_conflict,
     get_db,
     get_effective_component_permission,
     get_registry_user,
-    may_view_unapproved,
     require_role,
     resolve_listing,
     resolve_visible_listing,
 )
 from api.routes._component_archive import archive_listing, archived_install_warning, unarchive_listing
+from api.routes._skill_lock import lock_skill_version
 from api.routes.component_versions import create_version_router
+from api.routes.skill_files import _BODY_FREE_LISTING, _authorized_version
+from api.routes.skill_files import router as file_router
 from api.sanitize import escape_like
 from api.search import keyword_search
 from models.mcp import ListingStatus
@@ -35,6 +39,7 @@ from models.skill import SkillDownload, SkillListing, SkillVersion
 from models.user import User, UserRole
 from schemas.skill import (
     SkillDraftRequest,
+    SkillFolderDraftRequest,
     SkillInstallRequest,
     SkillInstallResponse,
     SkillListingResponse,
@@ -43,18 +48,59 @@ from schemas.skill import (
     SkillUpdateRequest,
 )
 from schemas.skill_commands import normalize_slash_command
+from schemas.skill_resources import SkillVersionManifest
 from services.editing_lock import _is_lock_expired, acquire_edit_lock, release_edit_lock
 from services.inbox import sources as inbox
 from services.registry_namespace import identity_exists
+from services.skill_bundle import needs_bundle_delivery, validate_skill_bundle
+from services.skill_folder_edit import _validate_new_md
+from services.skill_revisions import skill_content_revision
 from services.skill_validator import SkillValidationError, validate_skill_md, validate_skill_md_content_frontmatter
 from services.teamspace import publish_auto_approves_for_entity, resolve_publish_target
 
 router = APIRouter(prefix="/api/v1/skills", tags=["skills"])
 
 
+def _summary_options(stmt):
+    # Both relationships are selectin-loaded by default; keep the large JSON
+    # out of their secondary SELECTs as well as the primary listing SELECT.
+    return stmt.options(
+        defaultload(SkillListing.latest_version)
+        .defer(SkillVersion.extra_files)
+        .defer(SkillVersion.skill_md_content)
+        .defer(SkillVersion.script_content),
+        defaultload(SkillListing.versions)
+        .defer(SkillVersion.extra_files)
+        .defer(SkillVersion.skill_md_content)
+        .defer(SkillVersion.script_content),
+    )
+
+
 def _validate_stored_skill_md(skill_md_content: str | None, slash_command: str | None = None):
     try:
         return validate_skill_md_content_frontmatter(skill_md_content, slash_command=slash_command)
+    except SkillValidationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+async def _recheck_skill_owner(db, listing, current_user) -> None:
+    await db.refresh(listing, attribute_names=["submitted_by", "co_authors", "team_id", "is_private"])
+    if not await check_listing_visibility_async(listing, current_user, db) or (
+        get_effective_component_permission(listing, current_user) != "owner"
+    ):
+        raise HTTPException(status_code=403, detail="Not the listing owner")
+
+
+def _validate_effective_bundle(mode, md, script, filename, extras, *, enforce_limits=True) -> None:
+    try:
+        validate_skill_bundle(
+            delivery_mode=mode,
+            skill_md_content=md,
+            script_content=script,
+            script_filename=filename,
+            extra_files=extras,
+            enforce_limits=enforce_limits,
+        )
     except SkillValidationError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -130,6 +176,8 @@ async def submit_skill(
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=f"Invalid slash_command: {exc}") from exc
 
+    _validate_effective_bundle(delivery_mode, skill_md_content, script_content, script_filename, req.extra_files)
+
     target = await resolve_publish_target(
         db,
         current_user,
@@ -152,6 +200,9 @@ async def submit_skill(
     db.add(listing)
     await db.flush()
 
+    requires_delivery = delivery_mode == "registry_direct" and bool(
+        req.extra_files or (script_filename is not None and script_content == "")
+    )
     version = SkillVersion(
         listing_id=listing.id,
         version=req.version,
@@ -163,16 +214,17 @@ async def submit_skill(
         delivery_mode=delivery_mode,
         script_content=script_content,
         script_filename=script_filename,
+        extra_files=[file.model_dump() for file in req.extra_files],
         validated=validated,
         target_agents=req.target_agents,
         task_type=req.task_type,
         slash_command=slash_command,
         supported_harnesses=req.supported_harnesses,
-        status=ListingStatus.approved if target.auto_approve else ListingStatus.pending,
+        status=ListingStatus.approved if target.auto_approve and not requires_delivery else ListingStatus.pending,
         released_by=current_user.id,
         released_at=datetime.now(UTC),
-        reviewed_by=current_user.id if target.auto_approve else None,
-        reviewed_at=datetime.now(UTC) if target.auto_approve else None,
+        reviewed_by=current_user.id if target.auto_approve and not requires_delivery else None,
+        reviewed_at=datetime.now(UTC) if target.auto_approve and not requires_delivery else None,
     )
     db.add(version)
     await db.flush()
@@ -183,7 +235,7 @@ async def submit_skill(
         listing,
         subject_type="skill",
         actor_id=current_user.id,
-        auto_approved=target.auto_approve,
+        auto_approved=target.auto_approve and not requires_delivery,
         version=version.version,
     )
     await commit_or_name_conflict(db, "skill")
@@ -261,7 +313,7 @@ async def list_skills(
     order_by = [SkillListing.created_at.desc()]
     if search_rank is not None:
         order_by.insert(0, search_rank.desc())
-    result = await db.execute(stmt.order_by(*order_by).limit(limit).offset(offset))
+    result = await db.execute(_summary_options(stmt.order_by(*order_by).limit(limit).offset(offset)))
     listings = [SkillListingSummary.model_validate(r) for r in result.scalars().all()]
     response.headers["X-Total-Count"] = str(total or 0)
     return listings
@@ -282,9 +334,52 @@ async def my_skills(
     # the author column on its listings but must not keep reading them.
     stmt = apply_visibility_filter(stmt, SkillListing, current_user)
 
-    result = await db.execute(stmt)
+    result = await db.execute(_summary_options(stmt))
     listings = [SkillListingSummary.model_validate(r) for r in result.scalars().all()]
     return listings
+
+
+@router.post("/folder-drafts", response_model=SkillVersionManifest)
+async def create_skill_folder_draft(
+    req: SkillFolderDraftRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_role(UserRole.user)),
+):
+    """Create a saved direct draft with a complete initial folder, never a blank tree."""
+    frontmatter = _validate_stored_skill_md(req.skill_md_content).frontmatter
+    if (
+        not isinstance(frontmatter.get("name"), str)
+        or not frontmatter["name"].strip()
+        or not isinstance(frontmatter.get("description"), str)
+        or not frontmatter["description"].strip()
+    ):
+        raise HTTPException(status_code=422, detail="SKILL.md must have nonempty name and description frontmatter")
+    draft = SkillDraftRequest(
+        name=req.name,
+        version=req.version,
+        description=req.description,
+        owner=req.owner,
+        team_id=req.team_id,
+        visibility=req.visibility,
+        delivery_mode="registry_direct",
+        skill_md_content=req.skill_md_content,
+        extra_files=req.extra_files,
+        task_type=req.task_type,
+        supported_harnesses=req.supported_harnesses,
+    )
+    listing = await _save_skill_draft(draft, db, current_user, folder_authoring=True)
+    version = (await db.execute(select(SkillVersion).where(SkillVersion.listing_id == listing.id))).scalar_one()
+    files = validate_skill_bundle(
+        delivery_mode="registry_direct",
+        skill_md_content=version.skill_md_content,
+        extra_files=version.extra_files or [],
+    )
+    return SkillVersionManifest(
+        listing_id=listing.id,
+        version_id=version.id,
+        revision=version.content_revision,
+        files=[file.declaration for file in files],
+    )
 
 
 @router.get("/{listing_id}", response_model=SkillListingResponse)
@@ -294,16 +389,13 @@ async def get_skill(
     current_user: User | None = Depends(get_registry_user),
 ):
     optic.debug("fetching skill {}", listing_id)
-    listing = await resolve_visible_listing(
-        SkillListing, listing_id, db, current_user, require_status=ListingStatus.approved
-    )
-    if listing is None:
-        listing = await resolve_visible_listing(SkillListing, listing_id, db, current_user)
-        may_view = listing is not None and may_view_unapproved(
-            get_effective_component_permission(listing, current_user), current_user
-        )
-        if not may_view:
-            raise HTTPException(status_code=404, detail="Listing not found")
+    listing = await resolve_visible_listing(SkillListing, listing_id, db, current_user, load_options=_BODY_FREE_LISTING)
+    if listing is None or listing.latest_version_id is None:
+        raise HTTPException(status_code=404, detail="Listing not found")
+    _, selected = await _authorized_version(str(listing.id), listing.latest_version_id, db, current_user)
+    await db.refresh(listing, attribute_names=["latest_version_id"])
+    if listing.latest_version_id != selected.id:
+        raise HTTPException(status_code=409, detail="Skill latest version changed; refresh the listing")
     resp = SkillListingResponse.model_validate(listing)
     resp.user_permission = get_effective_component_permission(listing, current_user)
     return resp
@@ -340,6 +432,11 @@ async def install_skill(
     version_override = await select_install_version(db, "skill", listing, req.version)
     installed = version_override if version_override is not None else getattr(listing, "latest_version", None)
 
+    if installed is not None and installed.requires_global_review:
+        raise HTTPException(status_code=409, detail="Selected skill version requires global review before installation")
+    if installed is not None and needs_bundle_delivery(installed):
+        raise HTTPException(status_code=409, detail="Skill bundle delivery is not yet supported; install refused")
+
     if current_user is not None:
         db.add(SkillDownload(listing_id=listing.id, user_id=current_user.id, harness=req.harness))
         if installed is not None:
@@ -375,7 +472,13 @@ async def save_skill_draft(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_role(UserRole.user)),
 ):
-    optic.trace("req={}", req)
+    return await _save_skill_draft(req, db, current_user)
+
+
+async def _save_skill_draft(req: SkillDraftRequest, db: AsyncSession, current_user: User, *, folder_authoring=False):
+    _validate_effective_bundle(
+        req.delivery_mode, req.skill_md_content, req.script_content, req.script_filename, req.extra_files
+    )
     content_analysis = _validate_stored_skill_md(req.skill_md_content, req.slash_command)
     slash_command = content_analysis.slash_command
 
@@ -411,6 +514,7 @@ async def save_skill_draft(
         delivery_mode=req.delivery_mode or "git_fetch",
         script_content=req.script_content,
         script_filename=req.script_filename,
+        extra_files=[file.model_dump() for file in req.extra_files],
         target_agents=req.target_agents,
         task_type=req.task_type,
         slash_command=slash_command,
@@ -423,6 +527,8 @@ async def save_skill_draft(
     await db.flush()
 
     listing.latest_version_id = version.id
+    if folder_authoring:
+        version.content_revision = skill_content_revision(listing, version)
     await commit_or_name_conflict(db, "skill")
     await db.refresh(listing)
     return SkillListingResponse.model_validate(listing)
@@ -469,12 +575,28 @@ async def update_skill_draft(
     ver = listing.latest_version
     if not ver:
         raise HTTPException(status_code=400, detail="Listing has no version to update")
+    latest_id, ver = await lock_skill_version(db, listing.id, ver.id)
+    if latest_id != ver.id or ver.status not in (ListingStatus.draft, ListingStatus.rejected, ListingStatus.pending):
+        raise HTTPException(status_code=409, detail="Skill version changed during editing")
+    await _recheck_skill_owner(db, listing, current_user)
+    if ver.content_revision is not None:
+        if ver.status == ListingStatus.pending:
+            raise HTTPException(status_code=409, detail="Withdraw this pending version before editing its files")
+        if req.observed_revision is None or req.observed_revision != skill_content_revision(listing, ver):
+            raise HTTPException(status_code=409, detail="Skill version changed; refresh its manifest before saving")
 
     slash_command_should_update = "slash_command" in req.model_fields_set
     slash_command_explicit_clear = slash_command_should_update and req.slash_command is None
     slash_command = req.slash_command if slash_command_should_update else None
     if req.skill_md_content is not None:
         content_analysis = _validate_stored_skill_md(req.skill_md_content, slash_command)
+        if (req.delivery_mode or ver.delivery_mode) == "registry_direct" and (
+            req.skill_md_content != ver.skill_md_content or ver.delivery_mode != "registry_direct"
+        ):
+            try:
+                _validate_new_md(req.skill_md_content)
+            except SkillValidationError as exc:
+                raise HTTPException(status_code=422, detail=str(exc)) from exc
         if content_analysis.slash_command is not None and not slash_command_explicit_clear:
             slash_command = content_analysis.slash_command
             slash_command_should_update = True
@@ -482,6 +604,33 @@ async def update_skill_draft(
         content_analysis = _validate_stored_skill_md(ver.skill_md_content, slash_command)
         if not slash_command_explicit_clear:
             slash_command = content_analysis.slash_command
+
+    effective_script = req.script_content if "script_content" in req.model_fields_set else ver.script_content
+    effective_filename = req.script_filename if "script_filename" in req.model_fields_set else ver.script_filename
+    effective_extras = req.extra_files if "extra_files" in req.model_fields_set else (ver.extra_files or [])
+    if (
+        req.delivery_mode == "registry_direct"
+        and ver.delivery_mode != "registry_direct"
+        and req.skill_md_content is None
+    ):
+        try:
+            _validate_new_md(ver.skill_md_content)
+        except SkillValidationError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+    _validate_effective_bundle(
+        req.delivery_mode or ver.delivery_mode,
+        req.skill_md_content if req.skill_md_content is not None else ver.skill_md_content,
+        effective_script,
+        effective_filename,
+        effective_extras,
+        enforce_limits=(
+            req.delivery_mode not in (None, ver.delivery_mode)
+            or (req.skill_md_content is not None and req.skill_md_content != ver.skill_md_content)
+            or effective_script != ver.script_content
+            or effective_filename != ver.script_filename
+            or effective_extras != (ver.extra_files or [])
+        ),
+    )
 
     for field in (
         "version",
@@ -501,6 +650,12 @@ async def update_skill_draft(
         if val is not None:
             setattr(ver, field, val)
 
+    if "script_content" in req.model_fields_set:
+        ver.script_content = req.script_content
+    if "script_filename" in req.model_fields_set:
+        ver.script_filename = req.script_filename
+    if "extra_files" in req.model_fields_set:
+        ver.extra_files = [file.model_dump() for file in req.extra_files]
     if slash_command_should_update:
         ver.slash_command = slash_command
 
@@ -518,6 +673,8 @@ async def update_skill_draft(
         if val is not None:
             setattr(listing, field, val)
 
+    if ver.content_revision is not None:
+        ver.content_revision = skill_content_revision(listing, ver)
     await commit_or_name_conflict(db, "skill")
     await db.refresh(listing)
     return SkillListingResponse.model_validate(listing)
@@ -540,8 +697,11 @@ async def start_edit_skill(
         raise HTTPException(status_code=400, detail="Listing has no version")
     if ver.status not in (ListingStatus.pending, ListingStatus.draft, ListingStatus.rejected):
         raise HTTPException(status_code=400, detail=f"Cannot edit: listing is '{ver.status.value}'")
-    # Re-fetch with row-level lock to prevent TOCTOU race
-    ver = (await db.execute(select(SkillVersion).where(SkillVersion.id == ver.id).with_for_update())).scalar_one()
+    # Follow the same listing-then-version lock order as review decisions.
+    latest_id, ver = await lock_skill_version(db, listing.id, ver.id)
+    if latest_id != ver.id or ver.status not in (ListingStatus.pending, ListingStatus.draft, ListingStatus.rejected):
+        raise HTTPException(status_code=409, detail="Skill version changed during editing")
+    await _recheck_skill_owner(db, listing, current_user)
     acquire_edit_lock(ver, current_user.id)
     await commit_or_name_conflict(db, "skill")
     return {"status": "locked"}
@@ -562,6 +722,10 @@ async def cancel_edit_skill(
     ver = listing.latest_version
     if not ver:
         raise HTTPException(status_code=400, detail="Listing has no version")
+    latest_id, ver = await lock_skill_version(db, listing.id, ver.id)
+    if latest_id != ver.id:
+        raise HTTPException(status_code=409, detail="Skill version changed during editing")
+    await _recheck_skill_owner(db, listing, current_user)
     release_edit_lock(ver, current_user.id)
     await commit_or_name_conflict(db, "skill")
     return {"status": "unlocked"}
@@ -585,14 +749,28 @@ async def submit_skill_draft(
     ver = listing.latest_version
     if not ver:
         raise HTTPException(status_code=400, detail="Listing has no version")
+    latest_id, ver = await lock_skill_version(db, listing.id, ver.id)
+    if latest_id != ver.id or ver.status not in (ListingStatus.draft, ListingStatus.rejected):
+        raise HTTPException(status_code=409, detail="Skill version changed before resubmission")
+    await _recheck_skill_owner(db, listing, current_user)
+    _validate_effective_bundle(
+        ver.delivery_mode,
+        ver.skill_md_content,
+        ver.script_content,
+        ver.script_filename,
+        ver.extra_files or [],
+        enforce_limits=False,  # An unchanged stored draft is not a newly written bundle.
+    )
     content_analysis = _validate_stored_skill_md(ver.skill_md_content, ver.slash_command)
     if content_analysis.slash_command is not None:
         ver.slash_command = content_analysis.slash_command
 
     if not listing.description:
         raise HTTPException(status_code=400, detail="Description is required before submitting")
+    if ver.content_revision is not None:
+        ver.content_revision = skill_content_revision(listing, ver)
 
-    auto_approved = await publish_auto_approves_for_entity(listing, current_user, db)
+    auto_approved = not needs_bundle_delivery(ver) and await publish_auto_approves_for_entity(listing, current_user, db)
     if auto_approved:
         listing.status = ListingStatus.approved
         listing.latest_version.reviewed_by = current_user.id
@@ -631,4 +809,5 @@ async def unarchive_skill(
 
 
 # --- Version sub-routes ---
+router.include_router(file_router)
 router.include_router(create_version_router("skill", SkillListing, SkillVersion))

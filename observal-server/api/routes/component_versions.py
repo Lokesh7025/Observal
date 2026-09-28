@@ -1,4 +1,5 @@
 # SPDX-FileCopyrightText: 2026 Hari Srinivasan <harisrini21@gmail.com>
+# SPDX-FileCopyrightText: 2026 Kaushik <kaushikrjpm10@gmail.com>
 # SPDX-License-Identifier: Apache-2.0
 
 """Factory that generates versioning sub-routers for all 5 component types.
@@ -19,8 +20,10 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from loguru import logger as optic
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession  # noqa: TC002
+from sqlalchemy.orm import defaultload, defer
 
 from api.deps import (
+    check_listing_visibility_async,
     get_db,
     get_effective_component_permission,
     get_registry_user,
@@ -28,11 +31,18 @@ from api.deps import (
     require_role,
     resolve_visible_listing,
 )
+from api.routes._skill_lock import lock_skill_version, should_promote_skill_version
+from api.routes.skill_files import _BODY_FREE_LISTING, _authorized_version
 from models.mcp import ListingStatus
+from models.skill import SkillListing, SkillVersion
 from models.user import User, UserRole
 from schemas.component_version import VersionPublishRequest, VersionReviewRequest  # noqa: TC001
 from services.component_version_extras import ALLOWED_FIELDS, REQUIRED_FIELDS, validate_and_extract
 from services.inbox import sources as inbox
+from services.skill_bundle import needs_bundle_delivery, validate_skill_bundle
+from services.skill_revisions import skill_content_revision
+from services.skill_validator import SkillValidationError
+from services.teamspace import can_review, review_scope
 
 # Semver pattern: X.Y.Z or X.Y.Z-prerelease
 SEMVER_RE = re.compile(r"^\d+\.\d+\.\d+(-[a-zA-Z0-9.]+)?$")
@@ -54,6 +64,11 @@ _VERSION_MANAGED_FIELDS = {
     "is_editing",
     "editing_since",
     "editing_by",
+    "base_version_id",
+    "base_revision",
+    "content_revision",
+    "requires_global_review",
+    "pre_public_status",
 }
 
 
@@ -68,7 +83,7 @@ def _parse_semver(v: str) -> tuple[int, ...]:
     return tuple(int(p) for p in base.split("."))
 
 
-def _version_to_dict(v, component_type: str) -> dict:
+def _version_to_dict(v, component_type: str, *, summary: bool = False) -> dict:
     """Serialize a version ORM object to a plain dict for API responses."""
     optic.trace("v={}, component_type={}", v, component_type)
     d = {
@@ -86,6 +101,8 @@ def _version_to_dict(v, component_type: str) -> dict:
         "created_at": v.created_at,
     }
     for attr in ALLOWED_FIELDS.get(component_type, set()):
+        if summary and component_type == "skill" and attr in {"extra_files", "skill_md_content", "script_content"}:
+            continue
         if hasattr(v, attr):
             d[attr] = getattr(v, attr)
     return d
@@ -107,7 +124,23 @@ async def _list_versions(
     current_user: User | None,
 ) -> dict:
     optic.trace("listing_id={}, page={}", listing_id, page)
-    listing = await resolve_visible_listing(listing_model, listing_id, db, current_user)
+    summary_options = (
+        (
+            defaultload(SkillListing.latest_version)
+            .defer(SkillVersion.extra_files)
+            .defer(SkillVersion.skill_md_content)
+            .defer(SkillVersion.script_content),
+            defaultload(SkillListing.versions)
+            .defer(SkillVersion.extra_files)
+            .defer(SkillVersion.skill_md_content)
+            .defer(SkillVersion.script_content),
+        )
+        if component_type == "skill"
+        else ()
+    )
+    listing = await resolve_visible_listing(
+        listing_model, listing_id, db, current_user, **({"load_options": summary_options} if summary_options else {})
+    )
     if not listing:
         raise HTTPException(status_code=404, detail="Listing not found")
 
@@ -124,6 +157,15 @@ async def _list_versions(
     offset = (page - 1) * page_size
     stmt = (
         select(version_model)
+        .options(
+            *(
+                defer(version_model.extra_files),
+                defer(version_model.skill_md_content),
+                defer(version_model.script_content),
+            )
+            if component_type == "skill"
+            else ()
+        )
         .where(*version_filters)
         .order_by(version_model.released_at.desc())
         .offset(offset)
@@ -136,7 +178,7 @@ async def _list_versions(
     total = (await db.execute(count_stmt)).scalar() or 0
 
     return {
-        "items": [_version_to_dict(v, component_type) for v in versions],
+        "items": [_version_to_dict(v, component_type, summary=True) for v in versions],
         "total": total,
         "page": page,
         "page_size": page_size,
@@ -153,6 +195,27 @@ async def _get_version(
     current_user: User | None,
 ) -> dict:
     optic.trace("listing_id={}, version={}", listing_id, version)
+    if component_type == "skill":
+        listing = await resolve_visible_listing(
+            SkillListing, listing_id, db, current_user, load_options=_BODY_FREE_LISTING
+        )
+        if not listing:
+            raise HTTPException(status_code=404, detail="Listing not found")
+        version_id = (
+            await db.execute(
+                select(SkillVersion.id).where(SkillVersion.listing_id == listing.id, SkillVersion.version == version)
+            )
+        ).scalar_one_or_none()
+        if version_id is None:
+            raise HTTPException(status_code=404, detail="Version not found")
+        _, ver = await _authorized_version(str(listing.id), version_id, db, current_user)
+        result = _version_to_dict(ver, component_type)
+        try:
+            result["revision"] = skill_content_revision(listing, ver)
+        except SkillValidationError as exc:
+            raise HTTPException(status_code=409, detail="Stored skill version is not a valid release") from exc
+        return result
+
     listing = await resolve_visible_listing(listing_model, listing_id, db, current_user)
     if not listing:
         raise HTTPException(status_code=404, detail="Listing not found")
@@ -189,6 +252,36 @@ async def _publish_version(
     if get_effective_component_permission(listing, current_user) != "owner":
         raise HTTPException(status_code=403, detail="Only the listing owner can publish versions")
 
+    current_version = listing.latest_version
+    approved_base = None
+    if component_type == "skill":
+        if current_version is None:
+            raise HTTPException(status_code=409, detail="Skill listing has no version to publish from")
+        _, locked_current = await lock_skill_version(db, listing.id, current_version.id)
+        await db.refresh(listing, attribute_names=["submitted_by", "co_authors", "team_id", "is_private"])
+        if not await check_listing_visibility_async(listing, current_user, db) or (
+            get_effective_component_permission(listing, current_user) != "owner"
+        ):
+            raise HTTPException(status_code=403, detail="Only the listing owner can publish versions")
+        approved_base = (
+            await db.execute(
+                select(SkillVersion)
+                .where(
+                    SkillVersion.listing_id == listing.id,
+                    SkillVersion.status.in_((ListingStatus.approved, ListingStatus.archived)),
+                    SkillVersion.requires_global_review.is_(False),
+                )
+                .order_by(SkillVersion.released_at.desc(), SkillVersion.id.desc())
+                .limit(1)
+                .with_for_update()
+            )
+        ).scalar_one_or_none()
+        if approved_base is None and needs_bundle_delivery(locked_current):
+            raise HTTPException(
+                status_code=409, detail="Approve the first skill version before publishing another bundle"
+            )
+        current_version = approved_base or locked_current
+
     # Duplicate check
     dup_stmt = select(version_model).where(
         version_model.listing_id == listing.id,
@@ -201,12 +294,11 @@ async def _publish_version(
     effective_extra = dict(req.extra or {})
     for field in REQUIRED_FIELDS.get(component_type, set()):
         if field not in effective_extra:
-            value = getattr(listing, field, None)
+            value = getattr(current_version if component_type == "skill" else listing, field, None)
             if value is not None:
                 effective_extra[field] = value
     extra_fields = validate_and_extract(component_type, effective_extra)
     now = datetime.now(UTC)
-    current_version = listing.latest_version
     snapshot = (
         {
             column.name: deepcopy(getattr(current_version, column.name))
@@ -216,6 +308,8 @@ async def _publish_version(
         if current_version
         else {}
     )
+    if component_type == "skill" and snapshot.get("extra_files") is None:
+        snapshot["extra_files"] = []
     if "supported_harnesses" in req.model_fields_set:
         snapshot["supported_harnesses"] = req.supported_harnesses
     ver = version_model(
@@ -229,7 +323,32 @@ async def _publish_version(
         released_at=now,
     )
     for field_name, value in extra_fields.items():
-        setattr(ver, field_name, value)
+        setattr(ver, field_name, deepcopy(value))
+
+    if component_type == "skill":
+        ver.base_version_id = approved_base.id if approved_base is not None else None
+        # Historical git rows can have one orphaned script field. A new version
+        # may inherit that inert metadata, but an explicit script/mode override
+        # must satisfy the current coherent-field contract.
+        inherited_legacy_git_script = (
+            current_version is not None
+            and current_version.delivery_mode == ver.delivery_mode == "git_fetch"
+            and (current_version.script_content is None) != (current_version.script_filename is None)
+            and ver.script_content == current_version.script_content
+            and ver.script_filename == current_version.script_filename
+            and not {"script_content", "script_filename", "delivery_mode"}.intersection(req.extra or {})
+        )
+        try:
+            validate_skill_bundle(
+                delivery_mode=ver.delivery_mode,
+                skill_md_content=ver.skill_md_content,
+                script_content=ver.script_content,
+                script_filename=ver.script_filename,
+                extra_files=ver.extra_files or [],
+                enforce_limits=not inherited_legacy_git_script,
+            )
+        except SkillValidationError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     db.add(ver)
     await db.flush()
@@ -303,18 +422,34 @@ async def _review_version(
     if not ver:
         raise HTTPException(status_code=404, detail="Version not found")
 
+    latest_id = None
+    if component_type == "skill":
+        latest_id, ver = await lock_skill_version(db, listing.id, ver.id)
+        await db.refresh(listing, attribute_names=["submitted_by", "co_authors", "team_id", "is_private"])
+        if (
+            not await check_listing_visibility_async(listing, current_user, db)
+            or not may_view_unapproved(get_effective_component_permission(listing, current_user), current_user)
+            or not can_review(listing, await review_scope(db, current_user))
+        ):
+            raise HTTPException(status_code=404, detail="Version not found")
     if ver.status != ListingStatus.pending:
         raise HTTPException(
             status_code=422, detail=f"Version is {ver.status.value!r}, only pending versions can be reviewed"
         )
 
     if req.action == "approve":
+        if component_type == "skill" and needs_bundle_delivery(ver):
+            raise HTTPException(status_code=409, detail="Resource-bearing skill versions cannot yet be reviewed")
         ver.status = ListingStatus.approved
         ver.rejection_reason = None
         # Only update latest if this version is newer than current latest
-        current_latest = listing.latest_version
-        if not current_latest or _parse_semver(ver.version) >= _parse_semver(current_latest.version):
-            listing.latest_version_id = ver.id
+        if component_type == "skill":
+            if await should_promote_skill_version(db, latest_id, ver):
+                listing.latest_version_id = ver.id
+        else:
+            current_latest = listing.latest_version
+            if not current_latest or _parse_semver(ver.version) >= _parse_semver(current_latest.version):
+                listing.latest_version_id = ver.id
     else:
         ver.status = ListingStatus.rejected
         ver.rejection_reason = req.reason

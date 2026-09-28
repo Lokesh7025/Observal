@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Hari Srinivasan <harisrini21@gmail.com>
 # SPDX-FileCopyrightText: 2026 Shaan Narendran <shaannaren06@gmail.com>
 # SPDX-FileCopyrightText: 2026 Lokesh <lokeshselvam7025@gmail.com>
+# SPDX-FileCopyrightText: 2026 Kaushik <kaushikrjpm10@gmail.com>
 # SPDX-License-Identifier: Apache-2.0
 
 """Agent install, download stats, traces, resolve, manifest, and validate routes."""
@@ -37,6 +38,7 @@ from schemas.agent import (
 )
 from services.harness import generate_agent_config
 from services.registry_telemetry import emit_registry_event
+from services.skill_bundle import needs_bundle_delivery
 
 from ._router import router
 from .helpers import _load_agent, _resolve_component_names
@@ -253,6 +255,22 @@ async def install_agent(
                 "these with warnings, or ask the agent author to release a new version."
             ),
         )
+    # Non-strict mode is only a compatibility fallback for old resource-less
+    # locks. It must never publish an unapproved or public-re-review skill's
+    # bytes, even when its bundle has no extra files and the caller owns it.
+    from services.agent_lock import INSTALLABLE_STATUSES
+
+    if any(
+        (selected := getattr(row, "pinned_version", None) or getattr(row, "latest_version", None)) is None
+        or selected.status not in INSTALLABLE_STATUSES
+        or getattr(selected, "requires_global_review", False)
+        for row in pins.listings["skill"].values()
+    ):
+        raise HTTPException(status_code=409, detail="Agent skill pin is not approved or requires public review")
+    # The pinned proxy, not the listing's latest release, determines whether a
+    # skill would be delivered incompletely. Refuse before config or downloads.
+    if any(needs_bundle_delivery(row) for row in pins.listings["skill"].values()):
+        raise HTTPException(status_code=409, detail="Skill bundle delivery is not yet supported; install refused")
     lock_digest = stored_lock_digest(install_version)
     mcp_listings_map = pins.listings["mcp"]
     skill_listings_map = pins.listings["skill"]

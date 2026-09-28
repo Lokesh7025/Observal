@@ -1,4 +1,5 @@
 # SPDX-FileCopyrightText: 2026 Observal Contributors
+# SPDX-FileCopyrightText: 2026 Kaushik <kaushikrjpm10@gmail.com>
 # SPDX-License-Identifier: Apache-2.0
 
 """Focused contracts and failure coverage for generic component versions."""
@@ -240,6 +241,7 @@ def _db():
     return SimpleNamespace(
         add=Mock(),
         execute=AsyncMock(),
+        refresh=AsyncMock(),
         flush=AsyncMock(),
         commit=AsyncMock(),
         rollback=AsyncMock(),
@@ -632,6 +634,11 @@ async def test_publish_uses_real_model_pair_snapshots_content_and_orders_transac
     monkeypatch.setattr(versions, "resolve_visible_listing", resolve)
     monkeypatch.setattr(versions.inbox, "on_publish", notify)
     monkeypatch.setattr(versions, "datetime", FrozenDateTime)
+    if component_type == "skill":
+        monkeypatch.setattr(
+            versions, "lock_skill_version", AsyncMock(return_value=(OLD_VERSION_ID, listing.latest_version))
+        )
+        monkeypatch.setattr(versions, "check_listing_visibility_async", AsyncMock(return_value=True))
 
     result = await versions._publish_version(
         "Alice/Review-Item",
@@ -709,6 +716,11 @@ async def test_publish_snapshots_complete_metadata_when_optional_fields_are_omit
     db.flush.side_effect = lambda: _set_generated_defaults(db, component_type)
     monkeypatch.setattr(versions, "resolve_visible_listing", AsyncMock(return_value=listing))
     monkeypatch.setattr(versions.inbox, "on_publish", AsyncMock())
+    if component_type == "skill":
+        monkeypatch.setattr(
+            versions, "lock_skill_version", AsyncMock(return_value=(OLD_VERSION_ID, listing.latest_version))
+        )
+        monkeypatch.setattr(versions, "check_listing_visibility_async", AsyncMock(return_value=True))
     request = VersionPublishRequest(version="2.0.0", description="Second release")
 
     await versions._publish_version(
@@ -724,7 +736,10 @@ async def test_publish_snapshots_complete_metadata_when_optional_fields_are_omit
     created = db.add.call_args.args[0]
     for column in version_model.__table__.columns:
         if column.name not in versions._VERSION_MANAGED_FIELDS:
-            assert getattr(created, column.name) == getattr(listing.latest_version, column.name)
+            expected = getattr(listing.latest_version, column.name)
+            if component_type == "skill" and column.name == "extra_files" and expected is None:
+                expected = []  # Transient fixtures lack the database's non-null JSON default.
+            assert getattr(created, column.name) == expected
 
 
 @pytest.mark.asyncio
@@ -1283,7 +1298,7 @@ async def test_factory_handlers_delegate_every_argument_and_return_exact_payload
         "db": db,
         "current_user": actor,
     }
-    assert review_kwargs["req"].model_dump() == {"action": "reject", "reason": "policy"}
+    assert review_kwargs["req"].model_dump() == {"action": "reject", "reason": "policy", "observed_revision": None}
     suggestions_call.assert_awaited_once_with(
         listing_id=str(LISTING_ID),
         listing_model=McpListing,

@@ -302,5 +302,14 @@ class SkillVersion(Base):
     is_editing: Mapped[bool] = mapped_column(Boolean, default=False)
     editing_since: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     editing_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
+    # Saved drafts inherit only from an approved base. Existing versions stay
+    # NULL until their first explicit revision-bearing write or review.
+    base_version_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("skill_versions.id", ondelete="SET NULL"), nullable=True
+    )
+    base_revision: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    content_revision: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    requires_global_review: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    pre_public_status: Mapped[str | None] = mapped_column(String(20), nullable=True)
 
     listing: Mapped[SkillListing] = relationship(back_populates="versions", foreign_keys=[listing_id])

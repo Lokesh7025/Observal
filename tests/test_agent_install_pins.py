@@ -1,4 +1,5 @@
 # SPDX-FileCopyrightText: 2026 Shaan Narendran <shaannaren06@gmail.com>
+# SPDX-FileCopyrightText: 2026 Kaushik <kaushikrjpm10@gmail.com>
 # SPDX-License-Identifier: Apache-2.0
 
 """Agent installs generate every component from the version the agent release pinned.
@@ -121,6 +122,55 @@ async def test_install_uses_the_pinned_release_after_a_newer_one_is_approved(ses
     assert response.lock["problems"] == []
     assert response.lock["components"][0]["source"] == "lock"
     assert response.lock["digest"].startswith("sha256:")
+
+
+@pytest.mark.parametrize("resource", ["extra", "empty_script"])
+async def test_pinned_direct_resource_is_refused_before_config_and_download(session, resource):
+    owner = await ds.user(session)
+    listing, agent, _ = await _pinned_agent(session, owner, "skill")
+    pinned = (
+        await session.execute(select(SkillVersion).where(SkillVersion.id == listing.latest_version_id))
+    ).scalar_one()
+    pinned.delivery_mode = "registry_direct"
+    pinned.skill_md_content = "# Pinned\n"
+    if resource == "extra":
+        pinned.extra_files = [{"path": "assets/icon.bin", "content": "AP8=", "encoding": "base64"}]
+    else:
+        pinned.script_filename = "empty.sh"
+        pinned.script_content = ""
+    newer = _new_release("skill", listing, owner, "resource-less latest")
+    session.add(newer)
+    await session.flush()
+    listing.latest_version_id = newer.id
+    await session.commit()
+
+    with patch("api.routes.agent.install.generate_agent_config") as generate:
+        with pytest.raises(HTTPException) as refused:
+            await _install(session, agent, owner)
+        generate.assert_not_called()
+    assert refused.value.status_code == 409
+    assert "delivery" in refused.value.detail
+
+
+@pytest.mark.parametrize(
+    "status,marked", [(ListingStatus.pending, False), (ListingStatus.pending, True), (ListingStatus.approved, True)]
+)
+async def test_non_strict_install_never_serves_unapproved_or_marked_skill(session, status, marked):
+    owner = await ds.user(session)
+    listing, agent, _ = await _pinned_agent(session, owner, "skill")
+    pinned = (
+        await session.execute(select(SkillVersion).where(SkillVersion.id == listing.latest_version_id))
+    ).scalar_one()
+    pinned.status = status
+    pinned.requires_global_review = marked
+    await session.commit()
+
+    with patch("api.routes.agent.install.generate_agent_config") as generate:
+        with pytest.raises(HTTPException) as refused:
+            await _install(session, agent, owner)
+        generate.assert_not_called()
+    assert refused.value.status_code == 409
+    assert "not approved or requires public review" in refused.value.detail
 
 
 async def test_legacy_pin_falls_back_to_latest_with_a_warning_and_strict_refuses(session):
