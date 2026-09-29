@@ -20,14 +20,20 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from api.routes import registry, review, skill, skill_files
 from api.routes._skill_lock import lock_skill_version
+from api.routes.agent.install import install_agent
 from models.agent import Agent, AgentStatus, AgentVersion
+from models.agent_component import AgentComponent
 from models.base import Base
 from models.component_bundle import ComponentBundle
 from models.mcp import ListingStatus
 from models.skill import SkillListing, SkillVersion
-from models.user import UserRole
+from models.team import TeamMembership, TeamRole
+from models.user import User, UserRole
+from schemas.agent import AgentInstallRequest
 from schemas.component_version import VersionReviewRequest
-from schemas.skill_resources import SkillFileOperations
+from schemas.skill import SkillCandidateDraftRequest
+from schemas.skill_resources import SkillDraftRebaseRequest, SkillFileOperations
+from services.agent_lock import lock_agent_version
 from services.skill_revisions import skill_content_revision
 from tests import discovery_support as ds
 
@@ -88,6 +94,289 @@ async def test_selected_install_waits_for_private_transition_and_refuses_stale_p
             with pytest.raises(HTTPException) as blocked:
                 await asyncio.wait_for(task, timeout=5)
             assert blocked.value.status_code == 404
+        finally:
+            if not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+            await writer.rollback()
+            await installer.rollback()
+
+
+async def test_selected_private_skill_waits_for_team_revocation_and_refuses_bytes(pg_store):
+    maker, engine = pg_store
+    async with maker() as db:
+        owner = await ds.user(db)
+        reader = await ds.user(db)
+        team = await ds.team_with_member(db, owner)
+        membership = TeamMembership(id=uuid.uuid4(), team_id=team.id, user_id=reader.id, role=TeamRole.member)
+        db.add(membership)
+        listing = await ds.skill(db, owner, team_id=team.id, is_private=True)
+        await db.commit()
+        listing_id, member_id, reader_id, version_id = listing.id, membership.id, reader.id, listing.latest_version_id
+
+    async with maker() as writer, maker() as installer:
+        stale = await installer.get(SkillListing, listing_id)
+        member = (
+            await writer.execute(select(TeamMembership).where(TeamMembership.id == member_id).with_for_update())
+        ).scalar_one()
+        await writer.delete(member)
+        await writer.flush()
+        attempted = asyncio.Event()
+
+        @event.listens_for(engine.sync_engine, "before_cursor_execute")
+        def observe_grant_share(_conn, _cursor, statement, _params, _context, _many):
+            if "team_memberships" in statement and "FOR SHARE" in statement.upper():
+                attempted.set()
+
+        reader = await installer.get(User, reader_id)
+        task = asyncio.create_task(skill._selected_skill_release(stale, installer, reader, requested="1.2.0"))
+        try:
+            await asyncio.wait_for(attempted.wait(), timeout=5)
+            await asyncio.sleep(0.15)
+            assert not task.done(), "private skill read must wait for membership revocation"
+            await writer.commit()
+            with pytest.raises(HTTPException) as denied:
+                await asyncio.wait_for(task, timeout=5)
+            assert denied.value.status_code == 404
+        finally:
+            if not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+            await writer.rollback()
+            await installer.rollback()
+    async with maker() as db:
+        assert (await db.get(SkillVersion, version_id)).download_count == 0
+
+
+async def test_team_revocation_waits_for_inflight_private_skill_install(pg_store):
+    maker, engine = pg_store
+    async with maker() as db:
+        owner = await ds.user(db)
+        reader = await ds.user(db)
+        team = await ds.team_with_member(db, owner)
+        member = TeamMembership(id=uuid.uuid4(), team_id=team.id, user_id=reader.id, role=TeamRole.member)
+        db.add(member)
+        listing = await ds.skill(db, owner, team_id=team.id, is_private=True)
+        await db.commit()
+        listing_id, member_id, reader_id = listing.id, member.id, reader.id
+
+    async with maker() as installer, maker() as writer:
+        stale = await installer.get(SkillListing, listing_id)
+        reader = await installer.get(User, reader_id)
+        _, selected = await skill._selected_skill_release(stale, installer, reader, requested="1.2.0")
+        assert selected.status == ListingStatus.approved
+        blocked_at_delete = asyncio.Event()
+
+        @event.listens_for(engine.sync_engine, "before_cursor_execute")
+        def observe_delete(_conn, _cursor, statement, _params, _context, _many):
+            if "DELETE FROM TEAM_MEMBERSHIPS" in statement.upper().replace('"', ""):
+                blocked_at_delete.set()
+
+        member = await writer.get(TeamMembership, member_id)
+
+        async def revoke():
+            await writer.delete(member)
+            await writer.flush()
+            await writer.commit()
+
+        task = asyncio.create_task(revoke())
+        try:
+            await asyncio.wait_for(blocked_at_delete.wait(), timeout=5)
+            await asyncio.sleep(0.15)
+            assert not task.done(), "revocation must wait until private bytes are consumed"
+            await installer.rollback()
+            await asyncio.wait_for(task, timeout=5)
+        finally:
+            if not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+            await installer.rollback()
+            await writer.rollback()
+    async with maker() as db:
+        assert await db.get(TeamMembership, member_id) is None
+
+
+async def test_agent_pinned_private_skill_refuses_revoked_team_membership(pg_store, monkeypatch):
+    maker, engine = pg_store
+    async with maker() as db:
+        owner = await ds.user(db)
+        reader = await ds.user(db)
+        team = await ds.team_with_member(db, owner)
+        member = TeamMembership(id=uuid.uuid4(), team_id=team.id, user_id=reader.id, role=TeamRole.member)
+        db.add(member)
+        listing = await ds.skill(db, owner, team_id=team.id, is_private=True)
+        agent = await ds.agent(db, owner, components=[("skill", listing.id, listing.name)])
+        agent.is_private = True
+        agent.team_id = team.id
+        link = (await db.execute(select(AgentComponent).where(AgentComponent.component_id == listing.id))).scalar_one()
+        link.resolved_version_id = listing.latest_version_id
+        agent_version = (await db.execute(select(AgentVersion).where(AgentVersion.agent_id == agent.id))).scalar_one()
+        await lock_agent_version(db, agent, agent_version)
+        await db.commit()
+        agent_id, member_id, reader_id = agent.id, member.id, reader.id
+
+    async with maker() as writer, maker() as installer:
+        locked = (
+            await writer.execute(select(TeamMembership).where(TeamMembership.id == member_id).with_for_update())
+        ).scalar_one()
+        await writer.delete(locked)
+        await writer.flush()
+        attempted = asyncio.Event()
+
+        @event.listens_for(engine.sync_engine, "before_cursor_execute")
+        def observe_agent_grant(_conn, _cursor, statement, _params, _context, _many):
+            if "team_memberships" in statement and "FOR SHARE" in statement.upper():
+                attempted.set()
+
+        monkeypatch.setattr("api.routes.config.derive_endpoints", AsyncMock(return_value={"api": "http://test"}))
+        reader = await installer.get(User, reader_id)
+        task = asyncio.create_task(
+            install_agent(
+                str(agent_id),
+                AgentInstallRequest(harness="pi", options={"scope": "project"}),
+                request=None,
+                db=installer,
+                current_user=reader,
+            )
+        )
+        try:
+            await asyncio.wait_for(attempted.wait(), timeout=5)
+            await asyncio.sleep(0.15)
+            assert not task.done(), "pinned agent must wait for the private skill membership decision"
+            await writer.commit()
+            with pytest.raises(HTTPException) as refused:
+                await asyncio.wait_for(task, timeout=5)
+            assert refused.value.status_code == 404
+        finally:
+            if not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+            await writer.rollback()
+            await installer.rollback()
+
+
+async def test_rebase_waits_for_pending_review_transition_and_keeps_saved_bytes(pg_store):
+    maker, engine = pg_store
+    async with maker() as db:
+        author = await ds.user(db)
+        listing = await ds.skill(db, author)
+        base = await db.get(SkillVersion, listing.latest_version_id)
+        base.skill_md_content = "---\nname: tested\ndescription: Original\n---\n# Original\n"
+        await db.flush()
+        created = await skill_files.create_skill_candidate_draft(
+            str(listing.id),
+            SkillCandidateDraftRequest(
+                base_version_id=base.id,
+                observed_base_revision=skill_content_revision(listing, base),
+                version="1.5.0",
+                description=base.description,
+            ),
+            Response(),
+            db,
+            author,
+        )
+        next_release = await ds.add_skill_version(db, listing, author, version="1.4.0", status=ListingStatus.approved)
+        next_release.delivery_mode = "registry_direct"
+        next_release.skill_md_content = base.skill_md_content
+        await db.flush()
+        latest_revision = skill_content_revision(listing, next_release)
+        await db.commit()
+        listing_id, draft_id, current_id, author_id = listing.id, created.version_id, next_release.id, author.id
+
+    async with maker() as writer, maker() as editor:
+        await lock_skill_version(writer, listing_id, draft_id)
+        row = await writer.get(SkillVersion, draft_id)
+        row.status = ListingStatus.pending
+        await writer.flush()
+        attempted = asyncio.Event()
+
+        @event.listens_for(engine.sync_engine, "before_cursor_execute")
+        def observe_author_lock(_conn, _cursor, statement, _params, _context, _many):
+            if "skill_listings.latest_version_id" in statement and "FOR UPDATE" in statement.upper():
+                attempted.set()
+
+        author = await editor.get(User, author_id)
+        task = asyncio.create_task(
+            skill_files.rebase_skill_draft(
+                str(listing_id),
+                draft_id,
+                SkillDraftRebaseRequest(
+                    observed_revision=created.revision,
+                    current_version_id=current_id,
+                    observed_current_revision=latest_revision,
+                ),
+                Response(),
+                editor,
+                author,
+            )
+        )
+        try:
+            await asyncio.wait_for(attempted.wait(), timeout=5)
+            await asyncio.sleep(0.15)
+            assert not task.done(), "rebase must wait on the listing/version review writer"
+            await writer.commit()
+            with pytest.raises(HTTPException) as refused:
+                await asyncio.wait_for(task, timeout=5)
+            assert refused.value.status_code == 409
+        finally:
+            if not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+            await writer.rollback()
+            await editor.rollback()
+    async with maker() as db:
+        draft = await db.get(SkillVersion, draft_id)
+        assert draft.status == ListingStatus.pending
+        assert draft.content_revision == created.revision
+        assert draft.base_version_id == base.id
+
+
+async def test_pinned_agent_install_waits_for_global_review_and_refuses_stale_bytes(pg_store, monkeypatch):
+    maker, engine = pg_store
+    async with maker() as db:
+        owner = await ds.user(db)
+        reader = await ds.user(db)
+        listing = await ds.skill(db, owner)
+        agent = await ds.agent(db, owner, components=[("skill", listing.id, listing.name)])
+        link = (await db.execute(select(AgentComponent).where(AgentComponent.component_id == listing.id))).scalar_one()
+        link.resolved_version_id = listing.latest_version_id
+        agent_version = (await db.execute(select(AgentVersion).where(AgentVersion.agent_id == agent.id))).scalar_one()
+        await lock_agent_version(db, agent, agent_version)
+        await db.commit()
+        listing_id, version_id, agent_id, reader_id = listing.id, listing.latest_version_id, agent.id, reader.id
+
+    async with maker() as writer, maker() as installer:
+        await lock_skill_version(writer, listing_id, version_id)
+        version = await writer.get(SkillVersion, version_id)
+        version.requires_global_review = True
+        version.status = ListingStatus.pending
+        await writer.flush()
+        lock_attempted = asyncio.Event()
+
+        @event.listens_for(engine.sync_engine, "before_cursor_execute")
+        def observe_agent_share(_conn, _cursor, statement, _params, _context, _many):
+            if "skill_listings.id" in statement and "FOR SHARE" in statement.upper():
+                lock_attempted.set()
+
+        monkeypatch.setattr("api.routes.config.derive_endpoints", AsyncMock(return_value={"api": "http://test"}))
+        reader = await installer.get(type(reader), reader_id)
+        task = asyncio.create_task(
+            install_agent(
+                str(agent_id),
+                AgentInstallRequest(harness="pi", options={"scope": "project"}),
+                request=None,
+                db=installer,
+                current_user=reader,
+            )
+        )
+        try:
+            await asyncio.wait_for(lock_attempted.wait(), timeout=5)
+            await asyncio.sleep(0.15)
+            assert not task.done(), "agent install must wait for the global-review writer"
+            await writer.commit()
+            with pytest.raises(HTTPException) as blocked:
+                await asyncio.wait_for(task, timeout=5)
+            assert blocked.value.status_code in (404, 409)
         finally:
             if not task.done():
                 task.cancel()

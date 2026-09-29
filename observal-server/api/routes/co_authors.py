@@ -1,4 +1,5 @@
 # SPDX-FileCopyrightText: 2026 Hari Srinivasan <harisrini21@gmail.com>
+# SPDX-FileCopyrightText: 2026 Kaushik <kaushikrjpm10@gmail.com>
 # SPDX-License-Identifier: Apache-2.0
 
 """Co-author management endpoints for agents and component listings."""
@@ -35,7 +36,12 @@ from models.user import User
 from services.inbox import sources as inbox
 from services.ownership import transfer_entity_owner
 from services.registry_namespace import identity_exists
-from services.teamspace import is_admin, review_publication_to_public, team_membership
+from services.teamspace import (
+    is_admin,
+    review_publication_to_public,
+    skill_transition_needs_rollout_gate,
+    team_membership,
+)
 
 router = APIRouter(prefix="/api/v1", tags=["co-authors"])
 
@@ -219,6 +225,25 @@ async def transfer_ownership(
         raise HTTPException(status_code=422, detail="You already own this item")
 
     was_private = bool(getattr(entity, "is_private", False))
+    if entity_type == "skills":
+        # Every ownership transfer changes reviewable listing identity, even
+        # when it starts public. Tracked revisions cannot be transferred until
+        # the author/review identity migration exists. Serialize legacy team
+        # publication with the same listing-then-version lock order as review.
+        await db.execute(select(SkillListing.id).where(SkillListing.id == entity.id).with_for_update())
+        await db.refresh(entity, attribute_names=["team_id", "is_private", "submitted_by"])
+        if entity.team_id != team_id or entity.is_private != was_private:
+            raise HTTPException(status_code=409, detail="Skill ownership changed; refresh before transferring")
+        if team_id is not None and not is_admin(current_user):
+            membership = await team_membership(db, team_id, current_user.id)
+            if not membership or membership.role != TeamRole.owner:
+                raise HTTPException(
+                    status_code=403, detail="Team owner membership changed; refresh before transferring"
+                )
+        if team_id is None and entity.submitted_by != current_user.id and not is_admin(current_user):
+            raise HTTPException(status_code=403, detail="Skill ownership changed; refresh before transferring")
+        if await skill_transition_needs_rollout_gate(db, entity.id):
+            raise HTTPException(status_code=409, detail="Tracked skill transfer requires version identity migration")
     returned_to_review = False
     if team_id is not None:
         entity.team_id = None
@@ -233,7 +258,8 @@ async def transfer_ownership(
         )
 
     previous_owner, previous_owner_id = transfer_entity_owner(entity, entity_type, current_user, target_user)
-    if returned_to_review:
+    if returned_to_review and entity_type != "skills":
+        # Skill transition notices are per version and sent by the helper.
         # Delivered here rather than beside review_publication_to_public: the
         # name-collision check above can still 409 out of this request, and
         # resolving recipients for a transfer that never happens is wasted work.

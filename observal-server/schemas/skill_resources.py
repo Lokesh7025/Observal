@@ -34,6 +34,24 @@ class SkillFileDeclaration(BaseModel):
 SkillRevision = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
 
 
+class SkillInstallFile(SkillFileDeclaration):
+    """One declared file's exact bytes in an opted-in complete-folder response."""
+
+    version_id: uuid.UUID
+    content: str = Field(max_length=5_592_408)  # 4 MiB decoded, base64 encoded.
+    encoding: Literal["base64"] = "base64"
+
+
+class SkillInstallFolder(BaseModel):
+    """Selected release, complete file set and v2 digest for installers."""
+
+    listing_id: uuid.UUID
+    version_id: uuid.UUID
+    digest: str
+    skill_file_path: str = Field(min_length=1, max_length=500)
+    files: list[SkillInstallFile] = Field(max_length=130)
+
+
 class SkillFileContents(BaseModel):
     """A single authorized, version-scoped file; binary content uses base64."""
 
@@ -85,6 +103,17 @@ class SkillVersionRevisionRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
     observed_revision: SkillRevision
+
+
+class SkillDraftRebaseRequest(BaseModel):
+    """Explicit three-way rebase of one saved draft onto an observed approved base."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    observed_revision: SkillRevision
+    current_version_id: uuid.UUID
+    observed_current_revision: SkillRevision
+    new_version: str | None = Field(default=None, pattern=r"^\d+\.\d+\.\d+$", max_length=50)
 
 
 class SkillFileOperations(BaseModel):

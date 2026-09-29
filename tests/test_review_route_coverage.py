@@ -1881,59 +1881,29 @@ async def test_related_skills_missing_wrong_type_hidden_and_database_failure(mon
 
 
 @pytest.mark.asyncio
-async def test_bulk_approve_mcp_skips_malformed_missing_and_nonpending_skills(
-    monkeypatch,
-    decision_boundaries,
-):
+async def test_bulk_approve_refuses_malformed_missing_duplicate_and_nonpending_skills(monkeypatch, decision_boundaries):
     db = _db()
     actor = _actor()
-    mcp, _mcp_version = _orm_listing("mcp")
-    pending, _pending = _orm_listing("skill", index=1)
-    approved, _approved = _orm_listing("skill", status=ListingStatus.approved, index=2)
-    missing_id = uuid.UUID(int=720)
+    mcp, _ = _orm_listing("mcp")
+    pending, _ = _orm_listing("skill", index=1)
+    approved, _ = _orm_listing("skill", status=ListingStatus.approved, index=2)
     monkeypatch.setattr(review, "_find_listing", AsyncMock(return_value=("mcp", mcp)))
-    db.execute.side_effect = [
-        _result(scalar=pending),
-        _result(),
-        _result(scalar=approved),
+    cases = [
+        (["malformed"], None, 400),
+        ([str(uuid.UUID(int=720))], None, 404),
+        ([str(pending.id), str(pending.id)], None, 400),
+        ([str(approved.id)], approved, 409),
     ]
-    request = review.McpBulkApproveRequest(skill_ids=["malformed", str(pending.id), str(missing_id), str(approved.id)])
-    monkeypatch.setattr(review, "lock_skill_version", AsyncMock(return_value=(pending.latest_version_id, _pending)))
-
-    result = await review.approve_mcp_with_skills(str(mcp.id), request, db, actor)
-
-    assert result == {
-        "mcp": {"id": str(mcp.id), "name": mcp.name, "status": "approved"},
-        "approved_skills": 1,
-        "skill_ids": [str(pending.id)],
-    }
-    assert mcp.status is ListingStatus.approved
-    assert pending.status is ListingStatus.approved
-    assert approved.status is ListingStatus.approved
-    assert db.execute.await_count == 3
-    assert db.refresh.await_count == 2  # Reauthorize the skill, then refresh the MCP response.
-    assert decision_boundaries.decide.await_args_list == [
-        call(
-            db,
-            mcp,
-            subject_type="mcp",
-            approved=True,
-            actor_id=actor.id,
-            version="2.0.0",
-            submitter_id=SUBMITTER_ID,
-        ),
-        call(
-            db,
-            pending,
-            subject_type="skill",
-            approved=True,
-            actor_id=actor.id,
-            version="2.0.0",
-            submitter_id=SUBMITTER_ID,
-        ),
-    ]
-    db.commit.assert_awaited_once()
-    db.refresh.assert_any_await(mcp)
+    for ids, selected, code in cases:
+        db.execute.return_value = _result(scalar=selected)
+        with pytest.raises(HTTPException) as refused:
+            await review.approve_mcp_with_skills(str(mcp.id), review.McpBulkApproveRequest(skill_ids=ids), db, actor)
+        assert refused.value.status_code == code
+        assert mcp.status is ListingStatus.pending
+        assert pending.status is ListingStatus.pending
+        assert approved.status is ListingStatus.approved
+        decision_boundaries.decide.assert_not_awaited()
+        db.commit.assert_not_awaited()
 
 
 @pytest.mark.asyncio

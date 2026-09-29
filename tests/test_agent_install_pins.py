@@ -89,13 +89,26 @@ async def _pinned_agent(db, owner, kind: str):
 
 
 async def _install(db, agent, user, **request):
+    harness = request.pop("harness", "claude-code")
+    options = request.pop("options", {"scope": "project"})
+    rollout_enabled = request.pop("rollout_enabled", False)
+    import services.dynamic_settings as settings
+
+    original_setting = settings.get_sync_bool
+
+    def setting(key, default=None):
+        if key == "registry.skill_folder_delivery_enabled":
+            return rollout_enabled
+        return original_setting(key, default)
+
     with (
+        patch("api.routes.agent.install._ds.get_sync_bool", side_effect=setting),
         patch("api.routes.config.derive_endpoints", AsyncMock(return_value={"api": "http://observal.test"})),
         patch("services.download_tracker.record_agent_download", AsyncMock()),
     ):
         return await install_agent(
             str(agent.id),
-            AgentInstallRequest(harness="claude-code", options={"scope": "project"}, **request),
+            AgentInstallRequest(harness=harness, options=options, **request),
             request=None,
             db=db,
             current_user=user,
@@ -124,6 +137,85 @@ async def test_install_uses_the_pinned_release_after_a_newer_one_is_approved(ses
     assert response.lock["digest"].startswith("sha256:")
 
 
+async def test_opted_in_resource_less_direct_agent_still_declares_skill_md(session):
+    owner = await ds.user(session)
+    listing, agent, _ = await _pinned_agent(session, owner, "skill")
+    legacy = await _install(session, agent, owner)
+    assert legacy.skill_bundles == []
+    opted = await _install(session, agent, owner, supported_features=["skill_extra_files_v1"])
+    assert len(opted.skill_bundles) == 1
+    folder = opted.skill_bundles[0]
+    assert folder.listing_id == listing.id
+    assert [file.path for file in folder.files] == ["SKILL.md"]
+    assert folder.digest.startswith("sha256:")  # Stable resource-less v1 pin.
+
+
+@pytest.mark.parametrize("harness", ["claude-code", "pi", "codex", "copilot-cli", "opencode", "antigravity", "goose"])
+@pytest.mark.parametrize("scope", ["project", "user"])
+async def test_agent_bundle_preserves_pinned_tree_for_every_skill_harness(session, harness, scope):
+    owner = await ds.user(session)
+    listing, agent, _ = await _pinned_agent(session, owner, "skill")
+    pinned = (
+        await session.execute(select(SkillVersion).where(SkillVersion.id == listing.latest_version_id))
+    ).scalar_one()
+    pinned.extra_files = [
+        {"path": "templates/a.txt", "content": "first"},
+        {"path": "scripts/run.sh", "content": "echo hi", "executable": True},
+    ]
+    version = (await session.execute(select(AgentVersion))).scalar_one()
+    await lock_agent_version(session, agent, version)
+    await session.commit()
+
+    with pytest.raises(HTTPException, match="skill_extra_files_v1"):
+        await _install(session, agent, owner, harness=harness)
+    with pytest.raises(HTTPException, match="disabled until fleet rollout"):
+        await _install(
+            session,
+            agent,
+            owner,
+            harness=harness,
+            options={"scope": scope},
+            supported_features=["skill_extra_files_v1"],
+        )
+    response = await _install(
+        session,
+        agent,
+        owner,
+        harness=harness,
+        options={"scope": scope},
+        supported_features=["skill_extra_files_v1"],
+        rollout_enabled=True,
+    )
+    assert len(response.skill_bundles) == 1
+    folder = response.skill_bundles[0]
+    assert folder.version_id == pinned.id
+    assert folder.digest == content_digest("skill", pinned)
+    assert folder.skill_file_path.endswith("/SKILL.md")
+    assert {file.path for file in folder.files} == {"SKILL.md", "templates/a.txt", "scripts/run.sh"}
+    assert response.lock["components"][0]["digest"] == folder.digest
+    assert "first" not in json.dumps(response.config_snippet)
+    assert "skill_md_content" not in json.dumps(response.config_snippet)
+    assert all(file["path"] != folder.skill_file_path for file in response.config_snippet.get("skills", []))
+
+
+@pytest.mark.parametrize("harness", ["kiro", "cursor"])
+async def test_bundle_refuses_harness_without_verified_skills_capability(session, harness):
+    owner = await ds.user(session)
+    listing, agent, _ = await _pinned_agent(session, owner, "skill")
+    pinned = (
+        await session.execute(select(SkillVersion).where(SkillVersion.id == listing.latest_version_id))
+    ).scalar_one()
+    pinned.extra_files = [{"path": "templates/a.txt", "content": "first"}]
+    version = (await session.execute(select(AgentVersion))).scalar_one()
+    await lock_agent_version(session, agent, version)
+    await session.commit()
+    with pytest.raises(HTTPException, match="does not support complete skill folders") as refused:
+        await _install(
+            session, agent, owner, harness=harness, supported_features=["skill_extra_files_v1"], rollout_enabled=True
+        )
+    assert refused.value.status_code == 409
+
+
 @pytest.mark.parametrize("resource", ["extra", "empty_script"])
 async def test_pinned_direct_resource_is_refused_before_config_and_download(session, resource):
     owner = await ds.user(session)
@@ -149,7 +241,7 @@ async def test_pinned_direct_resource_is_refused_before_config_and_download(sess
             await _install(session, agent, owner)
         generate.assert_not_called()
     assert refused.value.status_code == 409
-    assert "delivery" in refused.value.detail
+    assert "pinned folder differs from its v2 digest" in refused.value.detail
 
 
 @pytest.mark.parametrize(

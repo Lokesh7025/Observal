@@ -1337,10 +1337,36 @@ async def approve_mcp_with_skills(
     if listing_type != "mcp":
         raise HTTPException(status_code=400, detail="Only MCP listings support bulk skill approve")
     _authorize_item(listing, scope)
-    if any(ver.status == ListingStatus.pending for ver in listing.versions) and (
-        listing.latest_version is None or listing.latest_version.status != ListingStatus.pending
-    ):
+    if listing.latest_version is None or listing.latest_version.status != ListingStatus.pending:
         raise HTTPException(status_code=409, detail="Review the exact pending MCP version separately")
+
+    approved_skill_ids: list[str] = []
+    locked_skills: list[SkillListing] = []
+    # A canonical lock order prevents opposing batches from deadlocking.
+    skill_uuids = set()
+    for sid in req.skill_ids:
+        try:
+            parsed = uuid.UUID(sid)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="Every requested skill ID must be a UUID") from exc
+        if parsed in skill_uuids:
+            raise HTTPException(status_code=400, detail="Duplicate skill ID in approval request")
+        skill_uuids.add(parsed)
+    for skill_uuid in sorted(skill_uuids):
+        skill = (
+            await db.execute(
+                select(SkillListing).options(*_SKILL_REVIEW_LOOKUP_OPTIONS).where(SkillListing.id == skill_uuid)
+            )
+        ).scalar_one_or_none()
+        if not skill:
+            raise HTTPException(status_code=404, detail="Requested skill not found")
+        _authorize_item(skill, scope)
+        if skill.status != ListingStatus.pending:
+            raise HTTPException(status_code=409, detail="Requested skill has no pending version")
+        await _lock_skill_decision(db, skill, current_user)
+        if skill.status != ListingStatus.pending:
+            raise HTTPException(status_code=409, detail="Skill version is no longer pending")
+        locked_skills.append(skill)
 
     listing.status = ListingStatus.approved
     listing.rejection_reason = None
@@ -1353,39 +1379,19 @@ async def approve_mcp_with_skills(
         version=getattr(listing.latest_version, "version", None),
         submitter_id=getattr(listing.latest_version, "released_by", None),
     )
-
-    approved_skill_ids: list[str] = []
-    # A canonical lock order prevents opposing batches from deadlocking.
-    skill_uuids = set()
-    for sid in req.skill_ids:
-        try:
-            skill_uuids.add(uuid.UUID(sid))
-        except ValueError:
-            continue
-    for skill_uuid in sorted(skill_uuids):
-        skill = (
-            await db.execute(
-                select(SkillListing).options(*_SKILL_REVIEW_LOOKUP_OPTIONS).where(SkillListing.id == skill_uuid)
-            )
-        ).scalar_one_or_none()
-        if skill:
-            _authorize_item(skill, scope)
-        if skill and skill.status == ListingStatus.pending:
-            await _lock_skill_decision(db, skill, current_user)
-            if skill.status != ListingStatus.pending:
-                raise HTTPException(status_code=409, detail="Skill version is no longer pending")
-            skill.status = ListingStatus.approved
-            skill.rejection_reason = None
-            await inbox.on_review_decided(
-                db,
-                skill,
-                subject_type="skill",
-                approved=True,
-                actor_id=current_user.id,
-                version=getattr(skill.latest_version, "version", None),
-                submitter_id=getattr(skill.latest_version, "released_by", None),
-            )
-            approved_skill_ids.append(str(skill.id))
+    for skill in locked_skills:
+        skill.status = ListingStatus.approved
+        skill.rejection_reason = None
+        await inbox.on_review_decided(
+            db,
+            skill,
+            subject_type="skill",
+            approved=True,
+            actor_id=current_user.id,
+            version=getattr(skill.latest_version, "version", None),
+            submitter_id=getattr(skill.latest_version, "released_by", None),
+        )
+        approved_skill_ids.append(str(skill.id))
 
     await db.commit()
     await db.refresh(listing)

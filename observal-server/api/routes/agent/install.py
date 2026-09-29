@@ -16,6 +16,7 @@ import services.dynamic_settings as _ds
 from api.deps import (
     apply_publish_scope,
     apply_visibility_filter,
+    check_listing_visibility_async,
     get_db,
     get_effective_agent_permission,
     get_registry_user,
@@ -38,7 +39,8 @@ from schemas.agent import (
 )
 from services.harness import generate_agent_config
 from services.registry_telemetry import emit_registry_event
-from services.skill_bundle import needs_bundle_delivery
+from services.skill_bundle import SKILL_EXTRA_FILES_FEATURE, needs_bundle_delivery, prepare_agent_skill_folders
+from services.skill_validator import SkillValidationError
 
 from ._router import router
 from .helpers import _load_agent, _resolve_component_names
@@ -137,6 +139,15 @@ async def install_agent(
     skill_comp_ids = [c.component_id for c in install_components if c.component_type == "skill"]
     skill_listings_map = {}
     if skill_comp_ids:
+        # Serialize against skill privatization, re-review and decisions. Those
+        # writers take listing FOR UPDATE before touching versions; re-run the
+        # visibility query after the wait, not against a cached ORM instance.
+        await db.execute(
+            select(SkillListing.id)
+            .where(SkillListing.id.in_(skill_comp_ids))
+            .order_by(SkillListing.id)
+            .with_for_update(read=True)
+        )
         skill_stmt = apply_publish_scope(
             apply_visibility_filter(
                 select(SkillListing).where(SkillListing.id.in_(skill_comp_ids)), SkillListing, current_user
@@ -144,8 +155,15 @@ async def install_agent(
             SkillListing,
             component_target_team_id,
         )
-        skill_rows = (await db.execute(skill_stmt)).scalars().all()
-        skill_listings_map = {row.id: row for row in skill_rows}
+        skill_rows = (await db.execute(skill_stmt.execution_options(populate_existing=True))).scalars().all()
+        # EXISTS cannot hold the membership row: deletion can race after the
+        # query returned. A shared grant lock protects pinned bytes until the
+        # installer transaction completes, or observes a finished revocation.
+        skill_listings_map = {
+            row.id: row for row in skill_rows if await check_listing_visibility_async(row, current_user, db)
+        }
+        if set(skill_comp_ids) - skill_listings_map.keys():
+            raise HTTPException(status_code=404, detail="Agent references an unavailable skill")
 
     # Pre-load hook listings for hook config generation
     hook_comp_ids = [c.component_id for c in install_components if c.component_type == "hook"]
@@ -267,10 +285,12 @@ async def install_agent(
         for row in pins.listings["skill"].values()
     ):
         raise HTTPException(status_code=409, detail="Agent skill pin is not approved or requires public review")
-    # The pinned proxy, not the listing's latest release, determines whether a
-    # skill would be delivered incompletely. Refuse before config or downloads.
-    if any(needs_bundle_delivery(row) for row in pins.listings["skill"].values()):
-        raise HTTPException(status_code=409, detail="Skill bundle delivery is not yet supported; install refused")
+    # The pinned proxy, not the listing pointer, selects each complete folder.
+    bundled_skills = any(needs_bundle_delivery(row) for row in pins.listings["skill"].values())
+    if bundled_skills and SKILL_EXTRA_FILES_FEATURE not in req.supported_features:
+        raise HTTPException(status_code=409, detail="Client must support skill_extra_files_v1 to install this agent")
+    if bundled_skills and not _ds.get_sync_bool("registry.skill_folder_delivery_enabled", False):
+        raise HTTPException(status_code=409, detail="Skill folder delivery is disabled until fleet rollout")
     lock_digest = stored_lock_digest(install_version)
     mcp_listings_map = pins.listings["mcp"]
     skill_listings_map = pins.listings["skill"]
@@ -331,6 +351,15 @@ async def install_agent(
         sandbox_listings=sandbox_listings_map,
     )
 
+    try:
+        skill_bundles = (
+            prepare_agent_skill_folders(skill_listings_map, snippet, req.harness, scope=req.options.get("scope"))
+            if SKILL_EXTRA_FILES_FEATURE in req.supported_features
+            else []
+        )
+    except SkillValidationError as exc:
+        raise HTTPException(status_code=409, detail=f"Cannot deliver complete agent skill folders: {exc}") from exc
+
     # Capture agent.id before any DB operations that might expire the ORM
     # instance (e.g. savepoint rollback on duplicate download).
     resolved_agent_id = agent.id
@@ -378,6 +407,7 @@ async def install_agent(
         config_snippet=snippet,
         warnings=warnings,
         lock=lock,
+        skill_bundles=skill_bundles,
     )
 
 

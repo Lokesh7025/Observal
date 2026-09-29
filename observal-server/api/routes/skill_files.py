@@ -9,6 +9,7 @@ from copy import deepcopy
 from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Response
+from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import defaultload
@@ -27,6 +28,7 @@ from models.skill import SkillListing, SkillVersion
 from models.user import User, UserRole
 from schemas.skill import SkillCandidateDraftRequest, SkillUpdateRequest
 from schemas.skill_resources import (
+    SkillDraftRebaseRequest,
     SkillFileContents,
     SkillFileOperations,
     SkillSnapshotReplace,
@@ -44,6 +46,7 @@ from services.skill_bundle import (
     validate_skill_bundle,
 )
 from services.skill_folder_edit import _validate_new_md, apply_file_operations, replace_folder
+from services.skill_rebase import merge_skill_draft
 from services.skill_revisions import skill_content_revision
 from services.skill_validator import SkillValidationError, validate_skill_md_content_frontmatter
 from services.teamspace import can_review, review_scope
@@ -325,6 +328,110 @@ async def create_skill_candidate_draft(
         version_id=draft.id,
         revision=draft.content_revision,
         files=[file.declaration for file in files],
+    )
+
+
+@router.post("/{listing_id}/versions/{version_id}/rebase", response_model=SkillVersionManifest)
+async def rebase_skill_draft(
+    listing_id: str,
+    version_id: uuid.UUID,
+    req: SkillDraftRebaseRequest,
+    response: Response,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_role(UserRole.user)),
+):
+    """Explicitly merge disjoint author changes onto a newly reviewed direct base.
+
+    Never move the listing's approved pointer or rewrite either historical
+    release. Overlap, changed observations and non-new stable release numbers
+    refuse before mutating the draft. A pending draft must first be withdrawn.
+    """
+    listing, draft = await _editable_version(listing_id, version_id, req.observed_revision, db, current_user)
+    if draft.delivery_mode != "registry_direct" or draft.base_version_id is None or draft.base_revision is None:
+        raise HTTPException(status_code=409, detail="Only saved direct release drafts can be rebased")
+    current_id = (
+        await db.execute(select(SkillListing.latest_version_id).where(SkillListing.id == listing.id))
+    ).scalar_one()
+    if current_id != req.current_version_id or current_id == draft.base_version_id:
+        raise HTTPException(status_code=409, detail="Current approved release changed; refresh before rebasing")
+    versions = (
+        (
+            await db.execute(
+                select(SkillVersion)
+                .where(SkillVersion.listing_id == listing.id, SkillVersion.id.in_([draft.base_version_id, current_id]))
+                .order_by(SkillVersion.id)
+                .execution_options(populate_existing=True)
+                .with_for_update()
+            )
+        )
+        .scalars()
+        .all()
+    )
+    by_id = {row.id: row for row in versions}
+    base, current = by_id.get(draft.base_version_id), by_id.get(current_id)
+    if (
+        not base
+        or not current
+        or any(
+            row.status not in INSTALLABLE_STATUSES
+            or row.requires_global_review
+            or row.delivery_mode != "registry_direct"
+            for row in (base, current)
+        )
+    ):
+        raise HTTPException(status_code=409, detail="Approved release is unavailable for rebasing")
+    try:
+        base_revision = skill_content_revision(listing, base)
+        current_revision = skill_content_revision(listing, current)
+        if draft.base_revision != base_revision or (base.content_revision and base.content_revision != base_revision):
+            raise HTTPException(status_code=409, detail="Original approved base changed; manual resolution required")
+        if req.observed_current_revision != current_revision or (
+            current.content_revision and current.content_revision != current_revision
+        ):
+            raise HTTPException(status_code=409, detail="Current approved release changed; refresh before rebasing")
+        proposed = req.new_version or draft.version
+        new_key, current_key = release_key(proposed), release_key(current.version)
+        if new_key is None or current_key is None or new_key <= current_key:
+            raise HTTPException(status_code=409, detail="Choose a new stable release number above the approved base")
+        if (
+            proposed != draft.version
+            and (
+                await db.execute(
+                    select(SkillVersion.id).where(
+                        SkillVersion.listing_id == listing.id, SkillVersion.version == proposed
+                    )
+                )
+            ).scalar_one_or_none()
+        ):
+            raise HTTPException(status_code=409, detail="That release number is already reserved")
+        edit, metadata, conflicts = merge_skill_draft(base, draft, current)
+    except (SkillValidationError, ValidationError, UnicodeError) as exc:
+        raise HTTPException(status_code=409, detail="Saved release cannot be safely rebased") from exc
+    if conflicts["paths"] or conflicts["metadata"]:
+        raise HTTPException(
+            status_code=409, detail={"message": "Resolve overlapping edits in the saved draft", **conflicts}
+        )
+    draft.version = proposed
+    for field, value in metadata.items():
+        setattr(draft, field, value)
+    draft.skill_md_content = edit.skill_md_content
+    draft.extra_files = edit.extra_files
+    draft.script_filename = edit.script_filename
+    draft.script_content = edit.script_content
+    draft.slash_command = validate_skill_md_content_frontmatter(edit.skill_md_content).slash_command
+    draft.base_version_id = current.id
+    draft.base_revision = current_revision
+    release_edit_lock(draft, current_user.id, force=True)
+    await db.flush()
+    draft.content_revision = skill_content_revision(listing, draft)
+    await db.commit()
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    return SkillVersionManifest(
+        listing_id=listing.id,
+        version_id=draft.id,
+        revision=draft.content_revision,
+        files=[file.declaration for file in edit.files],
     )
 
 

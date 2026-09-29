@@ -12,6 +12,7 @@ from __future__ import annotations
 import base64
 import binascii
 import hashlib
+import json
 import re
 import unicodedata
 from dataclasses import dataclass
@@ -19,7 +20,7 @@ from typing import Any, Literal
 
 from pydantic import ValidationError
 
-from schemas.skill_resources import SkillFileDeclaration, SkillResource
+from schemas.skill_resources import SkillFileDeclaration, SkillInstallFile, SkillInstallFolder, SkillResource
 from services.skill_validator import SkillValidationError, validate_skill_md_content_frontmatter
 
 MAX_EXTRA_FILES = 128
@@ -46,6 +47,122 @@ class SkillBundleFile:
             sha256=hashlib.sha256(self.content).hexdigest(),
             mode="0755" if self.executable else "0644",
         )
+
+
+SKILL_EXTRA_FILES_FEATURE = "skill_extra_files_v1"
+MAX_INSTALL_RESPONSE_BYTES = 12 * 1024 * 1024
+
+
+def complete_skill_folder(listing_id: Any, version: Any, *, skill_file_path: str) -> SkillInstallFolder:
+    """Encode the exact stored tree for an opted-in installer, never inferred paths."""
+    from services.agent_lock import content_digest
+
+    files = validate_skill_bundle(
+        delivery_mode=version.delivery_mode,
+        skill_md_content=version.skill_md_content,
+        script_content=version.script_content,
+        script_filename=version.script_filename,
+        extra_files=version.extra_files or [],
+        enforce_limits=False,
+    )
+    if not files:
+        raise SkillValidationError("Direct skill folder has no files")
+    total = sum(len(file.content) for file in files)
+    if total > MAX_BUNDLE_BYTES or len(files) > MAX_EXTRA_FILES + 2:
+        raise SkillValidationError("Stored skill folder exceeds response size limit")
+    try:
+        return SkillInstallFolder(
+            listing_id=listing_id,
+            version_id=version.id,
+            digest=content_digest("skill", version),
+            skill_file_path=skill_file_path,
+            files=[
+                SkillInstallFile(
+                    version_id=version.id,
+                    content=base64.b64encode(file.content).decode("ascii"),
+                    **file.declaration.model_dump(),
+                )
+                for file in sorted(files, key=lambda item: item.path)
+            ],
+        )
+    except ValidationError as exc:
+        raise SkillValidationError("Stored skill folder exceeds manifest limits") from exc
+
+
+def prepare_agent_skill_folders(
+    skill_listings: dict, snippet: dict, harness: str, *, scope: str | None = None
+) -> list[SkillInstallFolder]:
+    """Preflight each emitted harness destination; remove incomplete duplicate file copies.
+
+    The declared folder remains authoritative. In particular Copilot synthesizes
+    its own SKILL.md in `skills`; it must not overwrite the persisted version.
+    This runs before recording an agent download.
+    """
+    from observal_shared.harness_registry import HARNESS_REGISTRY
+    from services.harness.helpers import _local_registry_names
+    from services.shared.utils import sanitize_name
+
+    bundled = {key: row for key, row in skill_listings.items() if row.delivery_mode == "registry_direct"}
+    if not bundled:
+        return []
+    spec = HARNESS_REGISTRY.get(harness.replace("_", "-"), {})
+    if "skills" not in spec.get("capabilities", set()):
+        raise SkillValidationError("Harness does not support complete skill folders")
+    scope = scope or snippet.get("scope") or spec.get("default_scope", "project")
+    paths = spec.get("skills", {})
+    if scope not in paths:
+        raise SkillValidationError("Harness has no skill destination for this scope")
+    components = snippet.get("skill_components", [])
+    emitted = snippet.get("skills", [])
+    if (
+        not isinstance(components, list)
+        or not isinstance(emitted, list)
+        or any(not isinstance(entry, dict) for entry in (*components, *emitted))
+    ):
+        raise SkillValidationError("Harness emitted invalid skill config")
+    local_names = {key: sanitize_name(value) for key, value in _local_registry_names(skill_listings).items()}
+    if len({name.casefold() for name in local_names.values()}) != len(local_names):
+        raise SkillValidationError("Skill aliases collide at the harness destination")
+    folders = []
+    chosen_paths: set[str] = set()
+    duplicates: set[str] = set()
+    for listing_id, proxy in bundled.items():
+        name = local_names[listing_id]
+        matches = [component for component in components if component.get("name") == name]
+        expected = paths[scope].format(name=name)
+        destination = matches[0].get("path", expected) if matches else expected
+        if not isinstance(destination, str) or not destination.endswith("/SKILL.md"):
+            raise SkillValidationError("Harness has no usable skill folder destination")
+        identity = destination.casefold()
+        if identity in chosen_paths or len(matches) > 1:
+            raise SkillValidationError("Two skill components share the same destination")
+        chosen_paths.add(identity)
+        file_matches = [file for file in emitted if file.get("path") == destination]
+        if not matches and len(file_matches) != 1:
+            raise SkillValidationError("Harness omitted this direct skill")
+        if len(file_matches) > 1:
+            raise SkillValidationError("Harness emitted duplicate SKILL.md entries")
+        folder = complete_skill_folder(listing_id, proxy.pinned_version, skill_file_path=destination)
+        folders.append(folder)
+        duplicates.add(destination)
+    # Do not mutate the config until every component and file has passed.
+    if (
+        len(json.dumps(snippet, default=str).encode("utf-8"))
+        + sum(len(file.content) for folder in folders for file in folder.files)
+        > MAX_INSTALL_RESPONSE_BYTES
+    ):
+        raise SkillValidationError("Agent skill folders exceed aggregate response limit")
+    bundled_names = {local_names[id_] for id_ in bundled}
+    version_by_name = {local_names[folder.listing_id]: folder.version_id for folder in folders}
+    for component in components:
+        if component.get("name") in bundled_names:
+            for field in ("skill_md_content", "script_content", "script_filename"):
+                component.pop(field, None)
+            component["bundle_version_id"] = str(version_by_name[component["name"]])
+    snippet["skills"] = [file for file in emitted if file.get("path") not in duplicates]
+    if not snippet["skills"]:
+        snippet.pop("skills", None)
+    return folders
 
 
 def needs_bundle_delivery(version: Any) -> bool:
@@ -145,9 +262,12 @@ def validate_skill_bundle(
     except UnicodeError as exc:
         raise SkillValidationError("SKILL.md is not valid UTF-8") from exc
     resources = extra_files
-    if enforce_limits and len(resources) > MAX_EXTRA_FILES:
+    if len(resources) > MAX_EXTRA_FILES:
         raise SkillValidationError("Too many extra_files")
+    if len(md) > MAX_BUNDLE_BYTES:
+        raise SkillValidationError("Skill bundle exceeds decoded size limit")
     files = [SkillBundleFile("SKILL.md", md)]
+    decoded_total = len(md)
     if script_filename is not None:
         if not isinstance(script_filename, str):
             raise SkillValidationError("Invalid script filename")
@@ -159,6 +279,9 @@ def validate_skill_bundle(
         except (UnicodeError, AttributeError) as exc:
             raise SkillValidationError("Invalid legacy script content") from exc
         # Legacy CLI treats recognized script suffixes as executable.
+        decoded_total += len(content)
+        if decoded_total > MAX_BUNDLE_BYTES:
+            raise SkillValidationError("Skill bundle exceeds decoded size limit")
         files.append(
             SkillBundleFile(
                 "scripts/" + script_filename, content, script_filename.endswith((".sh", ".bash", ".py", ".rb"))
@@ -173,6 +296,9 @@ def validate_skill_bundle(
         content = _decode(resource)
         if enforce_limits and len(content) > MAX_FILE_BYTES:
             raise SkillValidationError("Resource exceeds per-file limit")
+        decoded_total += len(content)
+        if decoded_total > MAX_BUNDLE_BYTES:
+            raise SkillValidationError("Skill bundle exceeds decoded size limit")
         files.append(SkillBundleFile(resource.path, content, resource.executable))
     seen: set[str] = set()
     for file in files:

@@ -305,12 +305,20 @@ class SkillVersion(Base):
     # Saved drafts inherit only from an approved base. Existing versions stay
     # NULL until their first explicit revision-bearing write or review.
     base_version_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("skill_versions.id", ondelete="SET NULL"), nullable=True
+        UUID(as_uuid=True),
+        ForeignKey("skill_versions.id", name="fk_skill_versions_base_version_id", ondelete="SET NULL"),
+        nullable=True,
     )
     base_revision: Mapped[str | None] = mapped_column(String(64), nullable=True)
     content_revision: Mapped[str | None] = mapped_column(String(64), nullable=True)
     review_epoch: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
     requires_global_review: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
     pre_public_status: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    pre_public_reviewed_by: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", name="fk_skill_versions_pre_public_reviewed_by", ondelete="SET NULL"),
+        nullable=True,
+    )
+    pre_public_reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     listing: Mapped[SkillListing] = relationship(back_populates="versions", foreign_keys=[listing_id])

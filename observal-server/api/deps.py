@@ -572,10 +572,12 @@ async def check_listing_visibility_async(listing, current_user, db: AsyncSession
         return creator_id == current_user.id
     return (
         await db.scalar(
-            select(TeamMembership.id).where(
+            select(TeamMembership.id)
+            .where(
                 TeamMembership.team_id == team_id,
                 TeamMembership.user_id == current_user.id,
             )
+            .with_for_update(read=True)
         )
         is not None
     )

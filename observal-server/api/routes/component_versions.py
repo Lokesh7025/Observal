@@ -26,6 +26,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession  # noqa: TC002
 from sqlalchemy.orm import defaultload, defer
 
+import services.dynamic_settings as _ds
 from api.deps import (
     check_listing_visibility_async,
     get_db,
@@ -49,6 +50,7 @@ from services.skill_bundle import needs_bundle_delivery, validate_skill_bundle
 from services.skill_revisions import skill_content_revision
 from services.skill_validator import SkillValidationError
 from services.teamspace import can_review, review_scope
+from services.versioning import parse_semver
 
 # Semver pattern: X.Y.Z or X.Y.Z-prerelease
 SEMVER_RE = re.compile(r"^\d+\.\d+\.\d+(-[a-zA-Z0-9.]+)?$")
@@ -76,6 +78,8 @@ _VERSION_MANAGED_FIELDS = {
     "review_epoch",
     "requires_global_review",
     "pre_public_status",
+    "pre_public_reviewed_by",
+    "pre_public_reviewed_at",
 }
 
 
@@ -484,10 +488,13 @@ async def _review_version(
     if component_type == "skill":
         if is_actively_editing(ver):
             raise HTTPException(status_code=409, detail="Cannot review: the owner is editing this skill version")
-        if ver.requires_global_review:
-            raise HTTPException(status_code=409, detail="Global skill re-review is not yet available")
+        if ver.requires_global_review and (selected_id is None or req.observed_revision is None):
+            raise HTTPException(status_code=409, detail="Review the marked skill UUID with its observed revision")
         if needs_bundle_delivery(ver):
-            raise HTTPException(status_code=409, detail="Resource-bearing skill versions cannot yet be reviewed")
+            if selected_id is None or req.observed_revision is None:
+                raise HTTPException(status_code=409, detail="Review the bundled skill UUID with its observed revision")
+            if not _ds.get_sync_bool("registry.skill_folder_delivery_enabled", False):
+                raise HTTPException(status_code=409, detail="Skill folder review is disabled until fleet rollout")
         if (ver.base_version_id is not None or ver.content_revision is not None or (ver.review_epoch or 0) > 0) and (
             req.observed_revision is None
         ):
@@ -503,7 +510,9 @@ async def _review_version(
                 raise HTTPException(status_code=409, detail="Skill version changed; refresh before review")
 
     promote_skill = None
-    if req.action == "approve" and component_type == "skill":
+    marked = component_type == "skill" and ver.requires_global_review
+    re_review = marked and ver.pre_public_status is not None
+    if req.action == "approve" and component_type == "skill" and not re_review:
         if ver.base_version_id is not None:
             if latest_id != ver.base_version_id:
                 raise HTTPException(status_code=409, detail="Approved base changed; rebase this draft before review")
@@ -528,10 +537,49 @@ async def _review_version(
         if not promote_skill and ("-" not in ver.version or not SEMVER_RE.fullmatch(ver.version)):
             raise HTTPException(status_code=409, detail="Newer approved skill release exists; refresh before review")
     if req.action == "approve":
-        ver.status = ListingStatus.approved
+        ver.status = (
+            ListingStatus(ver.pre_public_status)
+            if re_review and ver.pre_public_status is not None
+            else ListingStatus.approved
+        )
         ver.rejection_reason = None
+        if re_review:
+            ver.requires_global_review = False
+            ver.pre_public_status = None
+            ver.pre_public_reviewed_by = None
+            ver.pre_public_reviewed_at = None
+            await db.flush()
+            # Historical re-review is not a new-release approval: older rows
+            # can clear out of order. Repair a still-pending pointer to the
+            # highest cleared stable release, without demoting a newer one.
+            cleared = (
+                await db.execute(
+                    select(SkillVersion.id, SkillVersion.version, SkillVersion.status).where(
+                        SkillVersion.listing_id == listing.id,
+                        SkillVersion.status.in_(INSTALLABLE_STATUSES),
+                        SkillVersion.requires_global_review.is_(False),
+                    )
+                )
+            ).all()
+            current = next((row for row in cleared if row.id == latest_id), None)
+            approved = [row for row in cleared if row.status == ListingStatus.approved]
+            stable = [(row, parse_semver(row.version)) for row in (approved or cleared)]
+            stable = [(row, number) for row, number in stable if number is not None]
+            if current is not None and current.status == ListingStatus.archived:
+                pass  # Preserve an intentionally archived pointer.
+            elif stable:
+                best, best_number = max(stable, key=lambda pair: (pair[1], str(pair[0].id)))
+                current_number = parse_semver(current.version) if current is not None else None
+                if current is None or (current_number is not None and best_number > current_number):
+                    listing.latest_version_id = best.id
+            elif current is None and len(cleared) == 1:
+                listing.latest_version_id = cleared[0].id
+            elif current is None:
+                raise HTTPException(status_code=409, detail="Cannot select a default from historical skill versions")
         # Only update latest if this version is newer than current latest
-        if component_type == "skill":
+        elif component_type == "skill":
+            if marked:
+                ver.requires_global_review = False
             if promote_skill:
                 listing.latest_version_id = ver.id
         else:

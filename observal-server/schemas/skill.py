@@ -8,7 +8,7 @@
 import uuid
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_serializer, model_validator
 
 from models.mcp import ListingStatus
 from schemas.constants import (
@@ -19,7 +19,7 @@ from schemas.constants import (
     make_option_validator,
 )
 from schemas.skill_commands import normalize_slash_command
-from schemas.skill_resources import SkillFolderSnapshot, SkillResource, SkillRevision
+from schemas.skill_resources import SkillFolderSnapshot, SkillInstallFolder, SkillResource, SkillRevision
 
 
 class SkillSubmitRequest(BaseModel):
@@ -220,3 +220,11 @@ class SkillInstallResponse(BaseModel):
     version: str | None = None
     version_id: uuid.UUID | None = None
     digest: str | None = None
+    bundle: SkillInstallFolder | None = None
+
+    @model_serializer(mode="wrap")
+    def serialize(self, handler):
+        result = handler(self)
+        if self.bundle is None:
+            result.pop("bundle", None)  # Legacy resource-less response stays unchanged.
+        return result

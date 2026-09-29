@@ -293,6 +293,36 @@ async def test_redelivery_reopens_a_resolved_item(sessions):
 
 
 @pytest.mark.asyncio
+async def test_reopened_review_updates_visibility_and_namespace_snapshot(sessions):
+    async with sessions() as db:
+        reviewer = await _user(db, role=UserRole.reviewer)
+        team_id = uuid.uuid4()
+        subject = _subject(is_private=True, team_id=team_id, namespace="old-team", slug="draft")
+        initial = await delivery.deliver_one(db, kind=InboxKind.review_requested, user_id=reviewer.id, subject=subject)
+        delivery.resolve(db, initial, state=InboxState.done, actor_id=reviewer.id)
+        await db.commit()
+
+        published = _subject(
+            type=subject.type,
+            id=subject.id,
+            name=subject.name,
+            version=subject.version,
+            is_private=False,
+            team_id=None,
+            namespace="new-owner",
+            slug="draft",
+        )
+        again = await delivery.deliver_one(db, kind=InboxKind.review_requested, user_id=reviewer.id, subject=published)
+        await db.commit()
+
+        assert again.id == initial.id
+        assert again.state == InboxState.open
+        assert again.is_private_subject is False
+        assert again.team_id is None
+        assert again.subject_namespace == "new-owner"
+
+
+@pytest.mark.asyncio
 async def test_dismissed_update_notice_stays_dismissed_on_redelivery(sessions):
     """``observal outdated`` re-reports the same fact on every run.
 

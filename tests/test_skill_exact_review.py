@@ -65,11 +65,7 @@ async def test_queue_and_detail_bind_two_pending_skill_versions_by_uuid(monkeypa
                 lambda: review.approve(str(listing_id), db, reviewer),
                 lambda: review.reject(str(listing_id), ReviewActionRequest(reason="not ready"), db, reviewer),
                 lambda: review.decide_skill_version(
-                    str(listing_id),
-                    second_id,
-                    VersionReviewRequest(action="reject", observed_revision=detail["revision"]),
-                    db,
-                    reviewer,
+                    str(listing_id), second_id, VersionReviewRequest(action="reject"), db, reviewer
                 ),
             ):
                 with pytest.raises(HTTPException) as error:
@@ -81,6 +77,15 @@ async def test_queue_and_detail_bind_two_pending_skill_versions_by_uuid(monkeypa
             )
             assert reviewed["version"] == "1.3.0"
             assert reviewed["new_status"] == "approved"
+            monkeypatch.setattr("api.routes.component_versions._ds.get_sync_bool", lambda key, default=False: True)
+            rejected = await review.decide_skill_version(
+                str(listing_id),
+                second_id,
+                VersionReviewRequest(action="reject", reason="not ready", observed_revision=detail["revision"]),
+                db,
+                reviewer,
+            )
+            assert rejected["new_status"] == "rejected"
 
         async with maker() as db:
             statuses = (
@@ -89,7 +94,7 @@ async def test_queue_and_detail_bind_two_pending_skill_versions_by_uuid(monkeypa
                 )
             ).all()
             assert dict(statuses)[first_id] == ListingStatus.approved
-            assert dict(statuses)[second_id] == ListingStatus.pending
+            assert dict(statuses)[second_id] == ListingStatus.rejected
     finally:
         await engine.dispose()
 
@@ -145,6 +150,56 @@ async def test_new_direct_resource_less_submission_requires_reviewer_observation
                 reviewer,
             )
             assert approved["new_status"] == "approved"
+    finally:
+        await engine.dispose()
+
+
+async def test_exact_resource_folder_approval_requires_reviewed_bytes(monkeypatch):
+    engine = ds.make_engine()
+    maker = await ds.create_schema(engine)
+    try:
+        async with maker() as db:
+            author = await ds.user(db)
+            reviewer = await ds.user(db, role=UserRole.reviewer)
+            listing = await ds.skill(db, author, status=ListingStatus.pending, version="1.0.0")
+            row = await db.get(SkillVersion, listing.latest_version_id)
+            row.extra_files = [{"path": "scripts/run.sh", "content": "echo one", "executable": True}]
+            await db.commit()
+            listing_id, version_id = listing.id, row.id
+        monkeypatch.setattr("api.routes.component_versions.inbox.on_review_decided", AsyncMock())
+        async with maker() as db:
+            detail = await review.get_skill_version_review(str(listing_id), version_id, Response(), db, reviewer)
+            assert {entry["path"] for entry in detail["files"]} == {"SKILL.md", "scripts/run.sh"}
+            with pytest.raises(HTTPException) as versionless:
+                await review.approve(str(listing_id), db, reviewer)
+            assert versionless.value.status_code == 409
+            with pytest.raises(HTTPException) as stale:
+                await review.decide_skill_version(
+                    str(listing_id),
+                    version_id,
+                    VersionReviewRequest(action="approve", observed_revision="0" * 64),
+                    db,
+                    reviewer,
+                )
+            assert stale.value.status_code == 409
+            with pytest.raises(HTTPException, match="disabled until fleet rollout"):
+                await review.decide_skill_version(
+                    str(listing_id),
+                    version_id,
+                    VersionReviewRequest(action="approve", observed_revision=detail["revision"]),
+                    db,
+                    reviewer,
+                )
+            monkeypatch.setattr("api.routes.component_versions._ds.get_sync_bool", lambda key, default=False: True)
+            approved = await review.decide_skill_version(
+                str(listing_id),
+                version_id,
+                VersionReviewRequest(action="approve", observed_revision=detail["revision"]),
+                db,
+                reviewer,
+            )
+            assert approved["new_status"] == "approved"
+            assert (await db.get(SkillVersion, version_id)).status == ListingStatus.approved
     finally:
         await engine.dispose()
 
@@ -437,6 +492,94 @@ async def test_public_re_review_marker_is_hidden_from_team_reviewers_and_never_c
             assert await review._query_pending_components(db, global_scope, "skill") == []
             row = await db.get(SkillVersion, version_id)
             assert row.status == ListingStatus.pending and row.requires_global_review
+    finally:
+        await engine.dispose()
+
+
+async def test_historical_global_re_review_clears_older_archived_out_of_order(monkeypatch):
+    engine = ds.make_engine()
+    maker = await ds.create_schema(engine)
+    try:
+        async with maker() as db:
+            author = await ds.user(db)
+            global_reviewer = await ds.user(db, role=UserRole.reviewer)
+            team = await ds.team_with_member(db, author)
+            team.is_private = False
+            listing = await ds.skill(db, author, status=ListingStatus.pending, team_id=team.id, version="2.0.0")
+            newer = (await db.execute(select(SkillVersion).where(SkillVersion.listing_id == listing.id))).scalar_one()
+            newer.requires_global_review = True
+            newer.pre_public_status = "approved"
+            older = await ds.add_skill_version(
+                db, listing, author, version="1.0.0", status=ListingStatus.pending, set_latest=False
+            )
+            older.requires_global_review = True
+            older.pre_public_status = "archived"
+            await db.commit()
+            listing_id, older_id, newer_id = listing.id, older.id, newer.id
+
+        monkeypatch.setattr("api.routes.component_versions.inbox.on_review_decided", AsyncMock())
+        async with maker() as db:
+            detail = await review.get_skill_version_review(str(listing_id), older_id, Response(), db, global_reviewer)
+            with pytest.raises(HTTPException) as missing:
+                await review.decide_skill_version(
+                    str(listing_id), older_id, VersionReviewRequest(action="approve"), db, global_reviewer
+                )
+            assert missing.value.status_code == 409
+            with pytest.raises(HTTPException) as stale:
+                await review.decide_skill_version(
+                    str(listing_id),
+                    older_id,
+                    VersionReviewRequest(action="approve", observed_revision="0" * 64),
+                    db,
+                    global_reviewer,
+                )
+            assert stale.value.status_code == 409
+            decision = await review.decide_skill_version(
+                str(listing_id),
+                older_id,
+                VersionReviewRequest(action="approve", observed_revision=detail["revision"]),
+                db,
+                global_reviewer,
+            )
+            assert decision["new_status"] == "archived"
+            older = await db.get(SkillVersion, older_id)
+            listing = await db.get(SkillListing, listing_id)
+            assert not older.requires_global_review and older.pre_public_status is None
+            assert older.reviewed_by == global_reviewer.id
+            assert listing.latest_version_id == older_id
+            assert (await db.get(SkillVersion, newer_id)).requires_global_review
+    finally:
+        await engine.dispose()
+
+
+async def test_re_review_of_older_release_does_not_demote_cleared_newer_pointer(monkeypatch):
+    engine = ds.make_engine()
+    maker = await ds.create_schema(engine)
+    try:
+        async with maker() as db:
+            owner = await ds.user(db)
+            reviewer = await ds.user(db, role=UserRole.reviewer)
+            listing = await ds.skill(db, owner, version="2.0.0")
+            newer_id = listing.latest_version_id
+            older = await ds.add_skill_version(
+                db, listing, owner, version="1.0.0", status=ListingStatus.pending, set_latest=False
+            )
+            older.requires_global_review = True
+            older.pre_public_status = "approved"
+            await db.commit()
+            listing_id, older_id = listing.id, older.id
+        monkeypatch.setattr("api.routes.component_versions.inbox.on_review_decided", AsyncMock())
+        async with maker() as db:
+            detail = await review.get_skill_version_review(str(listing_id), older_id, Response(), db, reviewer)
+            await review.decide_skill_version(
+                str(listing_id),
+                older_id,
+                VersionReviewRequest(action="approve", observed_revision=detail["revision"]),
+                db,
+                reviewer,
+            )
+            assert (await db.get(SkillListing, listing_id)).latest_version_id == newer_id
+            assert (await db.get(SkillVersion, older_id)).status == ListingStatus.approved
     finally:
         await engine.dispose()
 

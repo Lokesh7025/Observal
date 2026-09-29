@@ -522,8 +522,36 @@ async def install_skill(
 
     if installed.requires_global_review:
         raise HTTPException(status_code=409, detail="Selected skill version requires global review before installation")
-    if needs_bundle_delivery(installed):
-        raise HTTPException(status_code=409, detail="Skill bundle delivery is not yet supported; install refused")
+    bundle = None
+    bundled = installed.delivery_mode == "registry_direct" and (
+        needs_bundle_delivery(installed) or "skill_extra_files_v1" in req.supported_features
+    )
+    if bundled:
+        from observal_shared.harness_registry import HARNESS_REGISTRY
+        from services.skill_bundle import SKILL_EXTRA_FILES_FEATURE, complete_skill_folder
+
+        if SKILL_EXTRA_FILES_FEATURE not in req.supported_features:
+            raise HTTPException(
+                status_code=409, detail="Client must support skill_extra_files_v1 to install this skill version"
+            )
+        if "skills" not in HARNESS_REGISTRY.get(req.harness.replace("_", "-"), {}).get("capabilities", set()):
+            raise HTTPException(status_code=409, detail="Harness does not support complete skill folders")
+        if needs_bundle_delivery(installed):
+            import services.dynamic_settings as _ds
+
+            if not _ds.get_sync_bool("registry.skill_folder_delivery_enabled", False):
+                raise HTTPException(status_code=409, detail="Skill folder delivery is disabled until fleet rollout")
+        try:
+            validate_skill_bundle(
+                delivery_mode=installed.delivery_mode,
+                skill_md_content=installed.skill_md_content,
+                script_content=installed.script_content,
+                script_filename=installed.script_filename,
+                extra_files=installed.extra_files or [],
+                enforce_limits=False,
+            )
+        except SkillValidationError as exc:
+            raise HTTPException(status_code=409, detail="Selected skill folder is invalid") from exc
 
     from api.routes.config import derive_endpoints
     from services.skill_config_generator import generate_skill_config
@@ -537,6 +565,21 @@ async def install_skill(
         version_override=installed,
         local_name=req.local_name,
     )
+    if bundled:
+        path = config.get("skills", {}).get("path")
+        if not isinstance(path, str) or not path.endswith("/SKILL.md"):
+            raise HTTPException(status_code=409, detail="Harness has no usable skill folder destination")
+        try:
+            bundle = complete_skill_folder(listing.id, installed, skill_file_path=path)
+        except SkillValidationError as exc:
+            raise HTTPException(status_code=409, detail="Selected skill folder is invalid or too large") from exc
+        # Only the verified folder payload contains installable bytes. A second
+        # SKILL.md/script copy in the legacy snippet would let old clients write
+        # a partial tree or overwrite the declared one.
+        config.pop("skills", None)
+        for key in ("skill_md_content", "script_content", "script_filename"):
+            config["skill"].pop(key, None)
+        config["skill"]["bundle_version_id"] = str(installed.id)
     # Prepare and validate the entire response before recording usage: digest
     # errors and response-shape failures must not count as successful installs.
     response = SkillInstallResponse(
@@ -547,6 +590,7 @@ async def install_skill(
         version=installed.version,
         version_id=getattr(installed, "id", None),
         digest=content_digest("skill", installed),
+        bundle=bundle,
     )
     if current_user is not None:
         db.add(SkillDownload(listing_id=listing.id, user_id=current_user.id, harness=req.harness))

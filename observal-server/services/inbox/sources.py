@@ -62,6 +62,7 @@ async def on_review_requested(
     subject_type: str,
     actor_id: uuid.UUID | None,
     version: str | None = None,
+    global_only: bool = False,
 ) -> int:
     """Something entered the review queue: tell everyone who can clear it.
 
@@ -69,7 +70,7 @@ async def on_review_requested(
     auto-approves has nothing waiting on a reviewer.
     """
     subject = subject_from_entity(entity, subject_type, version=version)
-    users = await recipients.reviewers_for(db, entity)
+    users = await (recipients.global_reviewers(db) if global_only else recipients.reviewers_for(db, entity))
     items = await deliver(
         db,
         kind=InboxKind.review_requested,
