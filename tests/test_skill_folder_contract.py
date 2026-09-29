@@ -65,6 +65,12 @@ def test_full_tree_and_request_examples_bind_to_same_version():
     )
     assert len(SkillFileOperations.model_validate(FIXTURE["author_patch"]["body"]).operations) == 3
     assert VersionReviewRequest.model_validate(FIXTURE["review"]["body"]).observed_revision == manifest.revision
+    assert FIXTURE["review"]["path"] == (
+        f"/api/v1/review/skills/{FIXTURE['listing_id']}/versions/{FIXTURE['draft_version_id']}/decision"
+    )
+    assert FIXTURE["author_withdraw"]["path"] == (
+        f"/api/v1/skills/{FIXTURE['listing_id']}/versions/{FIXTURE['draft_version_id']}/withdraw"
+    )
     assert SkillInstallRequest.model_validate(FIXTURE["standalone_request"]).supported_features == [
         "skill_extra_files_v1"
     ]

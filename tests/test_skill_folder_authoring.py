@@ -19,6 +19,7 @@ from models.skill import SkillListing, SkillVersion
 from models.team import TeamMembership, TeamRole
 from models.user import User, UserRole
 from schemas.skill import SkillFolderDraftRequest, SkillUpdateRequest
+from schemas.skill_resources import SkillVersionRevisionRequest
 from services.skill_revisions import skill_content_revision
 from tests import discovery_support as ds
 
@@ -245,10 +246,19 @@ async def test_submission_recomputes_revision_after_slash_command_normalization(
                 db,
                 owner,
             )
-        monkeypatch.setattr(skill.inbox, "on_publish", AsyncMock())
+        monkeypatch.setattr(skill_files.inbox, "on_review_requested", AsyncMock())
         async with maker() as db:
             owner = await db.get(User, owner.id)
-            await skill.submit_skill_draft(str(manifest.listing_id), db, owner)
+            version = await db.get(SkillVersion, manifest.version_id)
+            submitted = await skill_files.submit_skill_version_draft(
+                str(manifest.listing_id),
+                manifest.version_id,
+                SkillVersionRevisionRequest(observed_revision=version.content_revision),
+                Response(),
+                db,
+                owner,
+            )
+            assert submitted.revision == version.content_revision
         async with maker() as db:
             owner = await db.get(User, owner.id)
             current = await skill_files.get_skill_manifest(

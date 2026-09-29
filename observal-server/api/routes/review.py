@@ -12,7 +12,7 @@ import enum
 import uuid
 from datetime import UTC, datetime
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from loguru import logger as optic
 from pydantic import BaseModel
 from sqlalchemy import String, cast, or_, select, update
@@ -21,6 +21,9 @@ from sqlalchemy.orm import defaultload, defer
 
 from api.deps import get_current_user, get_db, resolve_prefix_id
 from api.routes._skill_lock import lock_skill_version, should_promote_skill_version
+from api.routes.component_versions import SEMVER_RE as SKILL_SEMVER_RE
+from api.routes.component_versions import _review_version
+from api.routes.skill_files import _authorized_files, _authorized_version
 from api.sanitize import escape_like
 from models.agent import Agent, AgentStatus, AgentVersion
 from models.component_bundle import ComponentBundle
@@ -30,6 +33,7 @@ from models.prompt import PromptListing, PromptVersion
 from models.sandbox import SandboxListing, SandboxVersion
 from models.skill import SkillListing, SkillVersion
 from models.user import User
+from schemas.component_version import VersionReviewRequest
 from schemas.mcp import ReviewActionRequest
 from services.cache import invalidate_namespace
 from services.editing_lock import is_actively_editing
@@ -37,6 +41,8 @@ from services.inbox import sources as inbox
 from services.redis import publish as redis_publish
 from services.security_events import EventType, SecurityEvent, Severity, emit_security_event
 from services.skill_bundle import needs_bundle_delivery
+from services.skill_revisions import skill_content_revision
+from services.skill_validator import SkillValidationError
 from services.teamspace import ReviewScope, can_review, review_scope
 
 router = APIRouter(prefix="/api/v1/review", tags=["review"])
@@ -186,7 +192,9 @@ async def _find_listing(listing_id: str, db: AsyncSession):
     return None, None
 
 
-async def _check_agent_components_ready(components, db: AsyncSession) -> tuple[bool, list[dict]]:
+async def _check_agent_components_ready(
+    components, db: AsyncSession, *, require_public_skills: bool = False
+) -> tuple[bool, list[dict]]:
     """Check that the component version each pin names is approved.
 
     An agent version is approved together with the exact component releases it
@@ -198,6 +206,31 @@ async def _check_agent_components_ready(components, db: AsyncSession) -> tuple[b
     from services.agent_lock import pinned_component_blockers
 
     blocking = await pinned_component_blockers(db, components)
+    if require_public_skills:
+        # Serialize public-agent review with skill privatization. Both acquire
+        # skill listing locks before trusting visibility or committing approval.
+        skill_ids = sorted({c.component_id for c in components if c.component_type == "skill"})
+        if skill_ids:
+            rows = (
+                await db.execute(
+                    select(SkillListing.id, SkillListing.is_private)
+                    .where(SkillListing.id.in_(skill_ids))
+                    .order_by(SkillListing.id)
+                    .with_for_update(read=True)
+                )
+            ).all()
+            visibility = dict(rows)
+            for component in components:
+                if component.component_type == "skill" and visibility.get(component.component_id, True):
+                    blocking.append(
+                        {
+                            "component_type": "skill",
+                            "component_id": str(component.component_id),
+                            "name": component.component_name,
+                            "version": component.resolved_version,
+                            "status": "not_public",
+                        }
+                    )
     return len(blocking) == 0, blocking
 
 
@@ -296,19 +329,24 @@ async def _query_pending_components(
         if not pending_versions:
             continue
 
-        # Group by listing_id, take newest pending version per listing
-        seen_listings: dict[uuid.UUID, object] = {}
+        # Skill review targets are version UUIDs, even when several candidates
+        # share one listing. Other component queues retain their legacy grouping.
+        pending_targets = []
+        seen_listings: set[uuid.UUID] = set()
         for pv in pending_versions:
-            if pv.listing_id not in seen_listings and not is_actively_editing(pv):
-                seen_listings[pv.listing_id] = pv
+            if is_actively_editing(pv):
+                continue
+            if listing_type == "skill" or pv.listing_id not in seen_listings:
+                pending_targets.append(pv)
+                seen_listings.add(pv.listing_id)
 
-        if not seen_listings:
+        if not pending_targets:
             continue
 
         # Load the listings. A listing this caller may not review is dropped here,
         # before anything about it reaches the response: a global reviewer who is
         # not in the team must not even learn a team-private item's name.
-        listing_stmt = select(model).where(model.id.in_(list(seen_listings.keys())))
+        listing_stmt = select(model).where(model.id.in_(seen_listings))
         if listing_type == "skill":
             listing_stmt = listing_stmt.options(
                 defaultload(SkillListing.latest_version)
@@ -323,9 +361,13 @@ async def _query_pending_components(
         listings_result = await db.execute(listing_stmt)
         listings_map = {r.id: r for r in listings_result.scalars().all() if _in_scope(r, scope, team_id)}
 
-        for listing_id, pv in seen_listings.items():
-            r = listings_map.get(listing_id)
-            if not r:
+        for pv in pending_targets:
+            r = listings_map.get(pv.listing_id)
+            if not r or (
+                listing_type == "skill"
+                and pv.requires_global_review
+                and (not scope.is_global_reviewer or (r.is_private and not scope.is_admin))
+            ):
                 continue
             user_ids.add(r.submitted_by)
             item: dict = {
@@ -342,6 +384,9 @@ async def _query_pending_components(
                 else r.created_at.isoformat(),
                 "bundle_id": str(r.bundle_id) if isinstance(getattr(r, "bundle_id", None), uuid.UUID) else None,
             }
+            if listing_type == "skill":
+                item["version_id"] = str(pv.id)
+                item["review_key"] = f"skill:{pv.id}"
             # Include validation results for MCP listings
             if listing_type == "mcp" and hasattr(r, "validation_results"):
                 item["mcp_validated"] = getattr(r, "mcp_validated", False)
@@ -517,16 +562,16 @@ def _safe_serialize(val: object) -> object:
     return val
 
 
-def _serialize_listing_detail(listing_type: str, listing) -> dict:
+def _serialize_listing_detail(listing_type: str, listing, *, selected=None) -> dict:
     # Find the pending version if one exists (for reviews, we want pending content)
     optic.trace("listing_type={}, listing={}", listing_type, listing)
-    pending_ver = None
-    if hasattr(listing, "versions"):
+    pending_ver = selected
+    if pending_ver is None and hasattr(listing, "versions"):
         pending_ver = next(
             (v for v in listing.versions if v.status == ListingStatus.pending),
             None,
         )
-    # Use the pending version for field resolution; fall back to listing properties
+    # Use the reviewed version rather than fields from a different approved row.
     source = pending_ver if pending_ver else listing
 
     base = {
@@ -543,7 +588,7 @@ def _serialize_listing_detail(listing_type: str, listing) -> dict:
     }
     for field in _DETAIL_FIELDS.get(listing_type, []):
         val = getattr(source, field, None)
-        if val is None:
+        if val is None and (listing_type != "skill" or source is listing or field == "bundle_id"):
             val = getattr(listing, field, None)
         base[field] = _safe_serialize(val)
     if listing_type == "mcp" and hasattr(listing, "validation_results"):
@@ -558,6 +603,54 @@ def _serialize_listing_detail(listing_type: str, listing) -> dict:
             for vr in listing.validation_results
         ]
     return base
+
+
+@router.get("/skills/{listing_id}/versions/{version_id}")
+async def get_skill_version_review(
+    listing_id: str,
+    version_id: uuid.UUID,
+    response: Response,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Authorize one pending version before loading any file bytes."""
+    scope = await _require_review_scope(db, current_user)
+    listing_type, listing = await _find_listing(listing_id, db)
+    if listing_type != "skill" or listing is None or not can_review(listing, scope):
+        raise HTTPException(status_code=404, detail="Submission not found")
+    listing, version = await _authorized_version(str(listing.id), version_id, db, current_user)
+    if version.status != ListingStatus.pending or (version.requires_global_review and not scope.is_global_reviewer):
+        raise HTTPException(status_code=404, detail="Submission not found")
+    try:
+        if version.delivery_mode == "registry_direct":
+            _, _, revision, files = await _authorized_files(str(listing.id), version_id, db, current_user)
+            declarations = [file.declaration.model_dump() for file in files]
+        else:
+            revision = skill_content_revision(listing, version)
+            declarations = []
+    except SkillValidationError as exc:
+        raise HTTPException(status_code=409, detail="Stored skill version is not a valid release") from exc
+    if version.content_revision is not None and revision != version.content_revision:
+        raise HTTPException(status_code=409, detail="Skill version changed; refresh before review")
+    detail = _serialize_listing_detail("skill", listing, selected=version)
+    detail.update(version_id=str(version.id), revision=revision, files=declarations)
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    return detail
+
+
+@router.post("/skills/{listing_id}/versions/{version_id}/decision")
+async def decide_skill_version(
+    listing_id: str,
+    version_id: uuid.UUID,
+    req: VersionReviewRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Review an exact skill UUID; bundle decisions remain gated until delivery."""
+    return await _review_version(
+        listing_id, "", req, SkillListing, SkillVersion, "skill", db, current_user, selected_id=version_id
+    )
 
 
 @router.get("/{listing_id}")
@@ -576,7 +669,15 @@ async def get_review(
         # to the very reviewers the scoping keeps away from it.
         if not can_review(listing, scope):
             raise HTTPException(status_code=404, detail="Listing not found")
+        if listing_type == "skill":
+            pending = [v for v in listing.versions if v.status == ListingStatus.pending]
+            if len(pending) > 1:
+                raise HTTPException(status_code=409, detail="Select a pending skill version by UUID")
+            if pending and pending[0].requires_global_review and not scope.is_global_reviewer:
+                raise HTTPException(status_code=404, detail="Submission not found")
         result = _serialize_listing_detail(listing_type, listing)
+        if listing_type == "skill" and pending:
+            result["version_id"] = str(pending[0].id)
     else:
         # Fallback: check Agent table
         try:
@@ -672,16 +773,30 @@ async def _lock_skill_decision(db, listing, current_user, version=None, *, appro
         raise HTTPException(status_code=409, detail="Skill version changed during review")
     if locked.status != ListingStatus.pending:
         raise HTTPException(status_code=409, detail="Skill version is no longer pending")
-    if approval:
-        _refuse_unreviewable_skill(listing, locked)
+    if locked.requires_global_review:
+        if not (await _require_review_scope(db, current_user)).is_global_reviewer:
+            raise HTTPException(status_code=404, detail="Submission not found")
+        raise HTTPException(status_code=409, detail="Global skill re-review is not yet available")
+    _refuse_unreviewable_skill(listing, locked)
     return latest_id, locked
 
 
 def _refuse_unreviewable_skill(listing, version=None):
     if isinstance(listing, SkillListing):
         candidates = [version] if version is not None else listing.versions
-        if any(needs_bundle_delivery(ver) for ver in candidates if ver is not None):
-            raise HTTPException(status_code=409, detail="Resource-bearing skill versions cannot yet be reviewed")
+        for ver in candidates:
+            if ver is None:
+                continue
+            if needs_bundle_delivery(ver):
+                raise HTTPException(status_code=409, detail="Resource-bearing skill versions cannot yet be reviewed")
+            if (
+                ver.base_version_id is not None
+                or (ver.review_epoch or 0) > 0
+                or (ver.content_revision is not None and ver.delivery_mode == "registry_direct")
+            ):
+                raise HTTPException(
+                    status_code=409, detail="Review this exact skill version with its observed revision"
+                )
 
 
 @router.post("/{listing_id}/approve")
@@ -697,13 +812,11 @@ async def approve(
         raise HTTPException(status_code=404, detail="Listing not found")
     _authorize_item(listing, scope)
 
-    # Find the pending version to approve (may not be latest_version)
-    pending_ver = None
-    if hasattr(listing, "versions"):
-        pending_ver = next(
-            (v for v in listing.versions if v.status == ListingStatus.pending),
-            None,
-        )
+    # A listing ID is safe only for a single unambiguous legacy pending row.
+    pending = [v for v in getattr(listing, "versions", ()) if v.status == ListingStatus.pending]
+    if listing_type == "skill" and len(pending) != 1:
+        raise HTTPException(status_code=409, detail="Select an exact pending skill version for review")
+    pending_ver = pending[0] if pending else None
 
     latest_id = None
     if listing_type == "skill":
@@ -713,6 +826,15 @@ async def approve(
     if pending_ver:
         if is_actively_editing(pending_ver):
             raise HTTPException(status_code=409, detail="Cannot approve: the owner is currently editing this item")
+        promote_skill = None
+        if listing_type == "skill":
+            promote_skill = await should_promote_skill_version(db, latest_id, pending_ver)
+            if not promote_skill and (
+                "-" not in pending_ver.version or not SKILL_SEMVER_RE.fullmatch(pending_ver.version)
+            ):
+                raise HTTPException(
+                    status_code=409, detail="Newer approved skill release exists; refresh before review"
+                )
         pending_ver.status = ListingStatus.approved
         pending_ver.rejection_reason = None
         pending_ver.reviewed_by = current_user.id
@@ -722,7 +844,7 @@ async def approve(
         # Update latest_version_id via raw UPDATE to avoid circular dependency
         # between listing.latest_version_id and version.listing_id
         listing_cls = LISTING_MODELS[listing_type]
-        if listing_type != "skill" or await should_promote_skill_version(db, latest_id, pending_ver):
+        if listing_type != "skill" or promote_skill:
             await db.execute(
                 update(listing_cls).where(listing_cls.id == listing.id).values(latest_version_id=pending_ver.id)
             )
@@ -766,13 +888,11 @@ async def reject(
         raise HTTPException(status_code=404, detail="Listing not found")
     _authorize_item(listing, scope)
 
-    # Find the pending version to reject (may not be latest_version)
-    pending_ver = None
-    if hasattr(listing, "versions"):
-        pending_ver = next(
-            (v for v in listing.versions if v.status == ListingStatus.pending),
-            None,
-        )
+    # Rejection is also a decision about reviewed bytes, not a listing-wide action.
+    pending = [v for v in getattr(listing, "versions", ()) if v.status == ListingStatus.pending]
+    if listing_type == "skill" and len(pending) != 1:
+        raise HTTPException(status_code=409, detail="Select an exact pending skill version for review")
+    pending_ver = pending[0] if pending else None
 
     if listing_type == "skill":
         _, locked = await _lock_skill_decision(db, listing, current_user, pending_ver, approval=False)
@@ -869,7 +989,9 @@ async def approve_agent(
             raise HTTPException(status_code=409, detail="Cannot approve: the owner is currently editing this agent")
 
     newest_pending = pending_versions[0]
-    components_ready, blocking = await _check_agent_components_ready(newest_pending.components, db)
+    components_ready, blocking = await _check_agent_components_ready(
+        newest_pending.components, db, require_public_skills=not agent.is_private
+    )
     if not components_ready:
         raise HTTPException(
             status_code=422,
@@ -1050,6 +1172,12 @@ async def approve_bundle(
 
     count = 0
     for listing in await _bundle_listings(bundle_id, db, scope):
+        if (
+            not isinstance(listing, SkillListing)
+            and any(ver.status == ListingStatus.pending for ver in listing.versions)
+            and (listing.latest_version is None or listing.latest_version.status != ListingStatus.pending)
+        ):
+            raise HTTPException(status_code=409, detail="Review the exact pending component version separately")
         if isinstance(listing, SkillListing):
             _, locked = await _lock_skill_decision(db, listing, current_user)
             if locked.status != ListingStatus.pending:
@@ -1209,6 +1337,10 @@ async def approve_mcp_with_skills(
     if listing_type != "mcp":
         raise HTTPException(status_code=400, detail="Only MCP listings support bulk skill approve")
     _authorize_item(listing, scope)
+    if any(ver.status == ListingStatus.pending for ver in listing.versions) and (
+        listing.latest_version is None or listing.latest_version.status != ListingStatus.pending
+    ):
+        raise HTTPException(status_code=409, detail="Review the exact pending MCP version separately")
 
     listing.status = ListingStatus.approved
     listing.rejection_reason = None

@@ -1,4 +1,5 @@
 # SPDX-FileCopyrightText: 2026 Lokesh Selvam <lokeshselvam7025@gmail.com>
+# SPDX-FileCopyrightText: 2026 Kaushik <kaushikrjpm10@gmail.com>
 # SPDX-License-Identifier: Apache-2.0
 
 """Inbox delivery, lifecycle, idempotency, and read-time visibility.
@@ -441,6 +442,37 @@ async def test_decision_clears_every_reviewers_request_item(sessions):
             )
         ).scalar_one()
         assert approval.state == InboxState.open
+
+
+@pytest.mark.asyncio
+async def test_withdrawal_closes_all_reviewers_without_faking_an_outcome(sessions):
+    from services.inbox import sources
+
+    async with sessions() as db:
+        reviewers = [await _user(db, UserRole.reviewer) for _ in range(2)]
+        author = await _user(db)
+
+        class _Entity:
+            id = uuid.uuid4()
+            name = "withdrawn-skill"
+            namespace = None
+            slug = None
+            team_id = None
+            is_private = False
+
+        entity = _Entity()
+        await sources.on_review_requested(db, entity, subject_type="skill", actor_id=author.id, version="1.2.0")
+        await db.commit()
+        assert (
+            await sources.on_review_withdrawn(db, entity, subject_type="skill", actor_id=author.id, version="1.2.0")
+            >= 2
+        )
+        await db.commit()
+        for reviewer in reviewers:
+            items = (await db.execute(select(InboxItem).where(InboxItem.user_id == reviewer.id))).scalars().all()
+            assert len(items) == 1 and items[0].kind == InboxKind.review_requested
+            assert items[0].state == InboxState.done
+        assert (await db.execute(select(InboxItem).where(InboxItem.user_id == author.id))).scalars().all() == []
 
 
 @pytest.mark.asyncio

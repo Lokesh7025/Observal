@@ -152,7 +152,10 @@ def mock_selected_skill_version(monkeypatch):
     async def selected(_listing_id, version_id, _db, _user):
         row = MagicMock()
         row.id = version_id
-        return None, row
+        listing = await skill.resolve_visible_listing(
+            skill.SkillListing, _listing_id, _db, _user, load_options=skill._BODY_FREE_LISTING
+        )
+        return listing, row
 
     monkeypatch.setattr(skill, "_authorized_version", selected)
 

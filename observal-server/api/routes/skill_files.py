@@ -419,6 +419,73 @@ async def update_skill_version_draft(
     )
 
 
+@router.post("/{listing_id}/versions/{version_id}/withdraw", response_model=SkillVersionManifest)
+async def withdraw_skill_version(
+    listing_id: str,
+    version_id: uuid.UUID,
+    req: SkillVersionRevisionRequest,
+    response: Response,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_role(UserRole.user)),
+):
+    """Return pending author bytes to an editable draft; invalidate all old review observations."""
+    listing = await resolve_listing(
+        SkillListing, listing_id, db, current_user=current_user, load_options=_BODY_FREE_LISTING
+    )
+    if listing is None:
+        raise HTTPException(status_code=404, detail="Skill version not found")
+    if get_effective_component_permission(listing, current_user) != "owner":
+        raise HTTPException(status_code=403, detail="Not the listing owner")
+    _, version = await lock_skill_version(db, listing.id, version_id)
+    await db.refresh(
+        listing,
+        attribute_names=["submitted_by", "co_authors", "team_id", "is_private", "name", "namespace", "slug", "owner"],
+    )
+    if not await check_listing_visibility_async(listing, current_user, db) or (
+        get_effective_component_permission(listing, current_user) != "owner"
+    ):
+        raise HTTPException(status_code=403, detail="Not the listing owner")
+    if version.status != ListingStatus.pending or version.pre_public_status is not None:
+        raise HTTPException(status_code=409, detail="Only an ordinary pending author version can be withdrawn")
+    if version.is_editing and version.editing_by != current_user.id and not _is_lock_expired(version.editing_since):
+        raise HTTPException(status_code=409, detail="This skill version is being edited by another author")
+    try:
+        prior_revision = skill_content_revision(listing, version)
+        if version.content_revision is not None and version.content_revision != prior_revision:
+            raise HTTPException(status_code=409, detail="Skill version changed; refresh its manifest before withdrawal")
+        if req.observed_revision != prior_revision:
+            raise HTTPException(status_code=409, detail="Skill version changed; refresh its manifest before withdrawal")
+        files = validate_skill_bundle(
+            delivery_mode=version.delivery_mode,
+            skill_md_content=version.skill_md_content,
+            script_filename=version.script_filename,
+            script_content=version.script_content,
+            extra_files=version.extra_files or [],
+            enforce_limits=False,
+        )
+    except SkillValidationError as exc:
+        raise HTTPException(status_code=409, detail="Saved skill version is not a valid folder") from exc
+    version.review_epoch = (version.review_epoch or 0) + 1
+    version.status = ListingStatus.draft
+    version.rejection_reason = None
+    version.reviewed_by = None
+    version.reviewed_at = None
+    release_edit_lock(version, current_user.id, force=True)
+    version.content_revision = skill_content_revision(listing, version)
+    await inbox.on_review_withdrawn(
+        db, listing, subject_type="skill", actor_id=current_user.id, version=version.version
+    )
+    await db.commit()
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    return SkillVersionManifest(
+        listing_id=listing.id,
+        version_id=version.id,
+        revision=version.content_revision,
+        files=[file.declaration for file in files],
+    )
+
+
 @router.post("/{listing_id}/versions/{version_id}/submit", response_model=SkillVersionManifest)
 async def submit_skill_version_draft(
     listing_id: str,
@@ -428,19 +495,12 @@ async def submit_skill_version_draft(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_role(UserRole.user)),
 ):
-    """Recover an unambiguous historical resource-less rejected release.
-
-    New saved candidates remain drafts until exact-version review is ready.
-    """
+    """Submit a saved resource-less candidate or recover a legacy rejected version."""
     listing, version = await _editable_version(listing_id, version_id, req.observed_revision, db, current_user)
-    if version.base_version_id is not None:
-        raise HTTPException(
-            status_code=409, detail="Exact-version candidate review is not yet available; draft unchanged"
-        )
-    if needs_bundle_delivery(version) or version.requires_global_review:
-        raise HTTPException(
-            status_code=409, detail="Exact-version bundle review is not yet available; saved draft unchanged"
-        )
+    if version.requires_global_review:
+        raise HTTPException(status_code=409, detail="Global public re-review is not yet available")
+    if version.base_version_id is not None and needs_bundle_delivery(version):
+        raise HTTPException(status_code=409, detail="Resource-bearing candidate review is not yet available")
     # _editable_version holds the listing lock, but the relationship may have
     # been loaded before waiting. Re-read the pointer, not its cached object.
     await db.refresh(listing, attribute_names=["latest_version_id"])
@@ -479,8 +539,18 @@ async def submit_skill_version_draft(
         )
         if version.base_version_id is not None and version.delivery_mode == "registry_direct":
             _validate_new_md(version.skill_md_content)
+        if version.skill_md_content:
+            analysis = validate_skill_md_content_frontmatter(
+                version.skill_md_content, slash_command=version.slash_command
+            )
+            if analysis.slash_command is not None:
+                version.slash_command = analysis.slash_command
     except SkillValidationError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if version.status == ListingStatus.rejected:
+        # A previous reviewer observation belongs to the rejected round, even
+        # when the owner resubmits unchanged bytes. Do not reuse its token.
+        version.review_epoch = (version.review_epoch or 0) + 1
     version.status = ListingStatus.pending
     version.rejection_reason = None
     version.reviewed_by = None

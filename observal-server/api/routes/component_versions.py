@@ -15,6 +15,10 @@ from __future__ import annotations
 import re
 from copy import deepcopy
 from datetime import UTC, datetime
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from loguru import logger as optic
@@ -37,7 +41,9 @@ from models.mcp import ListingStatus
 from models.skill import SkillListing, SkillVersion
 from models.user import User, UserRole
 from schemas.component_version import VersionPublishRequest, VersionReviewRequest  # noqa: TC001
+from services.agent_lock import INSTALLABLE_STATUSES
 from services.component_version_extras import ALLOWED_FIELDS, REQUIRED_FIELDS, validate_and_extract
+from services.editing_lock import is_actively_editing
 from services.inbox import sources as inbox
 from services.skill_bundle import needs_bundle_delivery, validate_skill_bundle
 from services.skill_revisions import skill_content_revision
@@ -67,6 +73,7 @@ _VERSION_MANAGED_FIELDS = {
     "base_version_id",
     "base_revision",
     "content_revision",
+    "review_epoch",
     "requires_global_review",
     "pre_public_status",
 }
@@ -152,7 +159,12 @@ async def _list_versions(
     # content no global reviewer has accepted yet.
     version_filters = [version_model.listing_id == listing.id]
     if not may_view_unapproved(get_effective_component_permission(listing, current_user), current_user):
-        version_filters.append(version_model.status == ListingStatus.approved)
+        if component_type == "skill":
+            version_filters.extend(
+                (SkillVersion.status.in_(INSTALLABLE_STATUSES), SkillVersion.requires_global_review.is_(False))
+            )
+        else:
+            version_filters.append(version_model.status == ListingStatus.approved)
 
     offset = (page - 1) * page_size
     stmt = (
@@ -407,44 +419,120 @@ async def _review_version(
     component_type: str,
     db: AsyncSession,
     current_user: User,
+    *,
+    selected_id: uuid.UUID | None = None,
 ) -> dict:
     optic.trace("listing_id={}, version={}", listing_id, version)
-    listing = await resolve_visible_listing(listing_model, listing_id, db, current_user)
+    listing = await resolve_visible_listing(
+        listing_model,
+        listing_id,
+        db,
+        current_user,
+        **({"load_options": _BODY_FREE_LISTING} if component_type == "skill" else {}),
+    )
     if not listing:
         raise HTTPException(status_code=404, detail="Listing not found")
 
-    version_filters = [version_model.listing_id == listing.id, version_model.version == version]
-    if not may_view_unapproved(get_effective_component_permission(listing, current_user), current_user):
-        version_filters.append(version_model.status == ListingStatus.approved)
-    stmt = select(version_model).where(*version_filters)
-    result = await db.execute(stmt)
-    ver = result.scalar_one_or_none()
-    if not ver:
-        raise HTTPException(status_code=404, detail="Version not found")
-
     latest_id = None
     if component_type == "skill":
-        latest_id, ver = await lock_skill_version(db, listing.id, ver.id)
-        await db.refresh(listing, attribute_names=["submitted_by", "co_authors", "team_id", "is_private"])
+        if not can_review(listing, await review_scope(db, current_user)):
+            raise HTTPException(status_code=404, detail="Version not found")
+        version_id = selected_id
+        if version_id is None:
+            version_id = (
+                await db.execute(
+                    select(SkillVersion.id).where(
+                        SkillVersion.listing_id == listing.id, SkillVersion.version == version
+                    )
+                )
+            ).scalar_one_or_none()
+        if version_id is None:
+            raise HTTPException(status_code=404, detail="Version not found")
+        latest_id, ver = await lock_skill_version(db, listing.id, version_id)
+        await db.refresh(
+            listing,
+            attribute_names=[
+                "submitted_by",
+                "co_authors",
+                "team_id",
+                "is_private",
+                "name",
+                "namespace",
+                "slug",
+                "owner",
+            ],
+        )
+        scope = await review_scope(db, current_user)
         if (
             not await check_listing_visibility_async(listing, current_user, db)
-            or not may_view_unapproved(get_effective_component_permission(listing, current_user), current_user)
-            or not can_review(listing, await review_scope(db, current_user))
+            or not can_review(listing, scope)
+            or (ver.requires_global_review and not scope.is_global_reviewer)
         ):
+            raise HTTPException(status_code=404, detail="Version not found")
+    else:
+        version_filters = [version_model.listing_id == listing.id, version_model.version == version]
+        if not may_view_unapproved(get_effective_component_permission(listing, current_user), current_user):
+            version_filters.append(version_model.status == ListingStatus.approved)
+        ver = (await db.execute(select(version_model).where(*version_filters))).scalar_one_or_none()
+        if not ver:
             raise HTTPException(status_code=404, detail="Version not found")
     if ver.status != ListingStatus.pending:
         raise HTTPException(
             status_code=422, detail=f"Version is {ver.status.value!r}, only pending versions can be reviewed"
         )
 
-    if req.action == "approve":
-        if component_type == "skill" and needs_bundle_delivery(ver):
+    if component_type == "skill":
+        if is_actively_editing(ver):
+            raise HTTPException(status_code=409, detail="Cannot review: the owner is editing this skill version")
+        if ver.requires_global_review:
+            raise HTTPException(status_code=409, detail="Global skill re-review is not yet available")
+        if needs_bundle_delivery(ver):
             raise HTTPException(status_code=409, detail="Resource-bearing skill versions cannot yet be reviewed")
+        if (ver.base_version_id is not None or ver.content_revision is not None or (ver.review_epoch or 0) > 0) and (
+            req.observed_revision is None
+        ):
+            raise HTTPException(status_code=409, detail="Review this exact draft with its observed revision")
+        if req.observed_revision is not None or ver.content_revision is not None:
+            try:
+                revision = skill_content_revision(listing, ver)
+            except SkillValidationError as exc:
+                raise HTTPException(status_code=409, detail="Skill version is not a valid release") from exc
+            if (ver.content_revision is not None and ver.content_revision != revision) or (
+                req.observed_revision is not None and req.observed_revision != revision
+            ):
+                raise HTTPException(status_code=409, detail="Skill version changed; refresh before review")
+
+    promote_skill = None
+    if req.action == "approve" and component_type == "skill":
+        if ver.base_version_id is not None:
+            if latest_id != ver.base_version_id:
+                raise HTTPException(status_code=409, detail="Approved base changed; rebase this draft before review")
+            base = (
+                await db.execute(
+                    select(SkillVersion)
+                    .where(SkillVersion.id == ver.base_version_id, SkillVersion.listing_id == listing.id)
+                    .execution_options(populate_existing=True)
+                )
+            ).scalar_one_or_none()
+            if base is None or base.status not in INSTALLABLE_STATUSES:
+                raise HTTPException(status_code=409, detail="Approved base changed; rebase this draft before review")
+            try:
+                base_revision = skill_content_revision(listing, base)
+            except SkillValidationError as exc:
+                raise HTTPException(status_code=409, detail="Approved base is not a valid release") from exc
+            if ver.base_revision != base_revision:
+                raise HTTPException(status_code=409, detail="Approved base changed; rebase this draft before review")
+        promote_skill = await should_promote_skill_version(db, latest_id, ver)
+        # Historical pending prereleases may still clear review and be pinned
+        # explicitly; they never replace a newer stable default release.
+        if not promote_skill and ("-" not in ver.version or not SEMVER_RE.fullmatch(ver.version)):
+            raise HTTPException(status_code=409, detail="Newer approved skill release exists; refresh before review")
+    if req.action == "approve":
         ver.status = ListingStatus.approved
         ver.rejection_reason = None
         # Only update latest if this version is newer than current latest
         if component_type == "skill":
-            if await should_promote_skill_version(db, latest_id, ver):
+            if promote_skill:
                 listing.latest_version_id = ver.id
         else:
             current_latest = listing.latest_version
@@ -474,7 +562,7 @@ async def _review_version(
     await db.commit()
 
     return {
-        "version": version,
+        "version": ver.version,
         "new_status": ver.status.value,
         "reason": ver.rejection_reason,
     }

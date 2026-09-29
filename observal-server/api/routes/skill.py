@@ -228,6 +228,8 @@ async def submit_skill(
     )
     db.add(version)
     await db.flush()
+    if delivery_mode == "registry_direct":
+        version.content_revision = skill_content_revision(listing, version)
 
     listing.latest_version_id = version.id
     await inbox.on_publish(
@@ -382,6 +384,53 @@ async def create_skill_folder_draft(
     )
 
 
+async def _selected_skill_release(
+    listing: SkillListing, db: AsyncSession, current_user: User | None, *, requested=None
+):
+    """Resolve one version under shared listing/version locks before reading its bytes.
+
+    The same selector drives public detail and standalone installation, so a
+    legacy pending pointer cannot make GET advertise a release that POST refuses.
+    """
+    from services.agent_lock import INSTALLABLE_STATUSES, latest_release
+
+    observed_pointer = listing.latest_version_id
+    if observed_pointer is None:
+        raise HTTPException(status_code=404, detail="Listing not found")
+    if requested:
+        target_id = (
+            await db.execute(
+                select(SkillVersion.id).where(SkillVersion.listing_id == listing.id, SkillVersion.version == requested)
+            )
+        ).scalar_one_or_none()
+        if target_id is None:
+            raise HTTPException(status_code=404, detail=f"Version {requested!r} not found for this skill")
+        listing, selected = await _authorized_version(str(listing.id), target_id, db, current_user)
+    else:
+        try:
+            listing, selected = await _authorized_version(str(listing.id), observed_pointer, db, current_user)
+        except HTTPException as exc:
+            if exc.status_code != 404:
+                raise
+            rows = (
+                await db.execute(
+                    select(SkillVersion.id, SkillVersion.version, SkillVersion.status).where(
+                        SkillVersion.listing_id == listing.id,
+                        SkillVersion.status.in_(INSTALLABLE_STATUSES),
+                        SkillVersion.requires_global_review.is_(False),
+                    )
+                )
+            ).all()
+            fallback = latest_release(rows)
+            if fallback is None:
+                raise exc
+            listing, selected = await _authorized_version(str(listing.id), fallback.id, db, current_user)
+    await db.refresh(listing, attribute_names=["latest_version_id"])
+    if listing.latest_version_id != observed_pointer:
+        raise HTTPException(status_code=409, detail="Skill latest version changed; refresh the listing")
+    return listing, selected
+
+
 @router.get("/{listing_id}", response_model=SkillListingResponse)
 async def get_skill(
     listing_id: str,
@@ -392,11 +441,52 @@ async def get_skill(
     listing = await resolve_visible_listing(SkillListing, listing_id, db, current_user, load_options=_BODY_FREE_LISTING)
     if listing is None or listing.latest_version_id is None:
         raise HTTPException(status_code=404, detail="Listing not found")
-    _, selected = await _authorized_version(str(listing.id), listing.latest_version_id, db, current_user)
-    await db.refresh(listing, attribute_names=["latest_version_id"])
-    if listing.latest_version_id != selected.id:
-        raise HTTPException(status_code=409, detail="Skill latest version changed; refresh the listing")
-    resp = SkillListingResponse.model_validate(listing)
+    observed_pointer = listing.latest_version_id
+    listing, selected = await _selected_skill_release(listing, db, current_user)
+    if selected.id == observed_pointer:
+        resp = SkillListingResponse.model_validate(listing)
+    else:
+        # The listing's compatibility properties read the pointer, which may
+        # be pending. Build from the authorized approved row, never from that
+        # unrelated candidate (including nullable Git and script fields).
+        resp = SkillListingResponse.model_validate(
+            {
+                "id": listing.id,
+                "name": listing.name,
+                "namespace": listing.namespace,
+                "slug": listing.slug,
+                "qualified_name": listing.qualified_name,
+                "owner": listing.owner,
+                "team_id": listing.team_id,
+                "visibility": listing.visibility,
+                "is_private": listing.is_private,
+                "submitted_by": listing.submitted_by,
+                "created_at": listing.created_at,
+                "updated_at": listing.updated_at,
+                **{
+                    field: getattr(selected, field)
+                    for field in (
+                        "version",
+                        "description",
+                        "task_type",
+                        "target_agents",
+                        "supported_harnesses",
+                        "skill_path",
+                        "git_url",
+                        "git_ref",
+                        "skill_md_content",
+                        "delivery_mode",
+                        "script_content",
+                        "script_filename",
+                        "validated",
+                        "slash_command",
+                        "status",
+                        "rejection_reason",
+                        "download_count",
+                    )
+                },
+            }
+        )
     resp.user_permission = get_effective_component_permission(listing, current_user)
     return resp
 
@@ -410,38 +500,30 @@ async def install_skill(
     current_user: User | None = Depends(get_registry_user),
 ):
     optic.debug("installing skill {}", listing_id)
-    listing = await resolve_visible_listing(
-        SkillListing, listing_id, db, current_user, require_status=ListingStatus.approved
-    )
+    # A newer candidate may temporarily be the listing's pointer on legacy
+    # data. Resolve the requested persisted release before applying status
+    # gates; otherwise an older approved release becomes impossible to install.
+    listing = await resolve_visible_listing(SkillListing, listing_id, db, current_user, load_options=_BODY_FREE_LISTING)
     if not listing:
-        listing = await resolve_visible_listing(SkillListing, listing_id, db, current_user)
-        if not listing or current_user is None:
-            raise HTTPException(status_code=404, detail="Listing not found or not approved")
-        if (
-            listing.status != ListingStatus.archived
-            and get_effective_component_permission(listing, current_user) != "owner"
-        ):
-            raise HTTPException(status_code=404, detail="Listing not found or not approved")
+        raise HTTPException(status_code=404, detail="Listing not found or not approved")
 
+    from services.agent_lock import INSTALLABLE_STATUSES, content_digest
+
+    listing, installed = await _selected_skill_release(listing, db, current_user, requested=req.version)
+    if installed.status not in INSTALLABLE_STATUSES and (
+        current_user is None
+        or installed.status != listing.status
+        or get_effective_component_permission(listing, current_user) != "owner"
+    ):
+        raise HTTPException(status_code=404, detail="Listing not found or not approved")
     warnings = []
-    if listing.status == ListingStatus.archived:
+    if installed.status == ListingStatus.archived or listing.status == ListingStatus.archived:
         warnings.append(archived_install_warning("skill", listing.name))
 
-    from services.agent_lock import content_digest, select_install_version
-
-    version_override = await select_install_version(db, "skill", listing, req.version)
-    installed = version_override if version_override is not None else getattr(listing, "latest_version", None)
-
-    if installed is not None and installed.requires_global_review:
+    if installed.requires_global_review:
         raise HTTPException(status_code=409, detail="Selected skill version requires global review before installation")
-    if installed is not None and needs_bundle_delivery(installed):
+    if needs_bundle_delivery(installed):
         raise HTTPException(status_code=409, detail="Skill bundle delivery is not yet supported; install refused")
-
-    if current_user is not None:
-        db.add(SkillDownload(listing_id=listing.id, user_id=current_user.id, harness=req.harness))
-        if installed is not None:
-            installed.download_count = (installed.download_count or 0) + 1
-        await commit_or_name_conflict(db, "skill")
 
     from api.routes.config import derive_endpoints
     from services.skill_config_generator import generate_skill_config
@@ -452,18 +534,25 @@ async def install_skill(
         req.harness,
         server_url=endpoints["api"],
         scope=req.scope,
-        version_override=version_override,
+        version_override=installed,
         local_name=req.local_name,
     )
-    return SkillInstallResponse(
+    # Prepare and validate the entire response before recording usage: digest
+    # errors and response-shape failures must not count as successful installs.
+    response = SkillInstallResponse(
         listing_id=listing.id,
         harness=req.harness,
         config_snippet=config,
         warnings=warnings,
-        version=getattr(version_override or listing, "version", None),
+        version=installed.version,
         version_id=getattr(installed, "id", None),
-        digest=content_digest("skill", installed) if installed is not None else None,
+        digest=content_digest("skill", installed),
     )
+    if current_user is not None:
+        db.add(SkillDownload(listing_id=listing.id, user_id=current_user.id, harness=req.harness))
+        installed.download_count = (installed.download_count or 0) + 1
+        await commit_or_name_conflict(db, "skill")
+    return response
 
 
 @router.post("/draft", response_model=SkillListingResponse)
@@ -579,11 +668,18 @@ async def update_skill_draft(
     if latest_id != ver.id or ver.status not in (ListingStatus.draft, ListingStatus.rejected, ListingStatus.pending):
         raise HTTPException(status_code=409, detail="Skill version changed during editing")
     await _recheck_skill_owner(db, listing, current_user)
-    if ver.content_revision is not None:
-        if ver.status == ListingStatus.pending:
-            raise HTTPException(status_code=409, detail="Withdraw this pending version before editing its files")
-        if req.observed_revision is None or req.observed_revision != skill_content_revision(listing, ver):
-            raise HTTPException(status_code=409, detail="Skill version changed; refresh its manifest before saving")
+    if ver.status == ListingStatus.pending:
+        raise HTTPException(status_code=409, detail="Withdraw this pending version before editing its files")
+    if (
+        req.version is not None
+        and req.version != ver.version
+        and (ver.content_revision is not None or ver.base_version_id is not None)
+    ):
+        raise HTTPException(status_code=409, detail="Saved draft release number is reserved; create a new version")
+    if ver.content_revision is not None and (
+        req.observed_revision is None or req.observed_revision != skill_content_revision(listing, ver)
+    ):
+        raise HTTPException(status_code=409, detail="Skill version changed; refresh its manifest before saving")
 
     slash_command_should_update = "slash_command" in req.model_fields_set
     slash_command_explicit_clear = slash_command_should_update and req.slash_command is None
@@ -702,6 +798,8 @@ async def start_edit_skill(
     if latest_id != ver.id or ver.status not in (ListingStatus.pending, ListingStatus.draft, ListingStatus.rejected):
         raise HTTPException(status_code=409, detail="Skill version changed during editing")
     await _recheck_skill_owner(db, listing, current_user)
+    if ver.status == ListingStatus.pending:
+        raise HTTPException(status_code=409, detail="Withdraw this pending version before editing its files")
     acquire_edit_lock(ver, current_user.id)
     await commit_or_name_conflict(db, "skill")
     return {"status": "locked"}
@@ -753,6 +851,10 @@ async def submit_skill_draft(
     if latest_id != ver.id or ver.status not in (ListingStatus.draft, ListingStatus.rejected):
         raise HTTPException(status_code=409, detail="Skill version changed before resubmission")
     await _recheck_skill_owner(db, listing, current_user)
+    if ver.content_revision is not None or ver.base_version_id is not None or (ver.review_epoch or 0) > 0:
+        raise HTTPException(status_code=409, detail="Submit this saved draft by version UUID and observed revision")
+    if ver.requires_global_review or ver.pre_public_status is not None:
+        raise HTTPException(status_code=409, detail="Global public re-review is not yet available")
     _validate_effective_bundle(
         ver.delivery_mode,
         ver.skill_md_content,

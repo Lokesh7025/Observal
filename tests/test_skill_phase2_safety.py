@@ -122,7 +122,7 @@ async def test_standalone_selected_version_refuses_before_accounting(monkeypatch
     old.requires_global_review = False
     db = _db()
     monkeypatch.setattr(skill, "resolve_visible_listing", AsyncMock(return_value=listing))
-    monkeypatch.setattr("services.agent_lock.select_install_version", AsyncMock(return_value=old))
+    monkeypatch.setattr(skill, "_selected_skill_release", AsyncMock(return_value=(listing, old)))
     monkeypatch.setattr("api.routes.config.derive_endpoints", AsyncMock(return_value={"api": "https://test"}))
     monkeypatch.setattr(skill, "commit_or_name_conflict", AsyncMock())
     monkeypatch.setattr("services.skill_config_generator.generate_skill_config", Mock(return_value={}))

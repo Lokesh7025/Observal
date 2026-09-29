@@ -1,4 +1,5 @@
 # SPDX-FileCopyrightText: 2026 Shaan Narendran <shaannaren06@gmail.com>
+# SPDX-FileCopyrightText: 2026 Kaushik <kaushikrjpm10@gmail.com>
 # SPDX-License-Identifier: Apache-2.0
 
 """Agent version locks.
@@ -498,13 +499,38 @@ async def pinned_component_blockers(db: AsyncSession, components: Iterable[Any])
         key = (component.component_type, component.component_id)
         listing = listings.get(key)
         if listing is None:
-            # Unknown types and vanished listings are reported by install, not here.
+            blockers.append(
+                {
+                    "component_type": component.component_type,
+                    "component_id": str(component.component_id),
+                    "name": component.component_name,
+                    "version": getattr(component, "resolved_version", "?"),
+                    "status": "missing_listing",
+                }
+            )
             continue
         row, _source = _pinned_row(component, versions.get(key, []))
+        if (
+            component.component_type == "skill"
+            and component.resolved_version_id is not None
+            and (row is None or row.id != component.resolved_version_id)
+        ):
+            blockers.append(
+                {
+                    "component_type": "skill",
+                    "component_id": str(component.component_id),
+                    "name": listing.name,
+                    "version": component.resolved_version,
+                    "status": "missing_pin",
+                }
+            )
+            continue
         if row is None:
             row = next((r for r in versions.get(key, []) if r.id == listing.latest_version_id), None)
         status = getattr(row, "status", None)
-        if status in INSTALLABLE_STATUSES:
+        if status in INSTALLABLE_STATUSES and not (
+            component.component_type == "skill" and getattr(row, "requires_global_review", False) is True
+        ):
             continue
         blockers.append(
             {
@@ -512,7 +538,11 @@ async def pinned_component_blockers(db: AsyncSession, components: Iterable[Any])
                 "component_id": str(component.component_id),
                 "name": getattr(listing, "name", "") or component.component_name,
                 "version": getattr(row, "version", component.resolved_version),
-                "status": getattr(status, "value", "missing"),
+                "status": (
+                    "pending_public_review"
+                    if component.component_type == "skill" and getattr(row, "requires_global_review", False) is True
+                    else getattr(status, "value", "missing")
+                ),
             }
         )
     return blockers
@@ -643,6 +673,11 @@ async def load_pinned_listings(
         listing = listings_by_type[kind][component.component_id]
         row, source = _pinned_row(component, versions.get((kind, component.component_id), []))
         label = f"{kind} '{listing.name}'"
+        if kind == "skill" and getattr(component, "resolved_version_id", None) is not None and source != "lock":
+            # A missing explicit UUID must not silently become a semver match
+            # or the listing's latest release. Old ID-less resource-less locks
+            # still use the documented compatibility fallback below.
+            raise HTTPException(status_code=409, detail=f"{label} pinned version no longer exists")
         if row is None:
             row = getattr(listing, "latest_version", None)
             loaded.problems.append(f"{label} is not locked")

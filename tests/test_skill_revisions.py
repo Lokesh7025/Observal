@@ -46,6 +46,12 @@ async def test_revision_changes_with_bytes_mode_and_identity_not_wire_encoding()
             version.download_count = 42
             version.status = ListingStatus.pending
             assert skill_content_revision(listing, version) == before
+            version.review_epoch = 0
+            assert skill_content_revision(listing, version) == before
+            version.review_epoch = 1
+            assert skill_content_revision(listing, version) != before
+            version.review_epoch = 0
+            assert skill_content_revision(listing, version) == before
             version.extra_files = [
                 version.extra_files[0],
                 {**version.extra_files[1], "executable": True},

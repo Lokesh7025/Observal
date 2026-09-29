@@ -476,14 +476,16 @@ def _build_skill_configs(
         listing = skill_listings.get(comp.component_id)
         if not listing:
             continue
+        delivery_mode = getattr(listing, "delivery_mode", "git_fetch")
         skills.append(
             {
                 "name": _sanitize_name(local_names[comp.component_id]),
                 "description": getattr(listing, "description", "") or "",
                 "slash_command": getattr(listing, "slash_command", None),
                 "task_type": getattr(listing, "task_type", ""),
-                "git_url": getattr(listing, "git_url", None),
-                "git_ref": getattr(listing, "git_ref", None) or "main",
+                "delivery_mode": delivery_mode,
+                "git_url": getattr(listing, "git_url", None) if delivery_mode == "git_fetch" else None,
+                "git_ref": (getattr(listing, "git_ref", None) or "main") if delivery_mode == "git_fetch" else None,
                 "skill_path": getattr(listing, "skill_path", None) or "/",
                 "skill_md_content": getattr(listing, "skill_md_content", None),
                 "script_content": getattr(listing, "script_content", None),

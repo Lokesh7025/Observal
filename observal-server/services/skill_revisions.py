@@ -60,6 +60,12 @@ def skill_content_revision(listing, version) -> str:
         },
         "files": declarations,
     }
+    # Old rows already persist revisions computed without this field. Only a
+    # withdrawn row changes the payload; default generation zero stays binary
+    # compatible with the pre-migration review revision.
+    epoch = getattr(version, "review_epoch", 0) or 0
+    if epoch:
+        payload["version"]["review_epoch"] = epoch
     return hashlib.sha256(
         json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
     ).hexdigest()

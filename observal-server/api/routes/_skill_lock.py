@@ -14,6 +14,7 @@ from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from models.mcp import ListingStatus
 from models.skill import SkillListing, SkillVersion
 
 
@@ -40,8 +41,6 @@ async def lock_skill_version(
 
 async def should_promote_skill_version(db: AsyncSession, latest_id: uuid.UUID, candidate: SkillVersion) -> bool:
     """Compare against the listing's fresh, locked latest pointer, not its cached relationship."""
-    if latest_id == candidate.id:
-        return True
     current_version = (
         await db.execute(select(SkillVersion.version).where(SkillVersion.id == latest_id))
     ).scalar_one_or_none()
@@ -64,4 +63,15 @@ async def should_promote_skill_version(db: AsyncSession, latest_id: uuid.UUID, c
         # For the same numeric release, stable is newer than every prerelease.
         return (*numbers, 0 if separator else 1, identifiers)
 
-    return semver_key(candidate.version) >= semver_key(current_version)
+    # A repaired or historical listing pointer can lag behind another approved
+    # row. Do not make a newly approved older release the default merely because
+    # it outranks that stale pointer. Query version strings only (never bodies).
+    approved_result = await db.execute(
+        select(SkillVersion.version).where(
+            SkillVersion.listing_id == candidate.listing_id,
+            SkillVersion.status == ListingStatus.approved,
+            SkillVersion.requires_global_review.is_(False),
+        )
+    )
+    newest_key = max(semver_key(value) for value in (current_version, *approved_result.scalars().all()))
+    return semver_key(candidate.version) >= newest_key

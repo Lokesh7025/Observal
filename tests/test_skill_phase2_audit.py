@@ -192,16 +192,18 @@ async def test_stale_approval_does_not_revert_newer_latest_version(store, monkey
         await author.commit()
 
         if route == "version":
-            await component_versions._review_version(
-                str(listing_id),
-                older.version,
-                VersionReviewRequest(action="approve"),
-                SkillListing,
-                SkillVersion,
-                "skill",
-                reviewer,
-                owner,
-            )
+            with pytest.raises(HTTPException) as stale_release:
+                await component_versions._review_version(
+                    str(listing_id),
+                    older.version,
+                    VersionReviewRequest(action="approve"),
+                    SkillListing,
+                    SkillVersion,
+                    "skill",
+                    reviewer,
+                    owner,
+                )
+            assert stale_release.value.status_code == 409
         else:
             monkeypatch.setattr(
                 review, "_require_review_scope", AsyncMock(return_value=ReviewScope(True, True, frozenset()))
@@ -210,12 +212,14 @@ async def test_stale_approval_does_not_revert_newer_latest_version(store, monkey
             monkeypatch.setattr(review.inbox, "on_review_decided", AsyncMock())
             monkeypatch.setattr(review, "invalidate_namespace", AsyncMock())
             monkeypatch.setattr(review, "redis_publish", AsyncMock())
-            await review.approve(str(listing_id), reviewer, owner)
+            with pytest.raises(HTTPException) as ambiguous:
+                await review.approve(str(listing_id), reviewer, owner)
+            assert ambiguous.value.status_code == 409
     async with maker() as db:
         listing = (await db.execute(select(SkillListing).where(SkillListing.id == listing_id))).scalar_one()
         assert listing.latest_version_id == newer.id
         older_row = (await db.execute(select(SkillVersion).where(SkillVersion.id == older.id))).scalar_one()
-        assert older_row.status == ListingStatus.approved
+        assert older_row.status == ListingStatus.pending
 
 
 @pytest.mark.asyncio

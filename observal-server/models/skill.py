@@ -309,6 +309,7 @@ class SkillVersion(Base):
     )
     base_revision: Mapped[str | None] = mapped_column(String(64), nullable=True)
     content_revision: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    review_epoch: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
     requires_global_review: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
     pre_public_status: Mapped[str | None] = mapped_column(String(20), nullable=True)
 

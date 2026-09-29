@@ -173,6 +173,22 @@ async def test_non_strict_install_never_serves_unapproved_or_marked_skill(sessio
     assert "not approved or requires public review" in refused.value.detail
 
 
+async def test_missing_explicit_skill_uuid_never_substitutes_semver_or_latest_in_non_strict_mode(session):
+    owner = await ds.user(session)
+    listing, agent, _ = await _pinned_agent(session, owner, "skill")
+    link = (await session.execute(select(AgentComponent).where(AgentComponent.component_id == listing.id))).scalar_one()
+    assert link.resolved_version == "1.2.0"
+    link.resolved_version_id = uuid.uuid4()
+    await session.commit()
+
+    with patch("api.routes.agent.install.generate_agent_config") as generate:
+        with pytest.raises(HTTPException) as refused:
+            await _install(session, agent, owner, strict=False)
+        generate.assert_not_called()
+    assert refused.value.status_code == 409
+    assert "pinned version no longer exists" in refused.value.detail
+
+
 async def test_legacy_pin_falls_back_to_latest_with_a_warning_and_strict_refuses(session):
     owner = await ds.user(session)
     listing = await ds.mcp(session, owner)

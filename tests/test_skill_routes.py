@@ -650,6 +650,18 @@ class TestListAndDetail:
         authorized.assert_awaited_once_with(str(listing.id), listing.latest_version_id, db, user)
 
     @pytest.mark.asyncio
+    async def test_detail_refuses_pointer_changed_during_authorization(self, monkeypatch):
+        db = _db()
+        listing = _listing()
+        monkeypatch.setattr(skill, "resolve_visible_listing", AsyncMock(return_value=listing))
+        monkeypatch.setattr(skill, "_authorized_version", AsyncMock(return_value=(listing, listing.latest_version)))
+        db.refresh.side_effect = lambda row, **kwargs: setattr(row, "latest_version_id", uuid.uuid4())
+
+        with pytest.raises(HTTPException) as stale:
+            await skill.get_skill(str(listing.id), db, _user())
+        _http_error(stale, 409, "Skill latest version changed; refresh the listing")
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize(
         ("user", "status", "expected_permission"),
         [
@@ -675,6 +687,7 @@ class TestListAndDetail:
     @pytest.mark.asyncio
     async def test_unapproved_nonowner_and_missing_detail_share_404(self, monkeypatch):
         db = _db()
+        db.execute.return_value = _result(rows=[])
         listing = _listing(status=ListingStatus.pending)
         resolve = AsyncMock(return_value=listing)
         monkeypatch.setattr(skill, "resolve_visible_listing", resolve)
@@ -697,6 +710,19 @@ class TestListAndDetail:
 
 
 class TestInstallSkill:
+    @pytest.fixture(autouse=True)
+    def _selected_row(self, monkeypatch):
+        async def authorized(listing_id, version_id, db, current_user):
+            listing = skill.resolve_visible_listing.return_value
+            if version_id == listing.latest_version_id:
+                return listing, listing.latest_version
+            version = db.execute.return_value.scalar_one_or_none()
+            if version is None:
+                raise HTTPException(status_code=404, detail="Skill version not found")
+            return listing, version
+
+        monkeypatch.setattr(skill, "_authorized_version", authorized)
+
     @pytest.mark.asyncio
     async def test_anonymous_approved_install_does_not_change_download_metrics(self, monkeypatch):
         db = _db()
@@ -760,7 +786,7 @@ class TestInstallSkill:
             task_type="code-review",
         )
         db.execute.return_value = _result(override)
-        resolve = AsyncMock(side_effect=[None, listing])
+        resolve = AsyncMock(return_value=listing)
         events = []
         commit = AsyncMock(side_effect=lambda *args: events.append("commit"))
         derive = AsyncMock(side_effect=lambda request: events.append("derive") or {"api": "https://api.test"})
@@ -784,10 +810,9 @@ class TestInstallSkill:
             "digest": response.digest,
         }
         assert response.digest.startswith("sha256:")
-        assert resolve.await_args_list == [
-            call(SkillListing, "alice/review-skill", db, _user(), require_status=ListingStatus.approved),
-            call(SkillListing, "alice/review-skill", db, _user()),
-        ]
+        resolve.assert_awaited_once_with(
+            SkillListing, "alice/review-skill", db, _user(), load_options=skill._BODY_FREE_LISTING
+        )
         version_stmt = db.execute.await_args.args[0]
         assert _sql(version_stmt).startswith("SELECT skill_versions.id")
         params = version_stmt.compile().params
@@ -799,7 +824,7 @@ class TestInstallSkill:
         # The download is counted against the version that was installed.
         assert override.download_count == 1
         assert listing.latest_version.download_count == 7
-        assert events == ["commit", "derive", "generate"]
+        assert events == ["derive", "generate", "commit"]
         commit.assert_awaited_once_with(db, "skill")
         derive.assert_awaited_once_with(request)
         generate.assert_called_once_with(
@@ -815,7 +840,7 @@ class TestInstallSkill:
     async def test_pending_owner_fallback_can_install(self, monkeypatch):
         db = _db()
         listing = _listing(status=ListingStatus.pending, submitted_by=USER_ID)
-        resolve = AsyncMock(side_effect=[None, listing])
+        resolve = AsyncMock(return_value=listing)
         monkeypatch.setattr(skill, "resolve_visible_listing", resolve)
         monkeypatch.setattr(skill, "commit_or_name_conflict", AsyncMock())
         monkeypatch.setattr("api.routes.config.derive_endpoints", AsyncMock(return_value={"api": "https://api.test"}))
@@ -839,7 +864,7 @@ class TestInstallSkill:
     async def test_missing_or_unapproved_nonowner_install_is_404_without_usage(self, monkeypatch, found):
         db = _db()
         fallback = None if found is None else _listing(status=ListingStatus.pending)
-        resolve = AsyncMock(side_effect=[None, fallback])
+        resolve = AsyncMock(return_value=fallback)
         monkeypatch.setattr(skill, "resolve_visible_listing", resolve)
         commit = AsyncMock()
         monkeypatch.setattr(skill, "commit_or_name_conflict", commit)
@@ -856,6 +881,37 @@ class TestInstallSkill:
         _http_error(exc, 404, "Listing not found or not approved")
         db.add.assert_not_called()
         commit.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_approved_old_version_is_installed_even_when_candidate_is_latest(self, monkeypatch):
+        db = _db()
+        listing = _listing(status=ListingStatus.pending, submitted_by=OTHER_USER_ID)
+        previous = SkillVersion(
+            id=uuid.UUID(int=123),
+            listing_id=listing.id,
+            version="1.0.0",
+            description="Previous",
+            status=ListingStatus.approved,
+            released_by=OTHER_USER_ID,
+            released_at=NOW,
+            task_type="code-review",
+        )
+        db.execute.return_value = _result(previous)
+        monkeypatch.setattr(skill, "resolve_visible_listing", AsyncMock(return_value=listing))
+        monkeypatch.setattr(skill, "commit_or_name_conflict", AsyncMock())
+        monkeypatch.setattr("api.routes.config.derive_endpoints", AsyncMock(return_value={"api": "https://api.test"}))
+        config = Mock(return_value={"skill": {"version": "1.0.0"}})
+        monkeypatch.setattr("services.skill_config_generator.generate_skill_config", config)
+
+        response = await skill.install_skill(
+            str(LISTING_ID), SkillInstallRequest(harness="pi", version="1.0.0"), MagicMock(), db, _user()
+        )
+
+        assert response.version_id == previous.id
+        assert response.warnings == []
+        assert previous.download_count == 1
+        assert listing.latest_version.download_count == 7
+        assert config.call_args.kwargs["version_override"] is previous
 
     @pytest.mark.asyncio
     async def test_unknown_requested_version_does_not_record_download(self, monkeypatch):
@@ -880,7 +936,7 @@ class TestInstallSkill:
         commit.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_config_failure_happens_after_usage_commit(self, monkeypatch):
+    async def test_config_failure_does_not_record_usage(self, monkeypatch):
         db = _db()
         listing = _listing()
         monkeypatch.setattr(skill, "resolve_visible_listing", AsyncMock(return_value=listing))
@@ -899,19 +955,39 @@ class TestInstallSkill:
                 _user(),
             )
 
-        assert isinstance(db.add.call_args.args[0], SkillDownload)
-        assert listing.latest_version.download_count == 8
-        commit.assert_awaited_once_with(db, "skill")
+        db.add.assert_not_called()
+        assert listing.latest_version.download_count == 7
+        commit.assert_not_awaited()
         generate.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_commit_failure_prevents_config_generation(self, monkeypatch):
+    async def test_digest_failure_does_not_record_usage(self, monkeypatch):
+        db = _db()
+        listing = _listing()
+        monkeypatch.setattr(skill, "resolve_visible_listing", AsyncMock(return_value=listing))
+        commit = AsyncMock()
+        monkeypatch.setattr(skill, "commit_or_name_conflict", commit)
+        monkeypatch.setattr("api.routes.config.derive_endpoints", AsyncMock(return_value={"api": "https://api.test"}))
+        monkeypatch.setattr("services.skill_config_generator.generate_skill_config", Mock(return_value={"skill": {}}))
+        monkeypatch.setattr("services.agent_lock.content_digest", Mock(side_effect=ValueError("bad digest")))
+
+        with pytest.raises(ValueError, match="bad digest"):
+            await skill.install_skill(str(LISTING_ID), SkillInstallRequest(harness="pi"), MagicMock(), db, _user())
+
+        db.add.assert_not_called()
+        assert listing.latest_version.download_count == 7
+        commit.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_commit_failure_does_not_return_generated_config(self, monkeypatch):
         db = _db()
         listing = _listing()
         monkeypatch.setattr(skill, "resolve_visible_listing", AsyncMock(return_value=listing))
         monkeypatch.setattr(skill, "commit_or_name_conflict", AsyncMock(side_effect=RuntimeError("commit failed")))
-        derive = AsyncMock()
+        derive = AsyncMock(return_value={"api": "https://api.test"})
+        generated = Mock(return_value={"skill": {"ok": True}})
         monkeypatch.setattr("api.routes.config.derive_endpoints", derive)
+        monkeypatch.setattr("services.skill_config_generator.generate_skill_config", generated)
 
         with pytest.raises(RuntimeError, match="commit failed"):
             await skill.install_skill(
@@ -922,7 +998,8 @@ class TestInstallSkill:
                 _user(),
             )
 
-        derive.assert_not_awaited()
+        derive.assert_awaited_once()
+        generated.assert_called_once()
 
 
 class TestDraftCreationAndUpdates:
@@ -1157,7 +1234,7 @@ class TestDraftCreationAndUpdates:
     @pytest.mark.asyncio
     async def test_active_foreign_lock_rejects_before_flush_or_commit(self, monkeypatch):
         db = _db()
-        listing = _listing(status=ListingStatus.pending, submitted_by=USER_ID)
+        listing = _listing(status=ListingStatus.draft, submitted_by=USER_ID)
         version = listing.latest_version
         version.is_editing = True
         version.editing_by = OTHER_USER_ID
@@ -1182,9 +1259,28 @@ class TestDraftCreationAndUpdates:
 
 class TestEditingLocks:
     @pytest.mark.asyncio
-    async def test_start_edit_locks_selected_version_row_for_update(self, monkeypatch):
+    async def test_legacy_pending_versions_require_withdrawal_even_without_stored_revision(self, monkeypatch):
         db = _db()
         listing = _listing(status=ListingStatus.pending, submitted_by=USER_ID)
+        _mock_skill_lock(monkeypatch, listing)
+        monkeypatch.setattr(skill, "resolve_listing", AsyncMock(return_value=listing))
+        commit = AsyncMock()
+        monkeypatch.setattr(skill, "commit_or_name_conflict", commit)
+
+        for action in (
+            lambda: skill.start_edit_skill(str(LISTING_ID), db, _user()),
+            lambda: skill.update_skill_draft(str(LISTING_ID), SkillUpdateRequest(description="new"), db, _user()),
+        ):
+            with pytest.raises(HTTPException) as blocked:
+                await action()
+            _http_error(blocked, 409, "Withdraw this pending version before editing its files")
+        commit.assert_not_awaited()
+        db.flush.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_start_edit_locks_selected_version_row_for_update(self, monkeypatch):
+        db = _db()
+        listing = _listing(status=ListingStatus.draft, submitted_by=USER_ID)
         locked = listing.latest_version
         db.execute.side_effect = [_result(listing.latest_version_id), _result(locked)]
         monkeypatch.setattr(skill, "resolve_listing", AsyncMock(return_value=listing))

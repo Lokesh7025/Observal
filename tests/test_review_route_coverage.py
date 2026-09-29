@@ -499,15 +499,17 @@ async def test_component_readiness_reads_the_pinned_release_not_the_latest():
 
     await engine.dispose()
     assert ready_flag is False
-    assert blockers == [
-        {
-            "component_type": "skill",
-            "component_id": str(waiting.id),
-            "name": "Waiting",
-            "version": "1.0.0",
-            "status": "pending",
-        }
-    ]
+    assert blockers[0] == {
+        "component_type": "skill",
+        "component_id": str(waiting.id),
+        "name": "Waiting",
+        "version": "1.0.0",
+        "status": "pending",
+    }
+    assert {(item["component_type"], item["status"]) for item in blockers[1:]} == {
+        ("unknown", "missing_listing"),
+        ("hook", "missing_listing"),
+    }
 
 
 @pytest.mark.asyncio
@@ -1044,6 +1046,9 @@ async def test_approve_each_component_type_updates_version_then_notifies_and_com
     listing, version = _orm_listing(listing_type, team_id=TEAM_ID)
     if listing_type == "skill":
         monkeypatch.setattr(review, "lock_skill_version", AsyncMock(return_value=(version.id, version)))
+        # Real-DB tests cover release ordering; this fixture verifies the
+        # notification and commit sequence without mocking SQL query results.
+        monkeypatch.setattr(review, "should_promote_skill_version", AsyncMock(return_value=True))
     events = []
     decision_boundaries.scope.return_value = PUBLIC_TEAM_SCOPE
     monkeypatch.setattr(review, "_find_listing", AsyncMock(return_value=(listing_type, listing)))
@@ -1362,7 +1367,7 @@ async def test_approve_agent_newest_release_supersedes_older_and_notifies_each_a
     assert agent.latest_version_id == newest.id
     assert agent.category == "testing"
     assert events == ["flush", "inbox", "inbox", "commit", "cache", "publish"]
-    readiness.assert_awaited_once_with(newest.components, db)
+    readiness.assert_awaited_once_with(newest.components, db, require_public_skills=True)
     assert decision_boundaries.decide.await_args_list == [
         call(
             db,
@@ -1646,6 +1651,30 @@ async def test_approve_bundle_decides_every_listing_type_in_one_commit(
             "submitter_id": SUBMITTER_ID,
         }
     db.commit.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_batch_routes_refuse_mcp_pending_update_behind_approved_pointer(monkeypatch, decision_boundaries):
+    db = _db()
+    actor = _actor()
+    mcp, approved = _orm_listing("mcp", status=ListingStatus.approved)
+    pending = type(approved)(id=uuid.uuid4(), listing_id=mcp.id, version="3.0.0", status=ListingStatus.pending)
+    mcp.versions = [approved, pending]
+    bundle_id = uuid.UUID(int=625)
+    db.execute.return_value = _result(scalar=SimpleNamespace(id=bundle_id, name="stale MCP"))
+    monkeypatch.setattr(review, "_bundle_listings", AsyncMock(return_value=[mcp]))
+    monkeypatch.setattr(review, "_find_listing", AsyncMock(return_value=("mcp", mcp)))
+
+    for action in (
+        lambda: review.approve_bundle(bundle_id, db, actor),
+        lambda: review.approve_mcp_with_skills(str(mcp.id), review.McpBulkApproveRequest(skill_ids=[]), db, actor),
+    ):
+        with pytest.raises(HTTPException) as blocked:
+            await action()
+        assert blocked.value.status_code == 409
+    assert pending.status == ListingStatus.pending
+    db.commit.assert_not_awaited()
+    decision_boundaries.decide.assert_not_awaited()
 
 
 @pytest.mark.asyncio

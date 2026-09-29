@@ -469,8 +469,9 @@ async def test_list_version_visibility_matches_effective_permissions(monkeypatch
 
     assert result == {"items": [], "total": 0, "page": 1, "page_size": 20}
     for awaited in db.execute.await_args_list:
-        has_status_filter = "skill_versions.status =" in _sql(awaited.args[0])
-        assert has_status_filter is expects_status_filter
+        statement = _sql(awaited.args[0])
+        assert ("skill_versions.status IN" in statement) is expects_status_filter
+        assert ("skill_versions.requires_global_review IS false" in statement) is expects_status_filter
 
 
 @pytest.mark.asyncio
@@ -635,6 +636,7 @@ async def test_publish_uses_real_model_pair_snapshots_content_and_orders_transac
     monkeypatch.setattr(versions.inbox, "on_publish", notify)
     monkeypatch.setattr(versions, "datetime", FrozenDateTime)
     if component_type == "skill":
+        listing.latest_version.review_epoch = 3  # Successors must not inherit withdrawn review cycles.
         monkeypatch.setattr(
             versions, "lock_skill_version", AsyncMock(return_value=(OLD_VERSION_ID, listing.latest_version))
         )
@@ -677,6 +679,7 @@ async def test_publish_uses_real_model_pair_snapshots_content_and_orders_transac
         assert created.args == ["-m", "review"]
         assert created.transport == "stdio"
     elif component_type == "skill":
+        assert created.review_epoch is None  # Database supplies the new generation's default 0.
         assert created.skill_md_content == "# Review\n"
         assert created.script_content == "print('review')"
         assert created.git_url == "https://github.com/acme/skills"

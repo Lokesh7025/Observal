@@ -408,8 +408,13 @@ class TestSkillRoutes:
         app, db, user = _app_with(router)
         listing = _listing_mock(None, status=ListingStatus.approved)
         db.execute = AsyncMock(return_value=_scalar_result(listing))
-        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
-            r = await ac.post(f"/api/v1/skills/{listing.id}/install", json={"harness": "cursor"})
+        with patch(
+            "api.routes.skill._selected_skill_release",
+            new_callable=AsyncMock,
+            return_value=(listing, listing.latest_version),
+        ):
+            async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+                r = await ac.post(f"/api/v1/skills/{listing.id}/install", json={"harness": "cursor"})
         assert r.status_code == 200
         assert "config_snippet" in r.json()
 

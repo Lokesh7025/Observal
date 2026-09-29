@@ -152,16 +152,6 @@ async def test_draft_fork_preserves_approved_pointer_and_supports_isolated_file_
             assert created.version_id != base.id
             assert len(created.files) == 2
             assert listing.latest_version_id == base.id
-            with pytest.raises(HTTPException) as premature:
-                await skill_files.submit_skill_version_draft(
-                    str(listing.id),
-                    created.version_id,
-                    SkillVersionRevisionRequest(observed_revision=created.revision),
-                    Response(),
-                    db,
-                    owner,
-                )
-            assert premature.value.status_code == 409
             with pytest.raises(HTTPException) as duplicate:
                 await skill_files.create_skill_candidate_draft(str(listing.id), request, Response(), db, owner)
             assert duplicate.value.status_code == 409
@@ -225,6 +215,18 @@ async def test_draft_fork_preserves_approved_pointer_and_supports_isolated_file_
                     owner,
                 )
             assert stale.value.status_code == 409
+            with pytest.raises(HTTPException) as gated:
+                await skill_files.submit_skill_version_draft(
+                    str(listing.id),
+                    candidate.id,
+                    SkillVersionRevisionRequest(observed_revision=edited.revision),
+                    Response(),
+                    db,
+                    owner,
+                )
+            assert gated.value.status_code == 409
+            assert candidate.status == ListingStatus.draft
+            assert listing.latest_version_id == base_id
     finally:
         await engine.dispose()
 

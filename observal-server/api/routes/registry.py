@@ -221,6 +221,13 @@ async def update_registry_visibility(
             if not membership or membership.role not in (TeamRole.owner, TeamRole.reviewer):
                 raise HTTPException(status_code=403, detail="Only team owners and reviewers can change visibility")
 
+    if req.visibility == "team" and item_type == "skill" and not listing.is_private:
+        original_team_id = listing.team_id
+        await db.execute(select(SkillListing.id).where(SkillListing.id == listing.id).with_for_update())
+        await db.refresh(listing, attribute_names=["is_private", "team_id"])
+        if listing.is_private or listing.team_id != original_team_id:
+            raise HTTPException(status_code=409, detail="Skill visibility changed; refresh before updating")
+
     if req.visibility == "team" and item_type != "agent":
         # Installs can pin any approved version of an agent, not just its latest,
         # so every approved version of a public agent has to keep resolving.
@@ -233,14 +240,20 @@ async def update_registry_visibility(
                 AgentComponent.component_id == listing.id,
                 Agent.is_private == False,  # noqa: E712
                 Agent.deleted_at.is_(None),
-                AgentVersion.status == AgentStatus.approved,
+                AgentVersion.status.in_((AgentStatus.approved, AgentStatus.pending))
+                if item_type == "skill"
+                else AgentVersion.status == AgentStatus.approved,
             )
             .limit(1)
         )
         if public_agent_ref is not None:
             raise HTTPException(
                 status_code=409,
-                detail="Cannot make this component team-only while an approved public agent version uses it",
+                detail=(
+                    "Cannot make this skill team-only while a pending or approved public agent version uses it"
+                    if item_type == "skill"
+                    else "Cannot make this component team-only while an approved public agent version uses it"
+                ),
             )
 
     if item_type == "agent":
@@ -285,6 +298,24 @@ async def update_registry_visibility(
                 status_code=409,
                 detail="Agent visibility conflicts with one or more component visibility settings",
             )
+        if req.visibility == "public":
+            skill_ids = sorted({ref["component_id"] for ref in component_refs if ref["component_type"] == "skill"})
+            if skill_ids:
+                # Hold share locks through the visibility commit. Skill
+                # privatization takes the same rows FOR UPDATE before checking
+                # public-agent dependencies, so neither transition can slip
+                # between this validation and the agent's public state.
+                rows = (
+                    await db.execute(
+                        select(SkillListing.id, SkillListing.is_private)
+                        .where(SkillListing.id.in_(skill_ids))
+                        .order_by(SkillListing.id)
+                        .with_for_update(read=True)
+                    )
+                ).all()
+                visible = dict(rows)
+                if any(visible.get(skill_id, True) for skill_id in skill_ids):
+                    raise HTTPException(status_code=409, detail="Public agent pins a private or missing skill")
 
     if item_type == "skill" and (req.visibility == "team") != listing.is_private:
         # Rewriting listing-wide visibility changes every version's reviewed
