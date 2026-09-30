@@ -205,7 +205,7 @@ async def _check_agent_components_ready(
         return True, []
     from services.agent_lock import pinned_component_blockers
 
-    blocking = await pinned_component_blockers(db, components)
+    blocking: list[dict] = []
     if require_public_skills:
         # Serialize public-agent review with skill privatization. Both acquire
         # skill listing locks before trusting visibility or committing approval.
@@ -231,6 +231,10 @@ async def _check_agent_components_ready(
                             "status": "not_public",
                         }
                     )
+    # Read pin status and digest only after acquiring the listing locks: a
+    # concurrent skill review transition may commit while we wait for SHARE.
+    # An earlier read would approve a public agent with now-pending bytes.
+    blocking.extend(await pinned_component_blockers(db, components))
     return len(blocking) == 0, blocking
 
 

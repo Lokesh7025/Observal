@@ -355,6 +355,24 @@ async def test_agent_review_blockers_reject_resource_bundle_with_old_digest(sess
     assert await agent_lock.pinned_component_blockers(session, [component]) == []
 
 
+async def test_agent_review_blocks_v2_skill_pin_after_stored_files_are_stripped(session):
+    owner = await ds.user(session)
+    listing = await ds.skill(session, owner)
+    row = (await session.execute(select(SkillVersion))).scalar_one()
+    row.extra_files = [{"path": "templates/new.txt", "content": "new"}]
+    component = SimpleNamespace(
+        component_type="skill",
+        component_id=listing.id,
+        component_name="example",
+        resolved_version=row.version,
+        resolved_version_id=row.id,
+        resolved_digest=agent_lock.content_digest("skill", row),
+    )
+    row.extra_files = []
+    blockers = await agent_lock.pinned_component_blockers(session, [component])
+    assert [item["status"] for item in blockers] == ["invalid_bundle_pin"]
+
+
 async def test_lock_document_is_persisted_and_digest_is_stable(session):
     owner = await ds.user(session)
     skill = await ds.skill(session, owner, version="1.2.0")

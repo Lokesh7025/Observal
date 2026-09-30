@@ -534,8 +534,11 @@ async def install_skill(
             raise HTTPException(
                 status_code=409, detail="Client must support skill_extra_files_v1 to install this skill version"
             )
-        if "skills" not in HARNESS_REGISTRY.get(req.harness.replace("_", "-"), {}).get("capabilities", set()):
+        harness_spec = HARNESS_REGISTRY.get(req.harness.replace("_", "-"), {})
+        if "skills" not in harness_spec.get("capabilities", set()):
             raise HTTPException(status_code=409, detail="Harness does not support complete skill folders")
+        if req.scope not in harness_spec.get("skills", {}):
+            raise HTTPException(status_code=409, detail="Harness does not support complete skill folders in this scope")
         if needs_bundle_delivery(installed):
             import services.dynamic_settings as _ds
 

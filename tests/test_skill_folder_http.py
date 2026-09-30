@@ -4,6 +4,8 @@
 """The negotiated folder contract through the actual FastAPI route and schema."""
 
 import base64
+import json
+from pathlib import Path
 from unittest.mock import AsyncMock
 
 import pytest
@@ -15,6 +17,8 @@ from api.deps import get_db, get_registry_user
 from api.routes import skill
 from models.skill import SkillDownload, SkillVersion
 from tests import discovery_support as ds
+
+CONTRACT = json.loads((Path(__file__).parent / "fixtures" / "skill_folder_install_contract.json").read_text())
 
 
 @pytest.mark.asyncio
@@ -53,14 +57,15 @@ async def test_http_selected_skill_needs_capability_and_deliberate_rollout(monke
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
             old = await client.post(url, json={"harness": "pi", "version": "1.2.0"})
             assert old.status_code == 409
-            assert "skill_extra_files_v1" in old.text
+            assert old.json() == {"detail": CONTRACT["refusals"]["old_client_standalone"]["detail"]}
             opted = {"harness": "pi", "version": "1.2.0", "supported_features": ["skill_extra_files_v1"]}
             before_rollout = await client.post(url, json=opted)
             assert before_rollout.status_code == 409
-            assert "disabled until fleet rollout" in before_rollout.text
+            assert before_rollout.json() == {"detail": CONTRACT["refusals"]["not_rolled_out_standalone"]["detail"]}
             monkeypatch.setattr("services.dynamic_settings.get_sync_bool", lambda key, default=False: True)
             unsupported = await client.post(url, json={**opted, "harness": "kiro"})
             assert unsupported.status_code == 409
+            assert unsupported.json() == {"detail": CONTRACT["refusals"]["unsupported_skills_harness"]["detail"]}
             selected = await client.post(url, json=opted)
             assert selected.status_code == 200, selected.text
             payload = selected.json()

@@ -10,8 +10,19 @@ import uuid
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
+from models.mcp import ListingStatus
+from models.skill import SkillVersion
+from observal_shared.harness_registry import HARNESS_REGISTRY
+from schemas.agent import AgentInstallRequest, AgentInstallResponse
+from schemas.skill import SkillInstallRequest, SkillInstallResponse
 from schemas.skill_resources import SkillInstallFolder
+from services.agent_lock import LOCK_VERSION, SKILL_DIGEST_ALG_V2, content_digest, lock_digest
+from services.harness import generate_agent_config
 from services.skill_bundle import complete_skill_folder
+from services.skill_config_generator import generate_skill_config
+from tests import discovery_support as ds
 
 
 def test_server_bundle_fixture_binds_selected_files_modes_and_v2_digest():
@@ -36,8 +47,10 @@ def test_server_bundle_fixture_binds_selected_files_modes_and_v2_digest():
         version="1.1.0",
         description="Example skill",
         task_type="general",
+        target_agents=[],
         supported_harnesses=["pi"],
         delivery_mode="registry_direct",
+        skill_path="/",
         skill_md_content=base64.b64decode(parsed.files[0].content).decode(),
         script_filename=None,
         script_content=None,
@@ -48,3 +61,120 @@ def test_server_bundle_fixture_binds_selected_files_modes_and_v2_digest():
     )
     actual = complete_skill_folder(uuid.UUID(expected["listing_id"]), row, skill_file_path=expected["skill_file_path"])
     assert json.loads(actual.model_dump_json()) == expected
+
+    assert SkillInstallRequest.model_validate(example["standalone"]["request"]).version == row.version
+    standalone = SkillInstallResponse.model_validate_json(json.dumps(example["standalone"]["response"]))
+    listing = SimpleNamespace(
+        id=uuid.UUID(expected["listing_id"]), name="Example", namespace="acme", slug="example", version=row.version
+    )
+    config = generate_skill_config(
+        listing, "pi", server_url="https://api.example.test", scope="project", version_override=row
+    )
+    assert config.pop("skills")["path"] == expected["skill_file_path"]
+    config["skill"].pop("skill_md_content")
+    config["skill"]["bundle_version_id"] = expected["version_id"]
+    assert standalone.config_snippet == config
+    assert standalone.bundle == actual
+    assert standalone.digest == expected["digest"]
+    assert json.loads(standalone.model_dump_json()) == example["standalone"]["response"]
+
+    agent_request = AgentInstallRequest.model_validate(example["agent"]["request"])
+    assert agent_request.supported_features == ["skill_extra_files_v1"]
+    agent = AgentInstallResponse.model_validate_json(json.dumps(example["agent"]["response"]))
+    assert len(agent.skill_bundles) == 1
+    selected = agent.skill_bundles[0]
+    configured = agent.config_snippet["skill_components"]
+    assert len(configured) == 1
+    assert configured[0]["bundle_version_id"] == str(selected.version_id)
+    assert configured[0]["path"] == selected.skill_file_path
+    assert "skills" not in agent.config_snippet  # No duplicate partial SKILL.md write.
+    agent_source = SimpleNamespace(
+        id=agent.agent_id,
+        name="Example Agent",
+        namespace="acme",
+        slug="example-agent",
+        prompt="",
+        external_mcps=[],
+        components=[SimpleNamespace(component_type="skill", component_id=listing.id)],
+    )
+    skill_source = SimpleNamespace(
+        id=listing.id,
+        name="Example",
+        namespace="acme",
+        slug="example",
+        description=row.description,
+        task_type=row.task_type,
+        delivery_mode=row.delivery_mode,
+        skill_path=row.skill_path,
+        skill_md_content=row.skill_md_content,
+    )
+    snippet = generate_agent_config(
+        agent_source,
+        "pi",
+        observal_url="https://api.example.test",
+        skill_listings={listing.id: skill_source},
+        component_names={str(listing.id): "Example"},
+        options={"scope": "project"},
+    )
+    for component in snippet["skill_components"]:
+        for field in ("skill_md_content", "script_content", "script_filename"):
+            component.pop(field, None)
+        component["bundle_version_id"] = expected["version_id"]
+    assert snippet == agent.config_snippet
+    expected_path = HARNESS_REGISTRY["pi"]["skills"]["project"].format(name="example")
+    assert selected.skill_file_path == expected_path.replace(".pi/", ".pi/agents/example-agent/", 1)
+    assert (
+        selected.files
+        == complete_skill_folder(uuid.UUID(expected["listing_id"]), row, skill_file_path=selected.skill_file_path).files
+    )
+    assert selected.digest == expected["digest"]
+    entry = agent.lock["components"][0]
+    assert entry["id"] == str(selected.listing_id)
+    assert entry["version_id"] == str(selected.version_id)
+    assert entry["digest"] == selected.digest
+    assert entry["source"] == "lock"
+    assert agent.lock["status"] == "locked"
+    assert agent.lock["problems"] == []
+    documented_lock = {
+        "lock_version": LOCK_VERSION,
+        "digest_alg": SKILL_DIGEST_ALG_V2,
+        "agent": {
+            "id": str(agent.agent_id),
+            "qualified_name": "acme/example-agent",
+            "version": agent.version,
+            "version_id": "33333333-3333-4333-8333-333333333333",
+        },
+        "status": agent.lock["status"],
+        "components": [{key: value for key, value in entry.items() if key != "source"}],
+        "external_mcps": [],
+    }
+    assert agent.lock["digest"] == lock_digest(documented_lock)
+    assert json.loads(agent.model_dump_json()) == example["agent"]["response"]
+
+
+@pytest.mark.asyncio
+async def test_fixture_digest_includes_actual_persisted_skill_version_defaults():
+    example = json.loads((Path(__file__).parent / "fixtures" / "skill_folder_install_contract.json").read_text())
+    expected = example["standalone"]["response_bundle"]
+    engine = ds.make_engine()
+    maker = await ds.create_schema(engine)
+    try:
+        async with maker() as db:
+            owner = await ds.user(db)
+            listing = await ds.skill(db, owner, status=ListingStatus.approved)
+            version = await db.get(SkillVersion, listing.latest_version_id)
+            version.version = "1.1.0"
+            version.description = "Example skill"
+            version.task_type = "general"
+            version.supported_harnesses = ["pi"]
+            version.skill_md_content = base64.b64decode(expected["files"][0]["content"]).decode()
+            version.extra_files = [
+                {"path": "scripts/run.sh", "content": "echo ok\n", "executable": True},
+                {"path": "assets/icon.bin", "content": "AP8=", "encoding": "base64", "executable": False},
+            ]
+            await db.flush()
+            assert version.skill_path == "/"
+            assert version.target_agents == []
+            assert content_digest("skill", version) == expected["digest"]
+    finally:
+        await engine.dispose()

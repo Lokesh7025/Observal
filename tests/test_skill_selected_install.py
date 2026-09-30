@@ -64,6 +64,17 @@ async def test_opted_in_standalone_bundle_declares_all_files_and_denies_old_clie
             version = await db.get(SkillVersion, version_id)
             assert version.download_count == 0
             monkeypatch.setattr("services.dynamic_settings.get_sync_bool", lambda key, default=False: True)
+            with pytest.raises(HTTPException) as wrong_scope:
+                await skill.install_skill(
+                    str(listing_id),
+                    SkillInstallRequest(harness="pi", scope="unknown", supported_features=["skill_extra_files_v1"]),
+                    MagicMock(),
+                    db,
+                    owner,
+                )
+            assert wrong_scope.value.status_code == 409
+            assert wrong_scope.value.detail == "Harness does not support complete skill folders in this scope"
+            assert (await db.get(SkillVersion, version_id)).download_count == 0
             response = await skill.install_skill(
                 str(listing_id),
                 SkillInstallRequest(harness="pi", supported_features=["skill_extra_files_v1"]),

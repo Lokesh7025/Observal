@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Kaushik Kumar <kaushikrjpm10@gmail.com>
 # SPDX-License-Identifier: Apache-2.0
 
-"""Bounded proposed server contract; endpoint examples are not live until delivery."""
+"""Bounded author/reviewer contract; resource-bearing decisions remain gated until rollout."""
 
 import json
 from pathlib import Path
@@ -42,7 +42,7 @@ def test_full_tree_and_request_examples_bind_to_same_version():
     assert next(f.content for f in files if f.path == "assets/logo.bin") == b"\x00\xff"
     declarations = [f.declaration for f in files]
     manifest = SkillVersionManifest.model_validate_json(
-        json.dumps(FIXTURE["manifest"] | {"files": [entry.model_dump() for entry in declarations]})
+        json.dumps(FIXTURE["manifest_identity"] | {"files": [entry.model_dump() for entry in declarations]})
     )
     assert len(manifest.files) == len(files)
     for file in files:
@@ -57,12 +57,8 @@ def test_full_tree_and_request_examples_bind_to_same_version():
         assert detail.file.sha256 == file.declaration.sha256
     assert str(manifest.version_id) == FIXTURE["draft_version_id"]
     assert SkillFolderDraftRequest.model_validate(FIXTURE["author_create"]["body"]).version == "1.1.0"
-    assert (
-        SkillSnapshotReplace.model_validate(
-            FIXTURE["snapshot"] | {"observed_revision": FIXTURE["revision"]}
-        ).observed_revision
-        == manifest.revision
-    )
+    assert SkillSnapshotReplace.model_validate(FIXTURE["author_replace"]["body"]).observed_revision == manifest.revision
+    assert SkillSnapshotReplace.model_validate(FIXTURE["author_replace"]["body"]).extra_files == snapshot.extra_files
     assert len(SkillFileOperations.model_validate(FIXTURE["author_patch"]["body"]).operations) == 3
     assert VersionReviewRequest.model_validate(FIXTURE["review"]["body"]).observed_revision == manifest.revision
     assert FIXTURE["review"]["path"] == (
@@ -92,7 +88,7 @@ def test_sixty_file_tree_is_bounded_and_manifest_is_content_free():
     assert len(files) == 61
     assert sum(f.declaration.size for f in files) < MAX_BUNDLE_BYTES
     manifest = SkillVersionManifest.model_validate_json(
-        json.dumps(FIXTURE["manifest"] | {"files": [f.declaration.model_dump() for f in files]})
+        json.dumps(FIXTURE["manifest_identity"] | {"files": [f.declaration.model_dump() for f in files]})
     )
     assert '"content"' not in manifest.model_dump_json()
     assert manifest.files[-1].path == "templates/item-59.txt"

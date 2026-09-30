@@ -192,6 +192,12 @@ def content_digest(component_type: str, version: Any) -> str:
     return _sha256(payload)
 
 
+def _requires_v2_skill_pin(component: Any, row: Any) -> bool:
+    """A pinned whole folder stays exact even if stored bytes later disappear."""
+    recorded = getattr(component, "resolved_digest", None)
+    return needs_bundle_delivery(row) or (isinstance(recorded, str) and recorded.startswith(f"{SKILL_DIGEST_ALG_V2}:"))
+
+
 def _external_mcp_digest(mcp: dict) -> str:
     """Digest an inline MCP without hashing its environment values."""
     payload = {key: value for key, value in mcp.items() if key != "env"}
@@ -237,7 +243,11 @@ async def _versions_for(db: AsyncSession, keys: Iterable[tuple[str, uuid.UUID]])
     found: dict[tuple[str, uuid.UUID], list] = {}
     for component_type, ids in by_type.items():
         model = VERSION_MODELS[component_type]
-        rows = (await db.execute(select(model).where(model.listing_id.in_(ids)))).scalars().all()
+        rows = (
+            (await db.execute(select(model).where(model.listing_id.in_(ids)).execution_options(populate_existing=True)))
+            .scalars()
+            .all()
+        )
         for row in rows:
             found.setdefault((component_type, row.listing_id), []).append(row)
     return found
@@ -556,7 +566,7 @@ async def pinned_component_blockers(db: AsyncSession, components: Iterable[Any])
             continue
         if row is None:
             row = next((r for r in versions.get(key, []) if r.id == listing.latest_version_id), None)
-        if component.component_type == "skill" and row is not None and needs_bundle_delivery(row):
+        if component.component_type == "skill" and row is not None and _requires_v2_skill_pin(component, row):
             try:
                 pinned_digest = content_digest("skill", row)
             except SkillValidationError:
@@ -739,7 +749,7 @@ async def load_pinned_listings(
             entry = _entry(component, row, listing, source)
         except SkillValidationError as exc:
             raise HTTPException(status_code=409, detail=f"{label} has an invalid stored skill folder") from exc
-        if kind == "skill" and needs_bundle_delivery(row) and component.resolved_digest != entry["digest"]:
+        if kind == "skill" and _requires_v2_skill_pin(component, row) and component.resolved_digest != entry["digest"]:
             raise HTTPException(status_code=409, detail=f"{label} pinned folder differs from its v2 digest")
         loaded.entries.append(entry)
         loaded.listings[kind][component.component_id] = PinnedListing(listing, row)

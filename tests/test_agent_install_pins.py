@@ -14,12 +14,16 @@ from __future__ import annotations
 
 import json
 import uuid
+from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import pytest
-from fastapi import HTTPException
+from fastapi import FastAPI, HTTPException
+from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select
 
+from api.deps import get_db, get_registry_user
+from api.routes.agent._router import router as agent_router
 from api.routes.agent.install import install_agent
 from models.agent import AgentStatus, AgentVersion
 from models.agent_component import AgentComponent
@@ -31,6 +35,8 @@ from models.skill import SkillVersion
 from schemas.agent import AgentInstallRequest
 from services.agent_lock import VERSION_MODELS, content_digest, lock_agent_version
 from tests import discovery_support as ds
+
+CONTRACT = json.loads((Path(__file__).parent / "fixtures" / "skill_folder_install_contract.json").read_text())
 
 
 @pytest.fixture
@@ -137,6 +143,59 @@ async def test_install_uses_the_pinned_release_after_a_newer_one_is_approved(ses
     assert response.lock["digest"].startswith("sha256:")
 
 
+async def test_http_pinned_agent_returns_complete_binary_folder_and_refuses_old_client(session):
+    owner = await ds.user(session)
+    listing, agent, _ = await _pinned_agent(session, owner, "skill")
+    pinned = await session.get(SkillVersion, listing.latest_version_id)
+    pinned.extra_files = [{"path": "assets/icon.bin", "content": "AP8=", "encoding": "base64"}]
+    version = (await session.execute(select(AgentVersion))).scalar_one()
+    await lock_agent_version(session, agent, version)
+    await session.commit()
+
+    app = FastAPI()
+    app.include_router(agent_router)
+
+    async def db_session():
+        yield session
+
+    app.dependency_overrides[get_db] = db_session
+    app.dependency_overrides[get_registry_user] = lambda: owner
+    settings_key = "registry.skill_folder_delivery_enabled"
+    import services.dynamic_settings as settings
+
+    original = settings.get_sync_bool
+
+    def enabled(key, default=None):
+        return True if key == settings_key else original(key, default)
+
+    with (
+        patch("api.routes.agent.install._ds.get_sync_bool", side_effect=enabled),
+        patch("api.routes.config.derive_endpoints", AsyncMock(return_value={"api": "http://observal.test"})),
+        patch("services.download_tracker.record_agent_download", AsyncMock()),
+    ):
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            route = f"/api/v1/agents/{agent.id}/install"
+            old = await client.post(route, json={"harness": "pi", "options": {"scope": "project"}})
+            assert old.status_code == 409
+            assert old.json() == {"detail": CONTRACT["refusals"]["old_client_agent"]["detail"]}
+            opted = await client.post(
+                route,
+                json={"harness": "pi", "options": {"scope": "project"}, "supported_features": ["skill_extra_files_v1"]},
+            )
+            assert opted.status_code == 200, opted.text
+            body = opted.json()
+            assert len(body["skill_bundles"]) == 1
+            bundle = body["skill_bundles"][0]
+            assert bundle["listing_id"] == str(listing.id)
+            assert bundle["version_id"] == str(pinned.id)
+            assert [file["path"] for file in bundle["files"]] == ["SKILL.md", "assets/icon.bin"]
+            assert bundle["files"][1]["content"] == "AP8="
+            assert bundle["files"][1]["mode"] == "0644"
+            assert body["lock"]["components"][0]["digest"] == bundle["digest"]
+            assert body["config_snippet"]["skill_components"][0]["bundle_version_id"] == str(pinned.id)
+            assert "skills" not in body["config_snippet"]
+
+
 async def test_opted_in_resource_less_direct_agent_still_declares_skill_md(session):
     owner = await ds.user(session)
     listing, agent, _ = await _pinned_agent(session, owner, "skill")
@@ -166,9 +225,10 @@ async def test_agent_bundle_preserves_pinned_tree_for_every_skill_harness(sessio
     await lock_agent_version(session, agent, version)
     await session.commit()
 
-    with pytest.raises(HTTPException, match="skill_extra_files_v1"):
+    with pytest.raises(HTTPException, match="skill_extra_files_v1") as old_client:
         await _install(session, agent, owner, harness=harness)
-    with pytest.raises(HTTPException, match="disabled until fleet rollout"):
+    assert old_client.value.detail == CONTRACT["refusals"]["old_client_agent"]["detail"]
+    with pytest.raises(HTTPException, match="disabled until fleet rollout") as not_rolled_out:
         await _install(
             session,
             agent,
@@ -177,6 +237,7 @@ async def test_agent_bundle_preserves_pinned_tree_for_every_skill_harness(sessio
             options={"scope": scope},
             supported_features=["skill_extra_files_v1"],
         )
+    assert not_rolled_out.value.detail == CONTRACT["refusals"]["not_rolled_out_agent"]["detail"]
     response = await _install(
         session,
         agent,
@@ -214,6 +275,7 @@ async def test_bundle_refuses_harness_without_verified_skills_capability(session
             session, agent, owner, harness=harness, supported_features=["skill_extra_files_v1"], rollout_enabled=True
         )
     assert refused.value.status_code == 409
+    assert refused.value.detail == CONTRACT["refusals"]["unsupported_skills_harness_agent"]["detail"]
 
 
 @pytest.mark.parametrize("resource", ["extra", "empty_script"])
@@ -241,7 +303,30 @@ async def test_pinned_direct_resource_is_refused_before_config_and_download(sess
             await _install(session, agent, owner)
         generate.assert_not_called()
     assert refused.value.status_code == 409
-    assert "pinned folder differs from its v2 digest" in refused.value.detail
+    assert refused.value.detail == CONTRACT["refusals"]["stale_v2_pin_agent"]["detail"].replace("Example", listing.name)
+
+
+async def test_v2_skill_pin_cannot_be_downgraded_to_resource_less_in_non_strict_install(session):
+    owner = await ds.user(session)
+    listing, agent, _ = await _pinned_agent(session, owner, "skill")
+    pinned = await session.get(SkillVersion, listing.latest_version_id)
+    pinned.extra_files = [{"path": "assets/icon.bin", "content": "AP8=", "encoding": "base64"}]
+    version = (await session.execute(select(AgentVersion))).scalar_one()
+    await lock_agent_version(session, agent, version)
+    link = (await session.execute(select(AgentComponent))).scalar_one()
+    assert link.resolved_digest.startswith("observal-content-v2:")
+    await session.commit()
+
+    # Simulate a historical row changed after approval: the current row now
+    # looks resource-less, but the agent approved a v2 whole-folder pin.
+    pinned.extra_files = []
+    await session.commit()
+    with patch("api.routes.agent.install.generate_agent_config") as generate:
+        with pytest.raises(HTTPException) as refused:
+            await _install(session, agent, owner, strict=False)
+        generate.assert_not_called()
+    assert refused.value.status_code == 409
+    assert "pinned folder differs" in refused.value.detail
 
 
 @pytest.mark.parametrize(
