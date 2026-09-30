@@ -773,6 +773,22 @@ async def _lock_skill_decision(db, listing, current_user, version=None, *, appro
         raise HTTPException(status_code=409, detail="Skill version changed during review")
     if locked.status != ListingStatus.pending:
         raise HTTPException(status_code=409, detail="Skill version is no longer pending")
+    # Legacy listing/bundle decisions have no version UUID or observed revision.
+    # The initial candidate list may be stale after waiting for the listing
+    # lock, so recheck ambiguity inside the serialized review transaction.
+    pending_ids = (
+        (
+            await db.execute(
+                select(SkillVersion.id)
+                .where(SkillVersion.listing_id == listing.id, SkillVersion.status == ListingStatus.pending)
+                .limit(2)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    if pending_ids != [locked.id]:
+        raise HTTPException(status_code=409, detail="Select an exact pending skill version for review")
     if locked.requires_global_review:
         if not (await _require_review_scope(db, current_user)).is_global_reviewer:
             raise HTTPException(status_code=404, detail="Submission not found")

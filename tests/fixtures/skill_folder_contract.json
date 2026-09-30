@@ -1,5 +1,6 @@
 {
-  "note": "Proposed Kaushik server contract; rollout stays fail-closed until author/review/install endpoints implement these shapes. Files are relative to the selected skill version, not the listing pointer.",
+  "note": "Server author/review contract; resource-bearing decisions and install stay disabled until registry.skill_folder_delivery_enabled is explicitly enabled after compatible fleet/installer rollout. Files are relative to the selected skill version, not the listing pointer.",
+  "typed_install_example": "skill_folder_install_contract.json",
   "listing_id": "11111111-1111-4111-8111-111111111111",
   "base_version_id": "22222222-2222-4222-8222-222222222222",
   "draft_version_id": "44444444-4444-4444-8444-444444444444",
@@ -31,8 +32,8 @@
   "agent_request": {"harness": "claude-code", "options": {"scope": "project"}, "supported_features": ["skill_extra_files_v1"]},
   "failures": {
     "missing_feature": {"status": 409, "detail": "Client must support skill_extra_files_v1 to install this skill version"},
-    "missing_revision": {"status": 409, "detail": "Review this exact skill version with its observed revision"},
-    "stale_revision": {"status": 409, "detail": "Skill version changed; refresh its manifest before saving or reviewing"},
+    "missing_revision": {"status": 409, "detail": "Review the bundled skill UUID with its observed revision"},
+    "stale_revision": {"status": 409, "detail": "Skill version changed; refresh before review"},
     "invalid_tree": {"status": 422},
     "out_of_scope": {"status": 404}
   },

@@ -97,6 +97,11 @@ def _sql(statement) -> str:
     return " ".join(str(statement).split())
 
 
+def _pending_skill_ids(statement) -> bool:
+    sql = _sql(statement)
+    return "FROM skill_versions" in sql and "skill_versions.status" in sql
+
+
 def _params(statement) -> dict:
     return statement.compile().params
 
@@ -1053,7 +1058,14 @@ async def test_approve_each_component_type_updates_version_then_notifies_and_com
     decision_boundaries.scope.return_value = PUBLIC_TEAM_SCOPE
     monkeypatch.setattr(review, "_find_listing", AsyncMock(return_value=(listing_type, listing)))
     db.flush.side_effect = lambda: events.append("flush")
-    db.execute.side_effect = lambda statement: events.append("update") or _result()
+
+    def record_execute(statement):
+        if listing_type == "skill" and _pending_skill_ids(statement):
+            return _result(scalars=[version.id])
+        events.append("update")
+        return _result()
+
+    db.execute.side_effect = record_execute
     decision_boundaries.decide.side_effect = lambda *args, **kwargs: events.append("inbox")
     db.commit.side_effect = lambda: events.append("commit")
     db.refresh.side_effect = lambda row, **kwargs: events.append("auth" if kwargs else "refresh")
@@ -1220,6 +1232,10 @@ async def test_reject_each_component_type_records_reason_notifies_and_cascades(
     decision_boundaries.invalidate.side_effect = lambda namespace: events.append("cache")
     decision_boundaries.create_task.side_effect = lambda awaitable: events.append("publish")
     request = ReviewActionRequest(reason="needs changes")
+    if listing_type == "skill":
+        db.execute.side_effect = lambda statement: (
+            _result(scalars=[version.id]) if _pending_skill_ids(statement) else _result()
+        )
 
     result = await review.reject(str(listing.id), request, db, actor)
 
@@ -1627,6 +1643,9 @@ async def test_approve_bundle_decides_every_listing_type_in_one_commit(
     db.execute.return_value = _result(scalar=bundle)
     monkeypatch.setattr(review, "_bundle_listings", AsyncMock(return_value=listings))
     skill_listing = next(row for row in listings if isinstance(row, review.SkillListing))
+    db.execute.side_effect = lambda statement: (
+        _result(scalars=[skill_listing.latest_version_id]) if _pending_skill_ids(statement) else _result(scalar=bundle)
+    )
     monkeypatch.setattr(
         review,
         "lock_skill_version",
@@ -1694,6 +1713,9 @@ async def test_reject_bundle_decides_every_listing_type_with_shared_reason(
     monkeypatch.setattr(review, "_bundle_listings", AsyncMock(return_value=listings))
 
     skill_listing = next(row for row in listings if isinstance(row, review.SkillListing))
+    db.execute.side_effect = lambda statement: (
+        _result(scalars=[skill_listing.latest_version_id]) if _pending_skill_ids(statement) else _result(scalar=bundle)
+    )
     monkeypatch.setattr(
         review,
         "lock_skill_version",
@@ -1914,7 +1936,18 @@ async def test_bulk_skill_locks_use_canonical_order(monkeypatch, decision_bounda
     second, _ = _orm_listing("skill", index=2)
     by_id = {str(row.id): row for row in (first, second)}
     ordered = sorted((first.id, second.id))
-    db.execute.side_effect = [_result(scalar=by_id[str(uid)]) for uid in ordered]
+    listing_results = iter(_result(scalar=by_id[str(uid)]) for uid in ordered)
+    db.execute.side_effect = lambda statement: (
+        _result(
+            scalars=[
+                by_id[
+                    str(next(value for value in _bound_values(statement) if isinstance(value, uuid.UUID)))
+                ].latest_version_id
+            ]
+        )
+        if _pending_skill_ids(statement)
+        else next(listing_results)
+    )
     monkeypatch.setattr(review, "_find_listing", AsyncMock(return_value=("mcp", mcp)))
     lock = AsyncMock(
         side_effect=lambda _db, _listing_id, version_id: (version_id, by_id[str(_listing_id)].latest_version)

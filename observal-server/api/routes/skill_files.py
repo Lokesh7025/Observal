@@ -22,7 +22,7 @@ from api.deps import (
     require_role,
     resolve_listing,
 )
-from api.routes._skill_lock import lock_skill_version, should_promote_skill_version
+from api.routes._skill_lock import approved_skill_base_id, lock_skill_version, should_promote_skill_version
 from models.mcp import ListingStatus
 from models.skill import SkillListing, SkillVersion
 from models.user import User, UserRole
@@ -229,6 +229,8 @@ async def create_skill_candidate_draft(
     if listing.latest_version_id is None:
         raise HTTPException(status_code=409, detail="Skill has no reviewed release to fork")
     latest_id, latest = await lock_skill_version(db, listing.id, listing.latest_version_id)
+    if latest_id != latest.id:
+        raise HTTPException(status_code=409, detail="Skill latest release changed; refresh before forking a draft")
     await db.refresh(
         listing,
         attribute_names=["submitted_by", "co_authors", "team_id", "is_private", "name", "namespace", "slug", "owner"],
@@ -237,21 +239,7 @@ async def create_skill_candidate_draft(
         get_effective_component_permission(listing, current_user) != "owner"
     ):
         raise HTTPException(status_code=403, detail="Not the listing owner")
-    if latest.status in INSTALLABLE_STATUSES and not latest.requires_global_review:
-        approved_id = latest_id
-    else:
-        approved_id = (
-            await db.execute(
-                select(SkillVersion.id)
-                .where(
-                    SkillVersion.listing_id == listing.id,
-                    SkillVersion.status.in_(INSTALLABLE_STATUSES),
-                    SkillVersion.requires_global_review.is_(False),
-                )
-                .order_by(SkillVersion.released_at.desc(), SkillVersion.id.desc())
-                .limit(1)
-            )
-        ).scalar_one_or_none()
+    approved_id = await approved_skill_base_id(db, listing.id, latest)
     if approved_id is None or req.base_version_id != approved_id:
         raise HTTPException(status_code=409, detail="Approved skill base changed; refresh before creating a draft")
     base = (

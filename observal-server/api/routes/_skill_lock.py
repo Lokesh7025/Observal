@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.mcp import ListingStatus
 from models.skill import SkillListing, SkillVersion
+from services.agent_lock import INSTALLABLE_STATUSES, latest_release
 
 
 async def lock_skill_version(
@@ -37,6 +38,27 @@ async def lock_skill_version(
     if version is None:
         raise HTTPException(status_code=409, detail="Skill version changed during review or editing")
     return latest_id, version
+
+
+async def approved_skill_base_id(db: AsyncSession, listing_id: uuid.UUID, current: SkillVersion) -> uuid.UUID | None:
+    """Use the cleared pointer or highest stable release, never release timestamps.
+
+    Call with the listing writer lock already held. The caller must lock and
+    revalidate the selected version before inheriting its bytes.
+    """
+    if current.status in INSTALLABLE_STATUSES and not current.requires_global_review:
+        return current.id
+    rows = (
+        await db.execute(
+            select(SkillVersion.id, SkillVersion.version, SkillVersion.status).where(
+                SkillVersion.listing_id == listing_id,
+                SkillVersion.status.in_(INSTALLABLE_STATUSES),
+                SkillVersion.requires_global_review.is_(False),
+            )
+        )
+    ).all()
+    chosen = latest_release(rows)
+    return chosen.id if chosen is not None else None
 
 
 async def should_promote_skill_version(db: AsyncSession, latest_id: uuid.UUID, candidate: SkillVersion) -> bool:

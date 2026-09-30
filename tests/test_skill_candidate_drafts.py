@@ -4,7 +4,9 @@
 """A saved candidate owns new bytes without moving the approved pointer."""
 
 import json
+from datetime import timedelta
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 import pytest
 from fastapi import HTTPException, Response
@@ -15,12 +17,133 @@ from models.inbox import InboxItem, InboxItemEvent
 from models.mcp import ListingStatus
 from models.skill import SkillListing, SkillVersion
 from models.user import User, UserRole
+from schemas.component_version import VersionPublishRequest
 from schemas.skill import SkillCandidateDraftRequest, SkillUpdateRequest
 from schemas.skill_resources import SkillFileOperations, SkillVersionRevisionRequest
 from services.skill_revisions import skill_content_revision
 from tests import discovery_support as ds
 
 FIXTURE = json.loads((Path(__file__).parent / "fixtures/skill_folder_contract.json").read_text())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("case", ["marked_approved", "approved_prerelease_behind_pending"])
+async def test_one_shot_publish_never_inherits_uncleared_or_ambiguous_history(monkeypatch, case):
+    engine = ds.make_engine()
+    maker = await ds.create_schema(engine)
+    notify = AsyncMock()
+    monkeypatch.setattr(component_versions.inbox, "on_publish", notify)
+    try:
+        async with maker() as db:
+            owner = await ds.user(db)
+            listing = await ds.skill(
+                db,
+                owner,
+                status=ListingStatus.approved,
+                version="1.2.0-rc.1" if case == "approved_prerelease_behind_pending" else "1.2.0",
+            )
+            if case == "marked_approved":
+                (await db.get(SkillVersion, listing.latest_version_id)).requires_global_review = True
+            else:
+                await ds.add_skill_version(
+                    db, listing, owner, version="1.3.0", status=ListingStatus.pending, set_latest=True
+                )
+            await db.commit()
+            with pytest.raises(HTTPException) as blocked:
+                await component_versions._publish_version(
+                    str(listing.id),
+                    VersionPublishRequest(version="1.4.0", description="Unchecked successor"),
+                    SkillListing,
+                    SkillVersion,
+                    "skill",
+                    db,
+                    owner,
+                )
+            assert blocked.value.status_code == 409
+            assert "No cleared stable approved skill base" in str(blocked.value.detail)
+            assert (
+                await db.scalar(
+                    select(SkillVersion.id).where(
+                        SkillVersion.listing_id == listing.id, SkillVersion.version == "1.4.0"
+                    )
+                )
+                is None
+            )
+            notify.assert_not_awaited()
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_draft_and_one_shot_publish_inherit_highest_stable_not_later_backfill(monkeypatch):
+    engine = ds.make_engine()
+    maker = await ds.create_schema(engine)
+    monkeypatch.setattr(component_versions.inbox, "on_publish", AsyncMock())
+    try:
+        async with maker() as db:
+            owner = await ds.user(db)
+            listing = await ds.skill(
+                db, owner, status=ListingStatus.approved, content=FIXTURE["snapshot"]["skill_md_content"]
+            )
+            approved = await db.get(SkillVersion, listing.latest_version_id)
+            old = await ds.add_skill_version(
+                db,
+                listing,
+                owner,
+                version="1.1.0",
+                status=ListingStatus.approved,
+                content="---\nname: old\ndescription: old\n---\n# Old\n",
+                set_latest=False,
+            )
+            old.released_at = ds.NOW + timedelta(days=2)
+            await ds.add_skill_version(
+                db,
+                listing,
+                owner,
+                version="1.4.0",
+                status=ListingStatus.pending,
+                content="---\nname: pending\ndescription: unreviewed\n---\n# Pending\n",
+            )
+            base_revision = skill_content_revision(listing, approved)
+            await db.commit()
+            listing_id, approved_id, owner_id = listing.id, approved.id, owner.id
+
+        async with maker() as db:
+            owner = await db.get(User, owner_id)
+            draft = await skill_files.create_skill_candidate_draft(
+                str(listing_id),
+                SkillCandidateDraftRequest(
+                    base_version_id=approved_id,
+                    observed_base_revision=base_revision,
+                    version="1.5.0",
+                    description="Saved on current approved base",
+                ),
+                Response(),
+                db,
+                owner,
+            )
+            saved = await db.get(SkillVersion, draft.version_id)
+            assert saved.base_version_id == approved_id
+            assert saved.skill_md_content == FIXTURE["snapshot"]["skill_md_content"]
+            published = await component_versions._publish_version(
+                str(listing_id),
+                VersionPublishRequest(version="1.6.0", description="One shot"),
+                SkillListing,
+                SkillVersion,
+                "skill",
+                db,
+                owner,
+            )
+            assert published["version"] == "1.6.0"
+            released = (
+                await db.execute(
+                    select(SkillVersion).where(SkillVersion.listing_id == listing_id, SkillVersion.version == "1.6.0")
+                )
+            ).scalar_one()
+            assert released.base_version_id == approved_id
+            assert released.skill_md_content == FIXTURE["snapshot"]["skill_md_content"]
+    finally:
+        await engine.dispose()
 
 
 @pytest.mark.asyncio

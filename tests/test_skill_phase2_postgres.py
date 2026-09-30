@@ -18,7 +18,7 @@ from fastapi import HTTPException, Response
 from sqlalchemy import event, select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from api.routes import registry, review, skill, skill_files
+from api.routes import component_versions, registry, review, skill, skill_files
 from api.routes._skill_lock import lock_skill_version
 from api.routes.agent.install import install_agent
 from models.agent import Agent, AgentStatus, AgentVersion
@@ -30,7 +30,7 @@ from models.skill import SkillListing, SkillVersion
 from models.team import TeamMembership, TeamRole
 from models.user import User, UserRole
 from schemas.agent import AgentInstallRequest
-from schemas.component_version import VersionReviewRequest
+from schemas.component_version import VersionPublishRequest, VersionReviewRequest
 from schemas.skill import SkillCandidateDraftRequest
 from schemas.skill_resources import SkillDraftRebaseRequest, SkillFileOperations
 from services.agent_lock import lock_agent_version
@@ -60,6 +60,127 @@ async def pg_store():
         async with admin_engine.begin() as conn:
             await conn.execute(text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
         await admin_engine.dispose()
+
+
+@pytest.mark.parametrize("author_path", ["draft", "publish"])
+async def test_author_snapshot_refuses_pointer_advanced_during_listing_lock(pg_store, author_path):
+    maker, engine = pg_store
+    md = "---\nname: example\ndescription: Reviewed\n---\n# Example\n"
+    async with maker() as db:
+        owner = await ds.user(db)
+        listing = await ds.skill(db, owner, status=ListingStatus.approved, content=md)
+        old = await db.get(SkillVersion, listing.latest_version_id)
+        next_release = await ds.add_skill_version(
+            db, listing, owner, version="1.3.0", status=ListingStatus.approved, content=md, set_latest=False
+        )
+        revision = skill_content_revision(listing, old)
+        await db.commit()
+        listing_id, old_id, next_id, owner_id = listing.id, old.id, next_release.id, owner.id
+
+    async with maker() as writer, maker() as authoring:
+        await lock_skill_version(writer, listing_id, old_id)
+        listing = await writer.get(SkillListing, listing_id)
+        listing.latest_version_id = next_id
+        await writer.flush()
+        attempted = asyncio.Event()
+
+        @event.listens_for(engine.sync_engine, "before_cursor_execute")
+        def observe_author_lock(_conn, _cursor, statement, _params, _context, _many):
+            if "skill_listings.latest_version_id" in statement and "FOR UPDATE" in statement.upper():
+                attempted.set()
+
+        owner = await authoring.get(User, owner_id)
+        if author_path == "draft":
+            action = skill_files.create_skill_candidate_draft(
+                str(listing_id),
+                SkillCandidateDraftRequest(
+                    base_version_id=old_id,
+                    observed_base_revision=revision,
+                    version="1.4.0",
+                    description="New draft",
+                ),
+                Response(),
+                authoring,
+                owner,
+            )
+        else:
+            action = component_versions._publish_version(
+                str(listing_id),
+                VersionPublishRequest(version="1.4.0", description="One shot"),
+                SkillListing,
+                SkillVersion,
+                "skill",
+                authoring,
+                owner,
+            )
+        task = asyncio.create_task(action)
+        try:
+            await asyncio.wait_for(attempted.wait(), timeout=5)
+            assert not task.done(), "author must wait for concurrent release writer"
+            await writer.commit()
+            with pytest.raises(HTTPException, match="Skill latest release changed") as blocked:
+                await asyncio.wait_for(task, timeout=5)
+            assert blocked.value.status_code == 409
+        finally:
+            if not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+            await writer.rollback()
+            await authoring.rollback()
+    async with maker() as db:
+        assert (
+            await db.scalar(
+                select(SkillVersion.id).where(SkillVersion.listing_id == listing_id, SkillVersion.version == "1.4.0")
+            )
+        ) is None
+
+
+async def test_legacy_review_rechecks_pending_count_after_author_lock_wait(pg_store):
+    maker, engine = pg_store
+    async with maker() as db:
+        owner = await ds.user(db)
+        reviewer = await ds.user(db, role=UserRole.admin)
+        listing = await ds.skill(db, owner, status=ListingStatus.pending)
+        await db.commit()
+        listing_id, version_id, owner_id, reviewer_id = listing.id, listing.latest_version_id, owner.id, reviewer.id
+
+    async with maker() as writer, maker() as reviewing:
+        stale = (await reviewing.execute(select(SkillListing).where(SkillListing.id == listing_id))).scalar_one()
+        assert [version.id for version in stale.versions if version.status == ListingStatus.pending] == [version_id]
+        await lock_skill_version(writer, listing_id, version_id)
+        owner = await writer.get(User, owner_id)
+        await ds.add_skill_version(
+            writer,
+            await writer.get(SkillListing, listing_id),
+            owner,
+            version="1.3.0",
+            status=ListingStatus.pending,
+            set_latest=False,
+        )
+        await writer.flush()
+        attempted = asyncio.Event()
+
+        @event.listens_for(engine.sync_engine, "before_cursor_execute")
+        def observe_review_lock(_conn, _cursor, statement, _params, _context, _many):
+            if "skill_listings.id" in statement and "FOR UPDATE" in statement.upper():
+                attempted.set()
+
+        reviewer = await reviewing.get(User, reviewer_id)
+        task = asyncio.create_task(review._lock_skill_decision(reviewing, stale, reviewer, stale.versions[0]))
+        try:
+            await asyncio.wait_for(attempted.wait(), timeout=5)
+            await asyncio.sleep(0.15)
+            assert not task.done(), "legacy review must wait for author to publish the new pending version"
+            await writer.commit()
+            with pytest.raises(HTTPException, match="Select an exact pending skill version") as blocked:
+                await asyncio.wait_for(task, timeout=5)
+            assert blocked.value.status_code == 409
+        finally:
+            if not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+            await writer.rollback()
+            await reviewing.rollback()
 
 
 async def test_selected_install_waits_for_private_transition_and_refuses_stale_public_read(pg_store):

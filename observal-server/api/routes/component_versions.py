@@ -36,7 +36,7 @@ from api.deps import (
     require_role,
     resolve_visible_listing,
 )
-from api.routes._skill_lock import lock_skill_version, should_promote_skill_version
+from api.routes._skill_lock import approved_skill_base_id, lock_skill_version, should_promote_skill_version
 from api.routes.skill_files import _BODY_FREE_LISTING, _authorized_version
 from models.mcp import ListingStatus
 from models.skill import SkillListing, SkillVersion
@@ -273,29 +273,54 @@ async def _publish_version(
     if component_type == "skill":
         if current_version is None:
             raise HTTPException(status_code=409, detail="Skill listing has no version to publish from")
-        _, locked_current = await lock_skill_version(db, listing.id, current_version.id)
+        latest_id, locked_current = await lock_skill_version(db, listing.id, current_version.id)
+        if latest_id != locked_current.id:
+            raise HTTPException(status_code=409, detail="Skill latest release changed; refresh before publishing")
         await db.refresh(listing, attribute_names=["submitted_by", "co_authors", "team_id", "is_private"])
         if not await check_listing_visibility_async(listing, current_user, db) or (
             get_effective_component_permission(listing, current_user) != "owner"
         ):
             raise HTTPException(status_code=403, detail="Only the listing owner can publish versions")
-        approved_base = (
-            await db.execute(
-                select(SkillVersion)
-                .where(
-                    SkillVersion.listing_id == listing.id,
-                    SkillVersion.status.in_((ListingStatus.approved, ListingStatus.archived)),
-                    SkillVersion.requires_global_review.is_(False),
+        approved_id = await approved_skill_base_id(db, listing.id, locked_current)
+        if approved_id is not None:
+            approved_base = (
+                locked_current
+                if approved_id == locked_current.id
+                else (
+                    await db.execute(
+                        select(SkillVersion)
+                        .where(SkillVersion.id == approved_id, SkillVersion.listing_id == listing.id)
+                        .execution_options(populate_existing=True)
+                        .with_for_update()
+                    )
+                ).scalar_one_or_none()
+            )
+            if (
+                approved_base is None
+                or approved_base.status not in INSTALLABLE_STATUSES
+                or approved_base.requires_global_review
+            ):
+                raise HTTPException(status_code=409, detail="Approved skill base changed; refresh before publishing")
+        if approved_base is None:
+            # Never derive an unmarked pending release from historical bytes
+            # still owed global review. The current pointer can also be a
+            # candidate behind an older, explicitly installable prerelease;
+            # that is not a safe implicit base for a new version.
+            older_installable = (
+                await db.execute(
+                    select(SkillVersion.id)
+                    .where(SkillVersion.listing_id == listing.id, SkillVersion.status.in_(INSTALLABLE_STATUSES))
+                    .limit(1)
                 )
-                .order_by(SkillVersion.released_at.desc(), SkillVersion.id.desc())
-                .limit(1)
-                .with_for_update()
-            )
-        ).scalar_one_or_none()
-        if approved_base is None and needs_bundle_delivery(locked_current):
-            raise HTTPException(
-                status_code=409, detail="Approve the first skill version before publishing another bundle"
-            )
+            ).scalar_one_or_none()
+            if locked_current.requires_global_review or older_installable is not None:
+                raise HTTPException(
+                    status_code=409, detail="No cleared stable approved skill base; review or select a base"
+                )
+            if needs_bundle_delivery(locked_current):
+                raise HTTPException(
+                    status_code=409, detail="Approve the first skill version before publishing another bundle"
+                )
         current_version = approved_base or locked_current
 
     # Duplicate check

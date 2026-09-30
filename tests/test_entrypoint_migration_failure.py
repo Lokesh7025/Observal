@@ -13,7 +13,10 @@ from pathlib import Path
 import pytest
 from sqlalchemy import text
 from sqlalchemy.engine import make_url
-from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+from models.mcp import ListingStatus
+from tests import discovery_support as ds
 
 
 def test_failed_alembic_upgrade_aborts_before_clickhouse_or_stamp(tmp_path):
@@ -111,6 +114,21 @@ async def test_actual_packaged_init_from_empty_postgres_creates_revision_and_res
                     )
                     == 1
                 )
+                indexes = dict(
+                    (
+                        await conn.execute(
+                            text("SELECT indexname, indexdef FROM pg_indexes WHERE schemaname = current_schema()")
+                        )
+                    ).all()
+                )
+                for name in ("ix_users_email_trgm", "ix_users_name_trgm", "ix_users_username_trgm"):
+                    assert "gin_trgm_ops" in indexes[name]
+                for name in (
+                    "uq_exporter_configs_type",
+                    "uq_saml_configs_singleton",
+                    "uq_exec_dashboard_config_singleton",
+                ):
+                    assert "UNIQUE INDEX" in indexes[name]
             # A freshly stamped schema must really support the empty-data
             # downgrade guard and then the packaged versioned upgrade path.
             downgraded = subprocess.run(
@@ -143,6 +161,66 @@ async def test_actual_packaged_init_from_empty_postgres_creates_revision_and_res
                     )
                     == 1
                 )
+            # A populated database must refuse every destructive skill migration.
+            # A failed multi-step Alembic downgrade rolls the prior DDL back.
+            async with async_sessionmaker(fresh, expire_on_commit=False)() as db:
+                owner = await ds.user(db)
+                listing = await ds.skill(db, owner, status=ListingStatus.approved)
+                version_id, owner_id = listing.latest_version_id, owner.id
+                await db.commit()
+            async with fresh.begin() as conn:
+                await conn.execute(
+                    text(
+                        "UPDATE skill_versions SET pre_public_reviewed_by = :owner, review_epoch = 1, "
+                        "base_revision = :base, extra_files = CAST(:files AS json) WHERE id = :id"
+                    ),
+                    {
+                        "owner": owner_id,
+                        "base": "a" * 64,
+                        "files": '[{"path":"note.txt","content":"x"}]',
+                        "id": version_id,
+                    },
+                )
+            guards = (
+                ("private skill review attribution remains", "pre_public_reviewed_by = NULL"),
+                ("withdrawn skill review revisions remain", "review_epoch = 0"),
+                ("skill drafts or global public review provenance remain", "base_revision = NULL"),
+                ("skill_versions.extra_files contains resources", "extra_files = '[]'::json"),
+            )
+            for refusal, clear in guards:
+                blocked = subprocess.run(
+                    [sys.executable, "-m", "alembic", "downgrade", "028_agent_component_pins"],
+                    cwd=server,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                assert blocked.returncode != 0
+                assert refusal in blocked.stderr, blocked.stderr[-1500:]
+                async with fresh.begin() as conn:
+                    assert (
+                        await conn.scalar(text("SELECT version_num FROM alembic_version")) == "033_skill_private_review"
+                    )
+                    await conn.execute(text(f"UPDATE skill_versions SET {clear} WHERE id = :id"), {"id": version_id})
+            cleared = subprocess.run(
+                [sys.executable, "-m", "alembic", "downgrade", "028_agent_component_pins"],
+                cwd=server,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            assert cleared.returncode == 0, cleared.stderr[-1500:]
+            restored = subprocess.run(
+                ["bash", str(script)],
+                cwd=server,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            assert restored.returncode == 0, restored.stderr[-1500:]
             # Deliberately corrupt only the disposable revision: the migration
             # must fail on the existing column rather than pretending head was
             # reached, and ClickHouse must never run after that failure.
