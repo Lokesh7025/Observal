@@ -382,8 +382,9 @@ async def test_transfer_moves_every_listing_type_to_target_namespace(entity_type
 @pytest.mark.asyncio
 async def test_transfer_requires_current_owner(entity_type, owner_field):
     from api.routes.co_authors import _get_entity_for_transfer
+    from models.user import UserRole
 
-    current = SimpleNamespace(id=uuid.uuid4())
+    current = SimpleNamespace(id=uuid.uuid4(), role=UserRole.user)
     entity = SimpleNamespace(**{owner_field: uuid.uuid4()})
     with (
         patch("api.routes.co_authors.resolve_listing", new=AsyncMock(return_value=entity)),
