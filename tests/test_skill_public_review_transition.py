@@ -24,7 +24,7 @@ from tests import discovery_support as ds
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("mode", ["tracked", "extras", "empty_script"])
+@pytest.mark.parametrize("mode", ["tracked", "extras", "empty_script", "base_only", "epoch"])
 async def test_rollout_gate_catches_untracked_bundles_and_empty_scripts(mode):
     engine = ds.make_engine()
     try:
@@ -37,6 +37,10 @@ async def test_rollout_gate_catches_untracked_bundles_and_empty_scripts(mode):
                 version.content_revision = "a" * 64
             elif mode == "extras":
                 version.extra_files = [{"path": "helper.txt", "content": "test"}]
+            elif mode == "base_only":
+                version.base_revision = "a" * 64
+            elif mode == "epoch":
+                version.review_epoch = 1
             else:
                 version.script_filename = "empty.sh"
                 version.script_content = ""

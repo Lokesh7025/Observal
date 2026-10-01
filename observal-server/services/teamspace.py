@@ -252,6 +252,9 @@ async def skill_transition_needs_rollout_gate(db: AsyncSession, listing_id: uuid
                 SkillVersion.listing_id == listing_id,
                 or_(
                     SkillVersion.content_revision.is_not(None),
+                    SkillVersion.base_revision.is_not(None),
+                    SkillVersion.base_version_id.is_not(None),
+                    SkillVersion.review_epoch != 0,
                     func.json_array_length(SkillVersion.extra_files) > 0,
                     and_(
                         SkillVersion.delivery_mode == "registry_direct",
@@ -266,7 +269,9 @@ async def skill_transition_needs_rollout_gate(db: AsyncSession, listing_id: uuid
     )
 
 
-async def _review_skill_visibility(entity, user: User, db: AsyncSession, *, was_private: bool) -> bool:
+async def _review_skill_visibility(
+    entity, user: User, db: AsyncSession, *, was_private: bool, identity_transfer: bool = False
+) -> bool:
     """Serialize every release's review provenance with publication and reversal.
 
     The caller holds the listing FOR UPDATE before changing visibility; version
@@ -278,7 +283,7 @@ async def _review_skill_visibility(entity, user: User, db: AsyncSession, *, was_
     from services.inbox import sources as inbox
     from services.versioning import parse_semver
 
-    if was_private == entity.is_private:
+    if was_private == entity.is_private and not identity_transfer:
         return False
     rows = (
         (
@@ -293,11 +298,11 @@ async def _review_skill_visibility(entity, user: User, db: AsyncSession, *, was_
         .scalars()
         .all()
     )
-    if was_private:
+    if was_private or identity_transfer:
         requeued = False
         for row in rows:
-            # Close prior team notices before re-delivery: dedupe reopens them
-            # for new recipients, otherwise former team reviewers see public work.
+            # Close prior notices before re-delivery: dedupe reopens them for
+            # new recipients, otherwise former reviewers see the old work.
             if row.status == ListingStatus.pending:
                 await inbox.on_review_withdrawn(db, entity, subject_type="skill", actor_id=user.id, version=row.version)
             row.requires_global_review = True
@@ -358,6 +363,15 @@ async def _review_skill_visibility(entity, user: User, db: AsyncSession, *, was_
         ):
             entity.latest_version_id = chosen.id
     return False
+
+
+async def review_skill_identity_transfer(entity, user: User, db: AsyncSession) -> bool:
+    """Re-review every public release after its owner and namespace change.
+
+    This is not a new release: retain historical approval/archival provenance
+    for exact UUID decisions, while installs exclude every marked row.
+    """
+    return await _review_skill_visibility(entity, user, db, was_private=False, identity_transfer=True)
 
 
 async def review_publication_to_public(entity, user: User, db: AsyncSession, *, was_private: bool) -> bool:

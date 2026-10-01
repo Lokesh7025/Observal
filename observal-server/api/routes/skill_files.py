@@ -35,6 +35,7 @@ from schemas.skill_resources import (
     SkillVersionManifest,
     SkillVersionRevisionRequest,
 )
+from services import dynamic_settings as _ds
 from services.agent_lock import INSTALLABLE_STATUSES, release_key
 from services.editing_lock import _is_lock_expired, acquire_edit_lock, release_edit_lock
 from services.inbox import sources as inbox
@@ -590,11 +591,15 @@ async def submit_skill_version_draft(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_role(UserRole.user)),
 ):
-    """Submit a saved resource-less candidate or recover a legacy rejected version."""
+    """Submit a saved exact draft; resource-bearing successors require the rollout gate."""
     listing, version = await _editable_version(listing_id, version_id, req.observed_revision, db, current_user)
-    if version.requires_global_review:
+    if version.requires_global_review and not _ds.get_sync_bool("registry.skill_folder_delivery_enabled", False):
         raise HTTPException(status_code=409, detail="Global public re-review is not yet available")
-    if version.base_version_id is not None and needs_bundle_delivery(version):
+    if (
+        version.base_version_id is not None
+        and needs_bundle_delivery(version)
+        and not _ds.get_sync_bool("registry.skill_folder_delivery_enabled", False)
+    ):
         raise HTTPException(status_code=409, detail="Resource-bearing candidate review is not yet available")
     # _editable_version holds the listing lock, but the relationship may have
     # been loaded before waiting. Re-read the pointer, not its cached object.

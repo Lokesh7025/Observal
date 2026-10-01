@@ -1,4 +1,5 @@
 # SPDX-FileCopyrightText: 2026 Hari Srinivasan <harisrini21@gmail.com>
+# SPDX-FileCopyrightText: 2026 Kaushik <kaushikrjpm10@gmail.com>
 # SPDX-License-Identifier: Apache-2.0
 
 import importlib.util
@@ -332,10 +333,16 @@ async def test_transfer_moves_every_listing_type_to_target_namespace(entity_type
         owner="alice",
         namespace="alice",
         slug="tool",
+        team_id=None,
+        is_private=False,
         co_authors=[str(current.id), str(target.id), str(other_coauthor)],
         **{owner_field: current.id},
     )
-    db = SimpleNamespace(commit=AsyncMock(), refresh=AsyncMock())
+    # Skills serialize and recheck their listing before transfer; model the
+    # AsyncSession methods even though this fixture has no tracked versions.
+    db = SimpleNamespace(
+        commit=AsyncMock(), refresh=AsyncMock(), execute=AsyncMock(), scalar=AsyncMock(return_value=None)
+    )
     collision_check = AsyncMock(return_value=False)
 
     with (
@@ -364,7 +371,8 @@ async def test_transfer_moves_every_listing_type_to_target_namespace(entity_type
     assert entity.co_authors == [str(other_coauthor)]
     assert response.qualified_name == "bob/tool"
     db.commit.assert_awaited_once()
-    db.refresh.assert_awaited_once_with(entity)
+    assert db.refresh.await_count == (2 if entity_type == "skills" else 1)
+    assert db.refresh.await_args_list[-1].args == (entity,)
 
 
 @pytest.mark.parametrize(

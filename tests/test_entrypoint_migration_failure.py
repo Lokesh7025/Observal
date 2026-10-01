@@ -95,7 +95,7 @@ async def test_actual_packaged_init_from_empty_postgres_creates_revision_and_res
         fresh = create_async_engine(fresh_url)
         try:
             async with fresh.connect() as conn:
-                assert await conn.scalar(text("SELECT version_num FROM alembic_version")) == "033_skill_private_review"
+                assert await conn.scalar(text("SELECT version_num FROM alembic_version")) == "035_component_columns"
                 assert await conn.scalar(text("SELECT COUNT(*) FROM skill_versions")) == 0
                 assert (
                     await conn.scalar(
@@ -151,7 +151,7 @@ async def test_actual_packaged_init_from_empty_postgres_creates_revision_and_res
             assert upgraded.returncode == 0, upgraded.stderr[-1000:] + upgraded.stdout[-1000:]
             assert "Running database migrations" in upgraded.stdout
             async with fresh.connect() as conn:
-                assert await conn.scalar(text("SELECT version_num FROM alembic_version")) == "033_skill_private_review"
+                assert await conn.scalar(text("SELECT version_num FROM alembic_version")) == "035_component_columns"
                 assert (
                     await conn.scalar(
                         text(
@@ -199,9 +199,7 @@ async def test_actual_packaged_init_from_empty_postgres_creates_revision_and_res
                 assert blocked.returncode != 0
                 assert refusal in blocked.stderr, blocked.stderr[-1500:]
                 async with fresh.begin() as conn:
-                    assert (
-                        await conn.scalar(text("SELECT version_num FROM alembic_version")) == "033_skill_private_review"
-                    )
+                    assert await conn.scalar(text("SELECT version_num FROM alembic_version")) == "035_component_columns"
                     await conn.execute(text(f"UPDATE skill_versions SET {clear} WHERE id = :id"), {"id": version_id})
             cleared = subprocess.run(
                 [sys.executable, "-m", "alembic", "downgrade", "028_agent_component_pins"],

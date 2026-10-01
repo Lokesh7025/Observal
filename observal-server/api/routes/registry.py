@@ -36,8 +36,10 @@ from models.sandbox import SandboxListing, SandboxVersion
 from models.skill import SkillListing, SkillVersion
 from models.team import Team, TeamMembership, TeamRole
 from models.user import User, UserRole
+from services import dynamic_settings as _ds
 from services.inbox import sources as inbox
 from services.registry_namespace import identity_exists
+from services.skill_identity import rebind_skill_identity, snapshot_skill_identity
 from services.teamspace import review_publication_to_public, skill_transition_needs_rollout_gate, team_membership
 
 router = APIRouter(prefix="/api/v1/registry", tags=["registry"])
@@ -221,6 +223,7 @@ async def update_registry_visibility(
             if not membership or membership.role not in (TeamRole.owner, TeamRole.reviewer):
                 raise HTTPException(status_code=403, detail="Only team owners and reviewers can change visibility")
 
+    identity_snapshot = None
     if item_type == "skill" and (req.visibility == "team") != listing.is_private:
         original_team_id, original_private = listing.team_id, listing.is_private
         await db.execute(select(SkillListing.id).where(SkillListing.id == listing.id).with_for_update())
@@ -231,6 +234,10 @@ async def update_registry_visibility(
             membership = await team_membership(db, original_team_id, current_user.id)
             if not membership or membership.role not in (TeamRole.owner, TeamRole.reviewer):
                 raise HTTPException(status_code=403, detail="Team membership changed; refresh before updating")
+        if await skill_transition_needs_rollout_gate(db, listing.id):
+            if not _ds.get_sync_bool("registry.skill_folder_delivery_enabled", False):
+                raise HTTPException(status_code=409, detail="Skill folder visibility requires global version re-review")
+            identity_snapshot = await snapshot_skill_identity(db, listing)
 
     if req.visibility == "team" and item_type != "agent":
         # Installs can pin any approved version of an agent, not just its latest,
@@ -321,14 +328,6 @@ async def update_registry_visibility(
                 if any(visible.get(skill_id, True) for skill_id in skill_ids):
                     raise HTTPException(status_code=409, detail="Public agent pins a private or missing skill")
 
-    if item_type == "skill" and (req.visibility == "team") != listing.is_private:
-        # Rewriting listing-wide visibility changes every version's reviewed
-        # identity. Until all-version re-review is implemented, do not strand
-        # saved folder revisions or expose them through a legacy transition.
-        await db.execute(select(SkillListing.id).where(SkillListing.id == listing.id).with_for_update())
-        if await skill_transition_needs_rollout_gate(db, listing.id):
-            raise HTTPException(status_code=409, detail="Skill folder visibility requires global version re-review")
-
     was_private = bool(listing.is_private)
     if destination_team is not None and team_id is None:
         listing.team_id = destination_team.id
@@ -336,6 +335,8 @@ async def update_registry_visibility(
         listing.owner = destination_team.handle
     listing.is_private = req.visibility == "team"
     returned_to_review = await review_publication_to_public(listing, current_user, db, was_private=was_private)
+    if identity_snapshot is not None:
+        rebind_skill_identity(listing, identity_snapshot)
     if returned_to_review and item_type != "skill":
         # Skill transitions send one notice per marked pending version from the
         # locked transition helper, rather than only for the listing pointer.

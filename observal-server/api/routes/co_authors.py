@@ -33,12 +33,15 @@ from models.sandbox import SandboxListing, SandboxVersion
 from models.skill import SkillListing, SkillVersion
 from models.team import TeamRole
 from models.user import User
+from services import dynamic_settings as _ds
 from services.inbox import sources as inbox
 from services.ownership import transfer_entity_owner
 from services.registry_namespace import identity_exists
+from services.skill_identity import rebind_skill_identity, snapshot_skill_identity
 from services.teamspace import (
     is_admin,
     review_publication_to_public,
+    review_skill_identity_transfer,
     skill_transition_needs_rollout_gate,
     team_membership,
 )
@@ -225,11 +228,12 @@ async def transfer_ownership(
         raise HTTPException(status_code=422, detail="You already own this item")
 
     was_private = bool(getattr(entity, "is_private", False))
+    identity_snapshot = None
     if entity_type == "skills":
-        # Every ownership transfer changes reviewable listing identity, even
-        # when it starts public. Tracked revisions cannot be transferred until
-        # the author/review identity migration exists. Serialize legacy team
-        # publication with the same listing-then-version lock order as review.
+        # Every transfer changes reviewable identity, even when already public.
+        # Keep tracked rows blocked by default; on a compatible fleet, lock and
+        # rebind every version after computing the final namespace/owner. Legacy
+        # publication uses the same listing-then-version review lock order.
         await db.execute(select(SkillListing.id).where(SkillListing.id == entity.id).with_for_update())
         await db.refresh(entity, attribute_names=["team_id", "is_private", "submitted_by"])
         if entity.team_id != team_id or entity.is_private != was_private:
@@ -243,12 +247,24 @@ async def transfer_ownership(
         if team_id is None and entity.submitted_by != current_user.id and not is_admin(current_user):
             raise HTTPException(status_code=403, detail="Skill ownership changed; refresh before transferring")
         if await skill_transition_needs_rollout_gate(db, entity.id):
-            raise HTTPException(status_code=409, detail="Tracked skill transfer requires version identity migration")
+            if not _ds.get_sync_bool("registry.skill_folder_delivery_enabled", False):
+                raise HTTPException(
+                    status_code=409, detail="Tracked skill transfer requires version identity migration"
+                )
+            identity_snapshot = await snapshot_skill_identity(db, entity)
+            if not was_private and any(row.pre_public_status is not None for row in identity_snapshot.versions):
+                # These approvals belong to the former team. Moving the public
+                # item to a new owner before global review resolves them would
+                # later restore that team's approval in an unrelated teamspace.
+                raise HTTPException(
+                    status_code=409, detail="Resolve the prior team's public re-review before transferring"
+                )
     returned_to_review = False
     if team_id is not None:
         entity.team_id = None
         entity.is_private = False
-        returned_to_review = await review_publication_to_public(entity, current_user, db, was_private=was_private)
+        if entity_type != "skills":
+            returned_to_review = await review_publication_to_public(entity, current_user, db, was_private=was_private)
 
     model = ENTITY_MODELS[entity_type]
     if await identity_exists(db, model, target_user.username, entity.slug, exclude_id=entity.id):
@@ -258,6 +274,12 @@ async def transfer_ownership(
         )
 
     previous_owner, previous_owner_id = transfer_entity_owner(entity, entity_type, current_user, target_user)
+    if entity_type == "skills" and team_id is not None:
+        returned_to_review = await review_publication_to_public(entity, current_user, db, was_private=was_private)
+    if identity_snapshot is not None:
+        if not was_private:
+            await review_skill_identity_transfer(entity, current_user, db)
+        rebind_skill_identity(entity, identity_snapshot)
     if returned_to_review and entity_type != "skills":
         # Skill transition notices are per version and sent by the helper.
         # Delivered here rather than beside review_publication_to_public: the
