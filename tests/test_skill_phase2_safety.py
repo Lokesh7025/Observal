@@ -20,6 +20,7 @@ from models.skill import SkillVersion
 from models.user import UserRole
 from schemas.component_version import VersionReviewRequest
 from schemas.skill import SkillDraftRequest, SkillInstallRequest, SkillSubmitRequest, SkillUpdateRequest
+from services.skill_revisions import skill_content_revision
 from tests import discovery_support as ds
 from tests.test_component_versions_routes import OWNER_ID, _request
 from tests.test_component_versions_routes import _db as version_db
@@ -87,6 +88,7 @@ async def test_draft_inherits_clears_and_rejects_git_transition(monkeypatch):
     ver = listing.latest_version
     ver.delivery_mode = "registry_direct"
     ver.extra_files = [RESOURCE]
+    ver.content_revision = skill_content_revision(listing, ver)
     db = _db()
     _mock_skill_lock(monkeypatch, listing)
     monkeypatch.setattr(skill, "resolve_listing", AsyncMock(return_value=listing))
@@ -94,15 +96,25 @@ async def test_draft_inherits_clears_and_rejects_git_transition(monkeypatch):
 
     validate = Mock(wraps=skill.validate_skill_bundle)
     monkeypatch.setattr(skill, "validate_skill_bundle", validate)
-    await skill.update_skill_draft(str(LISTING_ID), SkillUpdateRequest(description="changed"), db, _user())
+    await skill.update_skill_draft(
+        str(LISTING_ID), SkillUpdateRequest(description="changed", observed_revision=ver.content_revision), db, _user()
+    )
     assert validate.call_args.kwargs["enforce_limits"] is False
     assert ver.extra_files == [RESOURCE]
     with pytest.raises(HTTPException) as exc:
-        await skill.update_skill_draft(str(LISTING_ID), SkillUpdateRequest(delivery_mode="git_fetch"), db, _user())
+        await skill.update_skill_draft(
+            str(LISTING_ID),
+            SkillUpdateRequest(delivery_mode="git_fetch", observed_revision=ver.content_revision),
+            db,
+            _user(),
+        )
     assert exc.value.status_code == 422
     assert validate.call_args.kwargs["enforce_limits"] is True
     await skill.update_skill_draft(
-        str(LISTING_ID), SkillUpdateRequest(delivery_mode="git_fetch", extra_files=[]), db, _user()
+        str(LISTING_ID),
+        SkillUpdateRequest(delivery_mode="git_fetch", extra_files=[], observed_revision=ver.content_revision),
+        db,
+        _user(),
     )
     assert ver.extra_files == []
     assert ver.delivery_mode == "git_fetch"
@@ -185,6 +197,7 @@ async def test_marked_legacy_release_cannot_install_or_count_downloads():
 async def test_version_inheritance_validation_and_no_shared_json(monkeypatch):
     listing = version_listing("skill", owner_id=OWNER_ID)
     listing.latest_version.extra_files = [RESOURCE]
+    listing.latest_version.content_revision = skill_content_revision(listing, listing.latest_version)
     db = version_db()
     from tests.test_component_versions_routes import _result
 

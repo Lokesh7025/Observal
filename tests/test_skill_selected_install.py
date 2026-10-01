@@ -16,6 +16,7 @@ from api.routes import skill
 from models.mcp import ListingStatus
 from models.skill import SkillDownload, SkillVersion
 from schemas.skill import SkillInstallRequest
+from services.skill_revisions import skill_content_revision
 from tests import discovery_support as ds
 
 
@@ -35,6 +36,7 @@ async def test_opted_in_standalone_bundle_declares_all_files_and_denies_old_clie
                 {"path": "scripts/empty.sh", "content": "", "executable": True},
                 {"path": "assets/image.bin", "content": "AP8=", "encoding": "base64"},
             ]
+            version.content_revision = skill_content_revision(listing, version)
             await db.commit()
             listing_id, version_id, owner_id = listing.id, version.id, owner.id
         monkeypatch.setattr("api.routes.config.derive_endpoints", AsyncMock(return_value={"api": "https://api.test"}))
@@ -115,6 +117,7 @@ async def test_sixty_file_server_response_is_complete_and_selected(monkeypatch):
             listing = await ds.skill(db, owner)
             version = await db.get(SkillVersion, listing.latest_version_id)
             version.extra_files = [{"path": f"templates/item-{n:02d}.txt", "content": str(n)} for n in range(60)]
+            version.content_revision = skill_content_revision(listing, version)
             await db.commit()
             listing_id, version_id, owner_id = listing.id, version.id, owner.id
         monkeypatch.setattr("services.dynamic_settings.get_sync_bool", lambda key, default=False: True)

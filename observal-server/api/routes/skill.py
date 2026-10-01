@@ -54,7 +54,7 @@ from services.inbox import sources as inbox
 from services.registry_namespace import identity_exists
 from services.skill_bundle import needs_bundle_delivery, validate_skill_bundle
 from services.skill_folder_edit import _validate_new_md
-from services.skill_revisions import skill_content_revision
+from services.skill_revisions import skill_content_revision, verified_skill_revision
 from services.skill_validator import SkillValidationError, validate_skill_md, validate_skill_md_content_frontmatter
 from services.teamspace import publish_auto_approves_for_entity, resolve_publish_target
 
@@ -443,6 +443,11 @@ async def get_skill(
         raise HTTPException(status_code=404, detail="Listing not found")
     observed_pointer = listing.latest_version_id
     listing, selected = await _selected_skill_release(listing, db, current_user)
+    if selected.delivery_mode == "registry_direct":
+        try:
+            verified_skill_revision(listing, selected)
+        except SkillValidationError as exc:
+            raise HTTPException(status_code=409, detail="Selected skill folder has no valid review revision") from exc
     if selected.id == observed_pointer:
         resp = SkillListingResponse.model_validate(listing)
     else:
@@ -555,6 +560,11 @@ async def install_skill(
             )
         except SkillValidationError as exc:
             raise HTTPException(status_code=409, detail="Selected skill folder is invalid") from exc
+    if installed.delivery_mode == "registry_direct":
+        try:
+            verified_skill_revision(listing, installed)
+        except SkillValidationError as exc:
+            raise HTTPException(status_code=409, detail="Selected skill folder has no valid review revision") from exc
 
     from api.routes.config import derive_endpoints
     from services.skill_config_generator import generate_skill_config
@@ -723,10 +733,18 @@ async def update_skill_draft(
         and (ver.content_revision is not None or ver.base_version_id is not None)
     ):
         raise HTTPException(status_code=409, detail="Saved draft release number is reserved; create a new version")
-    if ver.content_revision is not None and (
-        req.observed_revision is None or req.observed_revision != skill_content_revision(listing, ver)
+    if (
+        ver.content_revision is not None
+        or needs_bundle_delivery(ver)
+        or ver.base_version_id is not None
+        or (ver.review_epoch or 0) > 0
     ):
-        raise HTTPException(status_code=409, detail="Skill version changed; refresh its manifest before saving")
+        try:
+            revision = verified_skill_revision(listing, ver)
+        except SkillValidationError as exc:
+            raise HTTPException(status_code=409, detail="Saved skill version is not a valid folder") from exc
+        if req.observed_revision != revision:
+            raise HTTPException(status_code=409, detail="Skill version changed; refresh its manifest before saving")
 
     slash_command_should_update = "slash_command" in req.model_fields_set
     slash_command_explicit_clear = slash_command_should_update and req.slash_command is None

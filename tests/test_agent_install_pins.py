@@ -34,6 +34,7 @@ from models.sandbox import SandboxVersion
 from models.skill import SkillVersion
 from schemas.agent import AgentInstallRequest
 from services.agent_lock import VERSION_MODELS, content_digest, lock_agent_version
+from services.skill_revisions import skill_content_revision
 from tests import discovery_support as ds
 
 CONTRACT = json.loads((Path(__file__).parent / "fixtures" / "skill_folder_install_contract.json").read_text())
@@ -148,6 +149,7 @@ async def test_http_pinned_agent_returns_complete_binary_folder_and_refuses_old_
     listing, agent, _ = await _pinned_agent(session, owner, "skill")
     pinned = await session.get(SkillVersion, listing.latest_version_id)
     pinned.extra_files = [{"path": "assets/icon.bin", "content": "AP8=", "encoding": "base64"}]
+    pinned.content_revision = skill_content_revision(listing, pinned)
     version = (await session.execute(select(AgentVersion))).scalar_one()
     await lock_agent_version(session, agent, version)
     await session.commit()
@@ -221,6 +223,7 @@ async def test_agent_bundle_preserves_pinned_tree_for_every_skill_harness(sessio
         {"path": "templates/a.txt", "content": "first"},
         {"path": "scripts/run.sh", "content": "echo hi", "executable": True},
     ]
+    pinned.content_revision = skill_content_revision(listing, pinned)
     version = (await session.execute(select(AgentVersion))).scalar_one()
     await lock_agent_version(session, agent, version)
     await session.commit()
@@ -267,6 +270,7 @@ async def test_bundle_refuses_harness_without_verified_skills_capability(session
         await session.execute(select(SkillVersion).where(SkillVersion.id == listing.latest_version_id))
     ).scalar_one()
     pinned.extra_files = [{"path": "templates/a.txt", "content": "first"}]
+    pinned.content_revision = skill_content_revision(listing, pinned)
     version = (await session.execute(select(AgentVersion))).scalar_one()
     await lock_agent_version(session, agent, version)
     await session.commit()
@@ -311,6 +315,7 @@ async def test_v2_skill_pin_cannot_be_downgraded_to_resource_less_in_non_strict_
     listing, agent, _ = await _pinned_agent(session, owner, "skill")
     pinned = await session.get(SkillVersion, listing.latest_version_id)
     pinned.extra_files = [{"path": "assets/icon.bin", "content": "AP8=", "encoding": "base64"}]
+    pinned.content_revision = skill_content_revision(listing, pinned)
     version = (await session.execute(select(AgentVersion))).scalar_one()
     await lock_agent_version(session, agent, version)
     link = (await session.execute(select(AgentComponent))).scalar_one()

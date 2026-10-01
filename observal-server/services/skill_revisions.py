@@ -13,7 +13,7 @@ import json
 
 from pydantic import ValidationError
 
-from services.skill_bundle import validate_skill_bundle
+from services.skill_bundle import needs_bundle_delivery, validate_skill_bundle
 from services.skill_validator import SkillValidationError
 
 
@@ -69,3 +69,24 @@ def skill_content_revision(listing, version) -> str:
     return hashlib.sha256(
         json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
     ).hexdigest()
+
+
+def verified_skill_revision(listing, version) -> str:
+    """Refuse a changed or unbound reviewed folder before exposing its bytes.
+
+    Older resource-less releases predate stored observations and retain their
+    legacy behavior. A saved draft or a resource-bearing release cannot silently
+    acquire an approval for files that were never bound to a revision.
+    """
+    revision = skill_content_revision(listing, version)
+    bound = getattr(version, "content_revision", None)
+    if bound is None and (
+        needs_bundle_delivery(version)
+        or getattr(version, "base_version_id", None) is not None
+        or getattr(version, "base_revision", None) is not None
+        or getattr(version, "review_epoch", 0)
+    ):
+        raise SkillValidationError("Stored skill folder has no bound review revision")
+    if bound is not None and bound != revision:
+        raise SkillValidationError("Stored skill folder differs from its reviewed revision")
+    return revision

@@ -70,6 +70,8 @@ def _version_mock():
     v.description = "original description"
     v.status = ListingStatus.draft
     v.content_revision = None
+    v.base_version_id = None
+    v.review_epoch = 0
     v.delivery_mode = "git_fetch"
     v.skill_md_content = None
     v.script_content = None

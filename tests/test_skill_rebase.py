@@ -32,6 +32,7 @@ async def test_explicit_rebase_requires_new_semver_and_preserves_disjoint_files(
             base.extra_files = [{"path": "scripts/empty.sh", "content": "", "executable": True}]
             await db.flush()
             base_revision = skill_content_revision(listing, base)
+            base.content_revision = base_revision
             listing_id, base_id, author_id = listing.id, base.id, author.id
             created = await skill_files.create_skill_candidate_draft(
                 str(listing.id),
@@ -83,6 +84,7 @@ async def test_explicit_rebase_requires_new_semver_and_preserves_disjoint_files(
             newest.description = "Team metadata"
             await db.flush()
             newest_revision = skill_content_revision(listing, newest)
+            newest.content_revision = newest_revision
             await db.commit()
             current_id = newest.id
 
@@ -197,6 +199,7 @@ async def test_rebase_refuses_overlapping_file_and_metadata_changes_without_muta
             newest.description = "Team changed metadata"
             await db.flush()
             latest_revision = skill_content_revision(listing, newest)
+            newest.content_revision = latest_revision
             await db.commit()
             with pytest.raises(HTTPException) as conflict:
                 await skill_files.rebase_skill_draft(

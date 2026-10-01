@@ -43,6 +43,22 @@ def test_failed_alembic_upgrade_aborts_before_clickhouse_or_stamp(tmp_path):
     assert not any("stamp" in line or "clickhouse" in line for line in invocations)
 
 
+def test_alembic_accepts_escaped_database_url_without_a_connection():
+    """URL-escaped credentials must survive ConfigParser during offline migrations."""
+    server = Path(__file__).resolve().parents[1] / "observal-server"
+    env = {**os.environ, "DATABASE_URL": "postgresql+asyncpg://user:p%40ss%25word@localhost/example"}
+    result = subprocess.run(
+        [sys.executable, "-m", "alembic", "upgrade", "v1_baseline", "--sql"],
+        cwd=server,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr[-500:]
+    assert "v1_baseline" in result.stdout
+
+
 def test_unversioned_existing_schema_refuses_without_upgrade(tmp_path):
     source = (Path(__file__).resolve().parents[1] / "docker" / "entrypoint.sh").read_text()
     calls = tmp_path / "calls"

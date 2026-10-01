@@ -48,7 +48,7 @@ from services.skill_bundle import (
 )
 from services.skill_folder_edit import _validate_new_md, apply_file_operations, replace_folder
 from services.skill_rebase import merge_skill_draft
-from services.skill_revisions import skill_content_revision
+from services.skill_revisions import skill_content_revision, verified_skill_revision
 from services.skill_validator import SkillValidationError, validate_skill_md_content_frontmatter
 from services.teamspace import can_review, review_scope
 
@@ -141,11 +141,9 @@ async def _authorized_files(listing_id: str, version_id: uuid.UUID, db: AsyncSes
         )
         if len(files) > MAX_EXTRA_FILES + 2 or sum(len(file.content) for file in files) > MAX_BUNDLE_BYTES:
             raise SkillValidationError("Stored folder exceeds the supported file limits")
-        revision = skill_content_revision(listing, version)
+        revision = verified_skill_revision(listing, version)
     except SkillValidationError as exc:
         raise HTTPException(status_code=409, detail="Stored skill version is not a valid folder") from exc
-    if version.content_revision is not None and version.content_revision != revision:
-        raise HTTPException(status_code=409, detail="Skill version changed; refresh its manifest before reviewing")
     return listing, version, revision, files
 
 
@@ -175,10 +173,10 @@ async def _editable_version(
     if version.is_editing and version.editing_by != current_user.id and not _is_lock_expired(version.editing_since):
         raise HTTPException(status_code=409, detail="This skill version is being edited by another author")
     try:
-        revision = skill_content_revision(listing, version)
+        revision = verified_skill_revision(listing, version)
     except SkillValidationError as exc:
         raise HTTPException(status_code=409, detail="Saved skill version is not a valid folder") from exc
-    if (version.content_revision is not None and version.content_revision != revision) or observed_revision != revision:
+    if observed_revision != revision:
         raise HTTPException(status_code=409, detail="Skill version changed; refresh its manifest before saving")
     return listing, version
 
@@ -256,7 +254,7 @@ async def create_skill_candidate_draft(
     if base.delivery_mode != "registry_direct":
         raise HTTPException(status_code=422, detail="Use a full folder import to convert a Git skill")
     try:
-        revision = skill_content_revision(listing, base)
+        revision = verified_skill_revision(listing, base)
         _validate_new_md(base.skill_md_content)
         files = validate_skill_bundle(
             delivery_mode="registry_direct",
@@ -267,9 +265,7 @@ async def create_skill_candidate_draft(
         )
     except SkillValidationError as exc:
         raise HTTPException(status_code=409, detail="Approved skill base is not a valid folder") from exc
-    if revision != req.observed_base_revision or (
-        base.content_revision is not None and base.content_revision != revision
-    ):
+    if revision != req.observed_base_revision:
         raise HTTPException(status_code=409, detail="Approved skill base changed; refresh before creating a draft")
     versions = (
         (await db.execute(select(SkillVersion.version).where(SkillVersion.listing_id == listing.id))).scalars().all()
@@ -370,13 +366,11 @@ async def rebase_skill_draft(
     ):
         raise HTTPException(status_code=409, detail="Approved release is unavailable for rebasing")
     try:
-        base_revision = skill_content_revision(listing, base)
-        current_revision = skill_content_revision(listing, current)
-        if draft.base_revision != base_revision or (base.content_revision and base.content_revision != base_revision):
+        base_revision = verified_skill_revision(listing, base)
+        current_revision = verified_skill_revision(listing, current)
+        if draft.base_revision != base_revision:
             raise HTTPException(status_code=409, detail="Original approved base changed; manual resolution required")
-        if req.observed_current_revision != current_revision or (
-            current.content_revision and current.content_revision != current_revision
-        ):
+        if req.observed_current_revision != current_revision:
             raise HTTPException(status_code=409, detail="Current approved release changed; refresh before rebasing")
         proposed = req.new_version or draft.version
         new_key, current_key = release_key(proposed), release_key(current.version)
@@ -546,9 +540,7 @@ async def withdraw_skill_version(
     if version.is_editing and version.editing_by != current_user.id and not _is_lock_expired(version.editing_since):
         raise HTTPException(status_code=409, detail="This skill version is being edited by another author")
     try:
-        prior_revision = skill_content_revision(listing, version)
-        if version.content_revision is not None and version.content_revision != prior_revision:
-            raise HTTPException(status_code=409, detail="Skill version changed; refresh its manifest before withdrawal")
+        prior_revision = verified_skill_revision(listing, version)
         if req.observed_revision != prior_revision:
             raise HTTPException(status_code=409, detail="Skill version changed; refresh its manifest before withdrawal")
         files = validate_skill_bundle(

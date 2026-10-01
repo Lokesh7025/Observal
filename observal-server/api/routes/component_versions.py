@@ -47,7 +47,7 @@ from services.component_version_extras import ALLOWED_FIELDS, REQUIRED_FIELDS, v
 from services.editing_lock import is_actively_editing
 from services.inbox import sources as inbox
 from services.skill_bundle import needs_bundle_delivery, validate_skill_bundle
-from services.skill_revisions import skill_content_revision
+from services.skill_revisions import verified_skill_revision
 from services.skill_validator import SkillValidationError
 from services.teamspace import can_review, review_scope
 from services.versioning import parse_semver
@@ -227,7 +227,7 @@ async def _get_version(
         _, ver = await _authorized_version(str(listing.id), version_id, db, current_user)
         result = _version_to_dict(ver, component_type)
         try:
-            result["revision"] = skill_content_revision(listing, ver)
+            result["revision"] = verified_skill_revision(listing, ver)
         except SkillValidationError as exc:
             raise HTTPException(status_code=409, detail="Stored skill version is not a valid release") from exc
         return result
@@ -322,6 +322,11 @@ async def _publish_version(
                     status_code=409, detail="Approve the first skill version before publishing another bundle"
                 )
         current_version = approved_base or locked_current
+        if current_version.delivery_mode == "registry_direct":
+            try:
+                verified_skill_revision(listing, current_version)
+            except SkillValidationError as exc:
+                raise HTTPException(status_code=409, detail="Approved skill base is not a valid folder") from exc
 
     # Duplicate check
     dup_stmt = select(version_model).where(
@@ -526,7 +531,7 @@ async def _review_version(
             raise HTTPException(status_code=409, detail="Review this exact draft with its observed revision")
         if req.observed_revision is not None or ver.content_revision is not None:
             try:
-                revision = skill_content_revision(listing, ver)
+                revision = verified_skill_revision(listing, ver)
             except SkillValidationError as exc:
                 raise HTTPException(status_code=409, detail="Skill version is not a valid release") from exc
             if (ver.content_revision is not None and ver.content_revision != revision) or (
@@ -551,7 +556,7 @@ async def _review_version(
             if base is None or base.status not in INSTALLABLE_STATUSES:
                 raise HTTPException(status_code=409, detail="Approved base changed; rebase this draft before review")
             try:
-                base_revision = skill_content_revision(listing, base)
+                base_revision = verified_skill_revision(listing, base)
             except SkillValidationError as exc:
                 raise HTTPException(status_code=409, detail="Approved base is not a valid release") from exc
             if ver.base_revision != base_revision:

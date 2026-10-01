@@ -42,6 +42,7 @@ async def test_queue_and_detail_bind_two_pending_skill_versions_by_uuid(monkeypa
             second.extra_files = [{"path": "a.txt", "content": "second version"}]
             second.delivery_mode = "registry_direct"
             second.skill_md_content = "---\nname: second\ndescription: reviewed\n---\n# Second\n"
+            second.content_revision = skill_content_revision(listing, second)
             await db.commit()
             listing_id, first_id, second_id = listing.id, first.id, second.id
 
@@ -164,6 +165,7 @@ async def test_exact_resource_folder_approval_requires_reviewed_bytes(monkeypatc
             listing = await ds.skill(db, author, status=ListingStatus.pending, version="1.0.0")
             row = await db.get(SkillVersion, listing.latest_version_id)
             row.extra_files = [{"path": "scripts/run.sh", "content": "echo one", "executable": True}]
+            row.content_revision = skill_content_revision(listing, row)
             await db.commit()
             listing_id, version_id = listing.id, row.id
         monkeypatch.setattr("api.routes.component_versions.inbox.on_review_decided", AsyncMock())

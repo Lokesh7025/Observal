@@ -16,6 +16,7 @@ from sqlalchemy import select
 from api.deps import get_db, get_registry_user
 from api.routes import skill
 from models.skill import SkillDownload, SkillVersion
+from services.skill_revisions import skill_content_revision
 from tests import discovery_support as ds
 
 CONTRACT = json.loads((Path(__file__).parent / "fixtures" / "skill_folder_install_contract.json").read_text())
@@ -40,6 +41,7 @@ async def test_http_selected_skill_needs_capability_and_deliberate_rollout(monke
                     "executable": False,
                 }
             ]
+            version.content_revision = skill_content_revision(listing, version)
             await db.commit()
             listing_id, version_id = listing.id, version.id
 

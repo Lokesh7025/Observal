@@ -366,6 +366,8 @@ class TestSkillRoutes:
         version.is_editing = False
         version.status = ListingStatus.draft
         version.content_revision = None
+        version.base_version_id = None
+        version.review_epoch = 0
         version.delivery_mode = "registry_direct"
         version.script_content = None
         version.script_filename = None

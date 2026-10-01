@@ -25,6 +25,7 @@ from models.sandbox import SandboxListing, SandboxVersion
 from models.skill import SkillListing, SkillVersion
 from models.user import UserRole
 from schemas.component_version import VersionPublishRequest, VersionReviewRequest
+from services.skill_revisions import skill_content_revision
 
 NOW = datetime(2026, 3, 4, 5, 6, 7, tzinfo=UTC)
 LISTING_ID = uuid.UUID(int=1001)
@@ -637,6 +638,7 @@ async def test_publish_uses_real_model_pair_snapshots_content_and_orders_transac
     monkeypatch.setattr(versions, "datetime", FrozenDateTime)
     if component_type == "skill":
         listing.latest_version.review_epoch = 3  # Successors must not inherit withdrawn review cycles.
+        listing.latest_version.content_revision = skill_content_revision(listing, listing.latest_version)
         monkeypatch.setattr(
             versions, "lock_skill_version", AsyncMock(return_value=(OLD_VERSION_ID, listing.latest_version))
         )

@@ -42,6 +42,7 @@ from models.prompt import PromptListing, PromptVersion
 from models.sandbox import SandboxListing, SandboxVersion
 from models.skill import SkillListing, SkillVersion
 from services.skill_bundle import needs_bundle_delivery, validate_skill_bundle
+from services.skill_revisions import verified_skill_revision
 from services.skill_validator import SkillValidationError
 
 if TYPE_CHECKING:
@@ -381,6 +382,20 @@ async def attach_pinned_components(
         if row is None:
             errors.append({"component_type": key[0], "component_id": str(key[1]), "reason": reason})
             continue
+        if key[0] == "skill" and row.delivery_mode == "registry_direct":
+            try:
+                if listings.get(key) is None:
+                    raise SkillValidationError("Skill listing no longer exists")
+                verified_skill_revision(listings[key], row)
+            except SkillValidationError:
+                errors.append(
+                    {
+                        "component_type": key[0],
+                        "component_id": str(key[1]),
+                        "reason": "skill folder has no valid review revision",
+                    }
+                )
+                continue
         chosen.append((ref, key, row))
     if errors:
         raise HTTPException(status_code=400, detail=errors)
@@ -460,6 +475,13 @@ async def build_lock_document(db: AsyncSession, agent: Any, version: Any, *, per
     for component in components:
         key = (component.component_type, component.component_id)
         row, source = _pinned_row(component, versions.get(key, []))
+        if persist and key[0] == "skill" and row is not None and row.delivery_mode == "registry_direct":
+            try:
+                if listings.get(key) is None:
+                    raise SkillValidationError("Skill listing no longer exists")
+                verified_skill_revision(listings[key], row)
+            except SkillValidationError as exc:
+                raise HTTPException(status_code=409, detail="Pinned skill folder has no valid review revision") from exc
         entry = _entry(component, row, listings.get(key), source)
         entries.append(entry)
         if persist and row is not None:
@@ -579,6 +601,20 @@ async def pinned_component_blockers(db: AsyncSession, components: Iterable[Any])
                         "name": listing.name,
                         "version": row.version,
                         "status": "invalid_bundle_pin",
+                    }
+                )
+                continue
+        if component.component_type == "skill" and row is not None and row.delivery_mode == "registry_direct":
+            try:
+                verified_skill_revision(listing, row)
+            except SkillValidationError:
+                blockers.append(
+                    {
+                        "component_type": "skill",
+                        "component_id": str(component.component_id),
+                        "name": listing.name,
+                        "version": row.version,
+                        "status": "invalid_review_revision",
                     }
                 )
                 continue
@@ -751,6 +787,11 @@ async def load_pinned_listings(
             raise HTTPException(status_code=409, detail=f"{label} has an invalid stored skill folder") from exc
         if kind == "skill" and _requires_v2_skill_pin(component, row) and component.resolved_digest != entry["digest"]:
             raise HTTPException(status_code=409, detail=f"{label} pinned folder differs from its v2 digest")
+        if kind == "skill" and row.delivery_mode == "registry_direct":
+            try:
+                verified_skill_revision(listing, row)
+            except SkillValidationError as exc:
+                raise HTTPException(status_code=409, detail=f"{label} has an invalid stored skill folder") from exc
         loaded.entries.append(entry)
         loaded.listings[kind][component.component_id] = PinnedListing(listing, row)
         if component.resolved_digest and source != "fallback-latest" and component.resolved_digest != entry["digest"]:

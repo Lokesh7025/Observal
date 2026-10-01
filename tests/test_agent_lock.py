@@ -20,6 +20,7 @@ from models.mcp import ListingStatus, McpVersion
 from models.skill import SkillVersion
 from models.user import UserRole
 from services import agent_lock
+from services.skill_revisions import skill_content_revision
 from tests import discovery_support as ds
 
 
@@ -326,6 +327,7 @@ async def test_resource_skill_requires_exact_v2_pin_even_in_non_strict_mode(sess
     with pytest.raises(HTTPException, match="pinned folder differs") as refused:
         await agent_lock.load_pinned_listings(session, [component], {"skill": {listing.id: listing}})
     assert refused.value.status_code == 409
+    row.content_revision = skill_content_revision(listing, row)
     component.resolved_digest = agent_lock.content_digest("skill", row)
     loaded = await agent_lock.load_pinned_listings(session, [component], {"skill": {listing.id: listing}})
     assert loaded.entries[0]["digest"] == component.resolved_digest
@@ -351,6 +353,7 @@ async def test_agent_review_blockers_reject_resource_bundle_with_old_digest(sess
     )
     blockers = await agent_lock.pinned_component_blockers(session, [component])
     assert blockers[0]["status"] == "invalid_bundle_pin"
+    row.content_revision = skill_content_revision(listing, row)
     component.resolved_digest = agent_lock.content_digest("skill", row)
     assert await agent_lock.pinned_component_blockers(session, [component]) == []
 

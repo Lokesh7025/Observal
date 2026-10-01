@@ -262,6 +262,7 @@ async def test_draft_fork_preserves_approved_pointer_and_supports_isolated_file_
             base.extra_files = [FIXTURE["snapshot"]["extra_files"][0]]
             await db.flush()
             base_revision = skill_content_revision(listing, base)
+            base.content_revision = base_revision
             listing_id, base_id, owner_id = listing.id, base.id, owner.id
             base_extras = [item.copy() for item in base.extra_files]
             await db.commit()

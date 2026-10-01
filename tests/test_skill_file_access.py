@@ -13,6 +13,7 @@ from models.skill import SkillVersion
 from models.team import TeamMembership, TeamRole
 from models.user import UserRole
 from services.skill_bundle import MAX_FILE_BYTES
+from services.skill_revisions import skill_content_revision
 from tests import discovery_support as ds
 
 
@@ -65,6 +66,7 @@ async def test_private_pending_skill_files_are_only_readable_by_owner_and_team_r
             listing = await ds.skill(db, owner, status=ListingStatus.pending, is_private=True, team_id=team.id)
             version = (await db.execute(select(SkillVersion).where(SkillVersion.listing_id == listing.id))).scalar_one()
             version.extra_files = [{"path": "private.txt", "content": "private bytes"}]
+            version.content_revision = skill_content_revision(listing, version)
             await db.commit()
             listing_id, version_id = listing.id, version.id
 
@@ -103,6 +105,7 @@ async def test_private_pending_skill_files_are_only_readable_by_owner_and_team_r
             listing.is_private = False
             version.requires_global_review = True
             version.pre_public_status = "approved"
+            version.content_revision = skill_content_revision(listing, version)
             await db.commit()
         async with maker() as db:
             with pytest.raises(HTTPException) as exc:
