@@ -588,6 +588,38 @@ async def test_stale_approved_artifact_cannot_bypass_global_re_review(sessions, 
 
 
 @pytest.mark.asyncio
+async def test_artifact_is_publicly_cacheable_only_when_public_registry_is_enabled(sessions, settings):
+    owner, _, skill = await _seed(sessions)
+    path = f"/api/v1/artifacts/skill/{skill.id}/1.2.0"
+    async with sessions() as db:
+        from sqlalchemy import select
+
+        from models.discovery_entry import DiscoveryEntry
+
+        private_entry = (
+            await db.execute(select(DiscoveryEntry).where(DiscoveryEntry.display_name == "Secret Skill"))
+        ).scalar_one()
+    private_path = f"/api/v1/artifacts/skill/{private_entry.local_entity_id}/{private_entry.version}"
+    async with _client(_app(sessions, owner)) as client:
+        private_response = await client.get(path)
+        assert private_response.status_code == 200
+        assert private_response.headers["Cache-Control"] == "private, no-store"
+
+        settings["public"] = True
+        signed_in_response = await client.get(path)
+        assert signed_in_response.status_code == 200
+        assert signed_in_response.headers["Cache-Control"] == "private, no-store"
+        private_listing_response = await client.get(private_path)
+        assert private_listing_response.status_code == 200
+        assert private_listing_response.headers["Cache-Control"] == "private, no-store"
+
+    async with _client(_app(sessions, None)) as client:
+        anonymous_response = await client.get(path)
+        assert anonymous_response.status_code == 200
+        assert anonymous_response.headers["Cache-Control"].startswith("public")
+
+
+@pytest.mark.asyncio
 async def test_artifact_hides_unapproved_versions_from_non_owners(sessions, settings):
     owner, stranger, skill = await _seed(sessions)
     async with sessions() as db:

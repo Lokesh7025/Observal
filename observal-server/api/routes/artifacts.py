@@ -140,9 +140,12 @@ async def get_artifact(
             "Digest": artifact.digest_header,
             "X-Artifact-Digest": artifact.digest,
             "X-Observal-Identifier": entry.ard_identifier,
+            # Only anonymous, genuinely public and cleared artifacts may be cached by shared proxies.
             "Cache-Control": (
                 _IMMUTABLE
-                if approved
+                if current_user is None
+                and public_registry_enabled
+                and approved
                 and entry.visibility.value == "public"
                 and not getattr(listing, "is_private", False)
                 and not getattr(row, "requires_global_review", False)
