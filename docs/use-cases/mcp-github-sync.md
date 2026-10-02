@@ -42,7 +42,7 @@ A push sync always fetches the branch tip when the job runs, not the commit name
 
 ## Set it up
 
-You must own the listing, or be a co-author or an admin. The listing must have a git repository URL.
+You must own the listing, or be a co-author or an admin. The listing must have a git repository URL, and a reviewer must have approved it at least once. Synced versions skip review, so the first version still goes through it.
 
 ### 1. Turn on sync
 
