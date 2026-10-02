@@ -27,6 +27,7 @@ import {
   useTeams,
   useUpdateRegistryVisibility,
   useWhoami,
+  useMcpSyncWatcher,
 } from "@/hooks/use-api";
 import { getUserRole } from "@/lib/api";
 import { useOptionalAuth } from "@/hooks/use-auth";
@@ -44,6 +45,7 @@ import { ReviewForm } from "@/components/registry/review-form";
 import { VersionDropdown } from "@/components/registry/version-dropdown";
 import { ComponentEditForm } from "@/components/registry/component-edit-form";
 import { ComponentInstallCommand } from "@/components/registry/component-install-command";
+import { McpWebhookSyncPanel } from "@/components/registry/mcp-webhook-sync-panel";
 import { SkillVersionFiles } from "@/components/registry/skill-version-files";
 import { SkillSuccessorDialog } from "@/components/registry/skill-successor-dialog";
 import { RegistryName } from "@/components/registry/registry-name";
@@ -180,6 +182,8 @@ export default function ComponentDetailPage({
   const withdrawFolderVersion = useWithdrawSkillFolderVersion();
   const submitFolderDraft = useSubmitSkillFolderDraft();
   const canEdit = isAuthenticated && (item?.user_permission === "owner");
+  // Only owners can read sync status, so only their open page follows GitHub syncs.
+  useMcpSyncWatcher(item ? String(item.id) : undefined, canEdit && type === "mcps" && !!item?.git_url);
   const isAdmin = isAuthenticated && hasMinRole(getUserRole(), "admin");
   const owningTeam = item?.team_id ? teams.find((team) => team.id === String(item.team_id)) : undefined;
   const personalTeam = teams.find((team) => team.is_personal && team.visibility === "private");
@@ -538,6 +542,7 @@ export default function ComponentDetailPage({
                   )}
                 </TabsTrigger>
                 {canEdit && <TabsTrigger value="edit">Edit</TabsTrigger>}
+                {canEdit && singularType === "mcp" && <TabsTrigger value="sync">Sync</TabsTrigger>}
               </TabsList>
 
               <TabsContent value="overview" forceMount className="mt-6 data-[state=inactive]:hidden">
@@ -721,6 +726,14 @@ export default function ComponentDetailPage({
                       item={effectiveItem ?? item}
                       onSuccess={() => refetch()}
                     />}
+                  </div>
+                </TabsContent>
+              )}
+
+              {canEdit && singularType === "mcp" && (
+                <TabsContent value="sync" className="mt-6">
+                  <div className="w-full min-h-[400px]">
+                    <McpWebhookSyncPanel listingId={String(item.id)} gitUrl={item.git_url as string | undefined} />
                   </div>
                 </TabsContent>
               )}
