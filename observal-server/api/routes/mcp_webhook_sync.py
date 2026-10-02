@@ -81,6 +81,26 @@ async def _sync_for(db: AsyncSession, listing: McpListing) -> McpWebhookSync | N
     ).scalar_one_or_none()
 
 
+async def _queue(db: AsyncSession, sync: McpWebhookSync, request: SyncRequest) -> None:
+    """Mark the sync queued, then hand it to the worker.
+
+    "queued" is committed before the job exists, so the worker's own status
+    updates always land after it. If the job cannot be queued, the sync is
+    marked failed instead of staying "queued" with nothing to run it.
+    """
+    sync.last_sync_status = "queued"
+    sync.last_sync_error = None
+    await db.commit()
+    try:
+        await enqueue_sync(sync.id, request)
+    except Exception:
+        optic.exception("mcp webhook sync could not be queued sync_id={}", sync.id)
+        sync.last_sync_status = "failed"
+        sync.last_sync_error = "Could not queue the sync job because the worker queue is unavailable. Try again later."
+        await db.commit()
+        raise HTTPException(status_code=503, detail="Could not queue the sync job. Try again later.") from None
+
+
 @router.get("/{listing_id}/webhook-sync", response_model=McpWebhookSyncResponse)
 async def get_webhook_sync(
     listing_id: str,
@@ -162,10 +182,7 @@ async def run_webhook_sync(
     sync = await _sync_for(db, listing)
     if sync is None:
         raise HTTPException(status_code=404, detail="Webhook sync is not enabled for this listing")
-    sync.last_sync_status = "queued"
-    sync.last_sync_error = None
-    await db.commit()
-    await enqueue_sync(sync.id, SyncRequest(trigger="manual", ref=sync.branch))
+    await _queue(db, sync, SyncRequest(trigger="manual", ref=sync.branch))
     await db.refresh(sync)
     return await _response(request, sync)
 
@@ -225,8 +242,5 @@ async def receive_github_webhook(
         await db.commit()
         return McpWebhookDeliveryResponse(status="ignored", reason=plan)
 
-    sync.last_sync_status = "queued"
-    sync.last_sync_error = None
-    await db.commit()
-    await enqueue_sync(sync.id, plan)
+    await _queue(db, sync, plan)
     return McpWebhookDeliveryResponse(status="queued", trigger=plan.trigger, ref=plan.ref)

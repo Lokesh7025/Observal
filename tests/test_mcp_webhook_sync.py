@@ -456,6 +456,31 @@ async def test_manual_run_queues_tracked_branch(monkeypatch):
             assert (await client.get(f"/api/v1/mcps/{listing.id}/webhook-sync")).json()["enabled"] is False
 
 
+@pytest.mark.asyncio
+async def test_queue_failure_marks_sync_failed_instead_of_stuck_queued(monkeypatch):
+    from api.routes import mcp_webhook_sync as routes
+
+    owner = _user()
+    listing, ver = _listing(owner)
+    sync = _sync(listing, owner, "s3cret")
+    async with _database() as sessions:
+        await _seed(sessions, owner, listing, ver, sync)
+        async with _api(sessions, owner, monkeypatch) as (client, _):
+
+            async def broken_enqueue(sync_id, request):
+                raise ConnectionError("redis down")
+
+            monkeypatch.setattr(routes, "enqueue_sync", broken_enqueue)
+            assert (await client.post(f"/api/v1/mcps/{listing.id}/webhook-sync/run")).status_code == 503
+            assert (await _deliver(client, sync.id, _push())).status_code == 503
+
+        async with sessions() as session:
+            stored = await session.get(McpWebhookSync, sync.id)
+            assert stored.last_sync_status == "failed"
+            assert "worker queue is unavailable" in stored.last_sync_error
+            assert stored.last_event == "push"
+
+
 # ── Public receiver ──────────────────────────────────────────
 
 
