@@ -111,7 +111,7 @@ async def test_actual_packaged_init_from_empty_postgres_creates_revision_and_res
         fresh = create_async_engine(fresh_url)
         try:
             async with fresh.connect() as conn:
-                assert await conn.scalar(text("SELECT version_num FROM alembic_version")) == "039_agent_pin_digest"
+                assert await conn.scalar(text("SELECT version_num FROM alembic_version")) == "040_mcp_webhook_syncs"
                 assert await conn.scalar(text("SELECT COUNT(*) FROM skill_versions")) == 0
                 assert await conn.scalar(text("SELECT COUNT(*) FROM agent_share_manifests")) == 0
                 assert (
@@ -177,7 +177,7 @@ async def test_actual_packaged_init_from_empty_postgres_creates_revision_and_res
             )
             assert repaired.returncode == 0, repaired.stderr[-1000:] + repaired.stdout[-1000:]
             async with fresh.connect() as conn:
-                assert await conn.scalar(text("SELECT version_num FROM alembic_version")) == "039_agent_pin_digest"
+                assert await conn.scalar(text("SELECT version_num FROM alembic_version")) == "040_mcp_webhook_syncs"
                 assert await conn.scalar(text("SELECT COUNT(*) FROM agent_share_items")) == 0
                 for table in recommended_tables:
                     assert (
@@ -213,7 +213,7 @@ async def test_actual_packaged_init_from_empty_postgres_creates_revision_and_res
             assert upgraded.returncode == 0, upgraded.stderr[-1000:] + upgraded.stdout[-1000:]
             assert "Running database migrations" in upgraded.stdout
             async with fresh.connect() as conn:
-                assert await conn.scalar(text("SELECT version_num FROM alembic_version")) == "039_agent_pin_digest"
+                assert await conn.scalar(text("SELECT version_num FROM alembic_version")) == "040_mcp_webhook_syncs"
                 assert (
                     await conn.scalar(
                         text(
@@ -261,7 +261,7 @@ async def test_actual_packaged_init_from_empty_postgres_creates_revision_and_res
                 assert blocked.returncode != 0
                 assert refusal in blocked.stderr, blocked.stderr[-1500:]
                 async with fresh.begin() as conn:
-                    assert await conn.scalar(text("SELECT version_num FROM alembic_version")) == "039_agent_pin_digest"
+                    assert await conn.scalar(text("SELECT version_num FROM alembic_version")) == "040_mcp_webhook_syncs"
                     await conn.execute(text(f"UPDATE skill_versions SET {clear} WHERE id = :id"), {"id": version_id})
             cleared = subprocess.run(
                 [sys.executable, "-m", "alembic", "downgrade", "028_agent_component_pins"],
