@@ -4,7 +4,7 @@
 """Store direct skill resources on each immutable skill version.
 
 Revision ID: 029_skill_version_extra_files
-Revises: 028_agent_component_pins
+Revises: 030_agent_share_manifests
 """
 
 import sqlalchemy as sa
@@ -13,7 +13,9 @@ from sqlalchemy.dialects import postgresql
 from alembic import op
 
 revision = "029_skill_version_extra_files"
-down_revision = "028_agent_component_pins"
+# Reparent after the upstream recommendation and share migrations.
+# Previously stamped skill-only installations are repaired at 037/038.
+down_revision = "030_agent_share_manifests"
 branch_labels = None
 depends_on = None
 

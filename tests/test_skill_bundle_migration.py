@@ -26,7 +26,7 @@ def _migration(monkeypatch, bind=None):
 
 def test_upgrade_backfills_old_rows_and_new_legacy_writers(monkeypatch):
     migration, op = _migration(monkeypatch)
-    assert migration.down_revision == "028_agent_component_pins"
+    assert migration.down_revision == "030_agent_share_manifests"
     migration.upgrade()
     table, column = op.add_column.call_args.args
     assert table == "skill_versions" and column.name == "extra_files"

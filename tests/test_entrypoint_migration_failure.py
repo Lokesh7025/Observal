@@ -111,8 +111,9 @@ async def test_actual_packaged_init_from_empty_postgres_creates_revision_and_res
         fresh = create_async_engine(fresh_url)
         try:
             async with fresh.connect() as conn:
-                assert await conn.scalar(text("SELECT version_num FROM alembic_version")) == "036_discovery_trgm"
+                assert await conn.scalar(text("SELECT version_num FROM alembic_version")) == "038_share_compat"
                 assert await conn.scalar(text("SELECT COUNT(*) FROM skill_versions")) == 0
+                assert await conn.scalar(text("SELECT COUNT(*) FROM agent_share_manifests")) == 0
                 assert (
                     await conn.scalar(
                         text(
@@ -145,6 +146,51 @@ async def test_actual_packaged_init_from_empty_postgres_creates_revision_and_res
                     "uq_exec_dashboard_config_singleton",
                 ):
                     assert "UNIQUE INDEX" in indexes[name]
+            # Simulate an installation stamped by the earlier skill-only branch:
+            # Alembic cannot revisit its newly inserted 029/030 parents, so
+            # 037/038 must restore missing flags and share tables before use.
+            recommended_tables = (
+                "agents",
+                "mcp_listings",
+                "skill_listings",
+                "hook_listings",
+                "prompt_listings",
+                "sandbox_listings",
+            )
+            async with fresh.begin() as conn:
+                await conn.execute(text("DROP TABLE agent_share_items"))
+                await conn.execute(text("UPDATE alembic_version SET version_num = '037_recommended_compat'"))
+            partial = subprocess.run(
+                ["bash", str(script)], cwd=server, env=env, capture_output=True, text=True, check=False
+            )
+            assert partial.returncode == 1
+            assert "Partial agent share schema" in partial.stderr
+            assert "Running ClickHouse migrations" not in partial.stdout
+            async with fresh.begin() as conn:
+                assert await conn.scalar(text("SELECT version_num FROM alembic_version")) == "037_recommended_compat"
+                for table in recommended_tables:
+                    await conn.execute(text(f"ALTER TABLE {table} DROP COLUMN is_recommended"))
+                await conn.execute(text("DROP TABLE agent_share_manifests"))
+                await conn.execute(text("UPDATE alembic_version SET version_num = '036_discovery_trgm'"))
+            repaired = subprocess.run(
+                ["bash", str(script)], cwd=server, env=env, capture_output=True, text=True, check=False
+            )
+            assert repaired.returncode == 0, repaired.stderr[-1000:] + repaired.stdout[-1000:]
+            async with fresh.connect() as conn:
+                assert await conn.scalar(text("SELECT version_num FROM alembic_version")) == "038_share_compat"
+                assert await conn.scalar(text("SELECT COUNT(*) FROM agent_share_items")) == 0
+                for table in recommended_tables:
+                    assert (
+                        await conn.scalar(
+                            text(
+                                "SELECT COUNT(*) FROM information_schema.columns "
+                                "WHERE table_name = :table AND column_name = 'is_recommended' "
+                                "AND data_type = 'boolean' AND is_nullable = 'NO' AND column_default = 'false'"
+                            ),
+                            {"table": table},
+                        )
+                        == 1
+                    )
             # A freshly stamped schema must really support the empty-data
             # downgrade guard and then the packaged versioned upgrade path.
             downgraded = subprocess.run(
@@ -167,7 +213,7 @@ async def test_actual_packaged_init_from_empty_postgres_creates_revision_and_res
             assert upgraded.returncode == 0, upgraded.stderr[-1000:] + upgraded.stdout[-1000:]
             assert "Running database migrations" in upgraded.stdout
             async with fresh.connect() as conn:
-                assert await conn.scalar(text("SELECT version_num FROM alembic_version")) == "036_discovery_trgm"
+                assert await conn.scalar(text("SELECT version_num FROM alembic_version")) == "038_share_compat"
                 assert (
                     await conn.scalar(
                         text(
@@ -215,7 +261,7 @@ async def test_actual_packaged_init_from_empty_postgres_creates_revision_and_res
                 assert blocked.returncode != 0
                 assert refusal in blocked.stderr, blocked.stderr[-1500:]
                 async with fresh.begin() as conn:
-                    assert await conn.scalar(text("SELECT version_num FROM alembic_version")) == "036_discovery_trgm"
+                    assert await conn.scalar(text("SELECT version_num FROM alembic_version")) == "038_share_compat"
                     await conn.execute(text(f"UPDATE skill_versions SET {clear} WHERE id = :id"), {"id": version_id})
             cleared = subprocess.run(
                 [sys.executable, "-m", "alembic", "downgrade", "028_agent_component_pins"],

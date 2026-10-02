@@ -17,7 +17,7 @@ from typing import Literal
 from pydantic import BaseModel, field_validator, model_serializer
 
 from models.agent import AgentStatus
-from schemas.constants import AGENT_NAME_REGEX, Visibility, make_name_validator
+from schemas.constants import AGENT_NAME_REGEX, RecommendedFlag, Visibility, make_name_validator
 from schemas.skill_resources import SkillInstallFolder
 from services.versioning import validate_semver
 
