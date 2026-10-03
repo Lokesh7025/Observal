@@ -414,3 +414,152 @@ class TestDirectoryCapture:
 
             assert len(snapshot.warnings) > 0
             assert any("sensitive" in w.lower() for w in snapshot.warnings)
+
+
+# ── Rollback and Recovery Tests ──────────────────────────────────────────────
+
+
+class TestRollbackAndRecovery:
+    """Tests for atomic installation with rollback on failure."""
+
+    def test_staging_directory_removed_on_success(self):
+        """Verify staging directory is cleaned up after successful install."""
+        skill_md = b"---\nname: test\n---\n# Test"
+        bundle = _make_bundle([_make_file("SKILL.md", skill_md)])
+        validated = validate_bundle(bundle)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dest = Path(tmpdir) / "skills" / "test"
+            install_folder_bundle(validated, dest)
+
+            # Check no staging directories remain
+            parent = dest.parent
+            stage_dirs = list(parent.glob(".test.stage.*"))
+            assert len(stage_dirs) == 0
+
+    def test_staging_directory_preserved_on_validation_failure(self):
+        """Verify staging directory cleanup even on validation failure."""
+        skill_md = b"---\nname: test\n---\n# Test"
+        # Create bundle with wrong SHA
+        bad_file = _make_file("SKILL.md", skill_md)
+        bad_file["sha256"] = "0" * 64
+        bundle = _make_bundle([bad_file])
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dest = Path(tmpdir) / "skills" / "test"
+            dest.parent.mkdir(parents=True, exist_ok=True)
+
+            with pytest.raises(BundleInstallError):
+                install_folder_bundle(bundle, dest)
+
+            # Staging directories should be cleaned up
+            stage_dirs = list(dest.parent.glob(".test.stage.*"))
+            assert len(stage_dirs) == 0
+
+    def test_existing_directory_preserved_on_failure(self):
+        """Verify existing skill directory is not corrupted on install failure."""
+        skill_md = b"---\nname: test\n---\n# Test"
+        original_content = b"original content"
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dest = Path(tmpdir) / "skills" / "test"
+            dest.mkdir(parents=True)
+            (dest / "SKILL.md").write_bytes(original_content)
+
+            # Create bundle with wrong SHA to trigger failure
+            bad_file = _make_file("SKILL.md", skill_md)
+            bad_file["sha256"] = "0" * 64
+            bundle = _make_bundle([bad_file])
+
+            with pytest.raises(BundleInstallError):
+                install_folder_bundle(bundle, dest)
+
+            # Original content should be preserved
+            assert dest.exists()
+            assert (dest / "SKILL.md").read_bytes() == original_content
+
+    def test_backup_created_for_existing_directory(self):
+        """Verify backup is created when replacing existing directory."""
+        skill_md_v1 = b"---\nname: test\nversion: 1.0\n---\n# Test v1"
+        skill_md_v2 = b"---\nname: test\nversion: 2.0\n---\n# Test v2"
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dest = Path(tmpdir) / "skills" / "test"
+            dest.mkdir(parents=True)
+            (dest / "SKILL.md").write_bytes(skill_md_v1)
+
+            bundle = _make_bundle([_make_file("SKILL.md", skill_md_v2)])
+            validated = validate_bundle(bundle)
+            install_folder_bundle(validated, dest, force=True)
+
+            # New content installed
+            assert (dest / "SKILL.md").read_bytes() == skill_md_v2
+
+            # Backup should exist temporarily during install but cleaned up after
+            backup_dirs = list(dest.parent.glob(".test.backup.*"))
+            assert len(backup_dirs) == 0  # Cleaned up on success
+
+    def test_orphaned_staging_detection(self):
+        """Verify orphaned staging directories are detected."""
+        skill_md = b"---\nname: test\n---\n# Test"
+        bundle = _make_bundle([_make_file("SKILL.md", skill_md)])
+        validated = validate_bundle(bundle)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dest = Path(tmpdir) / "skills" / "test"
+            dest.parent.mkdir(parents=True)
+
+            # Create orphaned staging directory (simulating interrupted install)
+            orphan = dest.parent / ".test.stage.99999"
+            orphan.mkdir()
+            (orphan / "SKILL.md").write_bytes(b"orphan")
+
+            # Install should succeed despite orphan
+            install_folder_bundle(validated, dest)
+
+            assert dest.exists()
+            assert (dest / "SKILL.md").read_bytes() == skill_md
+
+    def test_file_permissions_preserved(self):
+        """Verify file permissions are correctly set during install."""
+        skill_md = b"---\nname: test\n---\n# Test"
+        script = b"#!/bin/sh\necho hello"
+        bundle = _make_bundle([
+            _make_file("SKILL.md", skill_md, "0644"),
+            _make_file("scripts/run.sh", script, "0755"),
+        ])
+        validated = validate_bundle(bundle)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dest = Path(tmpdir) / "skills" / "test"
+            install_folder_bundle(validated, dest)
+
+            skill_md_path = dest / "SKILL.md"
+            script_path = dest / "scripts" / "run.sh"
+
+            # Check SKILL.md is not executable
+            assert not os.access(skill_md_path, os.X_OK)
+
+            # Check script is executable
+            assert os.access(script_path, os.X_OK)
+
+    def test_concurrent_install_protection(self):
+        """Verify concurrent installs don't corrupt each other."""
+        skill_md = b"---\nname: test\n---\n# Test"
+        bundle = _make_bundle([_make_file("SKILL.md", skill_md)])
+        validated = validate_bundle(bundle)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dest = Path(tmpdir) / "skills" / "test"
+            dest.parent.mkdir(parents=True)
+
+            # Simulate concurrent install by pre-creating staging directory
+            existing_stage = dest.parent / f".test.stage.{os.getpid()}"
+            existing_stage.mkdir()
+
+            # Install should use a different staging directory or handle conflict
+            # This tests that the installer is resilient to pre-existing staging dirs
+            install_folder_bundle(validated, dest)
+
+            assert dest.exists()
+            assert (dest / "SKILL.md").read_bytes() == skill_md

@@ -152,6 +152,7 @@ def materialize(task: dict, ws: workspace.Workspace, *, harness: str, adapter) -
         "header_values": {},
         "options": {"scope": "project", "local_name": name},
         "platform": sys.platform,
+        "supported_features": ["skill_extra_files_v1"],
     }
     if m.get("version"):
         body["version"] = m["version"]
@@ -170,6 +171,8 @@ def materialize(task: dict, ws: workspace.Workspace, *, harness: str, adapter) -
             agent_id=agent_id,
             is_user_scope=False,
             quiet=True,
+            skill_bundles=result.get("skill_bundles"),
+            lock=result.get("lock"),
         )
     if failed:
         ws.notes.append(f"Skills that could not be installed for the delegated agent: {', '.join(failed)}.")
