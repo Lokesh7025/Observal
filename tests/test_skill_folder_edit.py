@@ -9,7 +9,7 @@ import pytest
 
 from schemas.skill_resources import SkillFileOperations, SkillFolderSnapshot
 from services.skill_bundle import MAX_FILE_BYTES
-from services.skill_folder_edit import apply_file_operations, replace_folder
+from services.skill_folder_edit import _validate_new_md, apply_file_operations, replace_folder
 from services.skill_validator import SkillValidationError
 
 MD = "---\nname: example\ndescription: Example skill\n---\n# Example\n"
@@ -69,6 +69,36 @@ def test_file_replacement_clears_git_and_script_slots_at_call_site():
     assert edit.script_filename is None and edit.script_content is None
     assert edit.files[-1].declaration.mode == "0755"
     assert edit.files[-1].declaration.size == 0
+
+
+@pytest.mark.parametrize(
+    "frontmatter",
+    [
+        "name: UPPER\ndescription: Example",
+        "name: bad--name\ndescription: Example",
+        "name: example\ndescription: " + "x" * 1025,
+        "name: example\ndescription: Example\ncompatibility: " + "x" * 501,
+        "name: example\ndescription: Example\nmetadata: not-a-map",
+        "name: example\ndescription: Example\nmetadata: {count: 3}",
+        "name: example\ndescription: Example\nallowed-tools: [bash]",
+    ],
+)
+def test_new_folder_rejects_invalid_standard_metadata_without_rewriting_legacy(frontmatter):
+    content = f"---\n{frontmatter}\n---\n# Body\n"
+    with pytest.raises(SkillValidationError):
+        replace_folder(SkillFolderSnapshot(skill_md_content=content, extra_files=[]))
+    assert _validate_new_md(content) is None  # An unchanged historical draft can still be forked.
+
+
+def test_new_folder_preserves_observal_command_extension_and_standard_fields():
+    content = (
+        "---\nname: café\ndescription: When handling documents, use this skill.\n"
+        "license: Apache-2.0\ncompatibility: Requires Python 3.\n"
+        "metadata: {team: docs}\nallowed-tools: Bash(git)\ncommand: docs\n---\n# Body\n"
+    )
+    edit = replace_folder(SkillFolderSnapshot(skill_md_content=content, extra_files=[]))
+    assert edit.skill_md_content == content
+    assert _validate_new_md(content, authored=True) == "docs"
 
 
 @pytest.mark.parametrize(

@@ -460,6 +460,8 @@ def _build_mcp_configs(
 def _build_skill_configs(
     agent: Agent,
     skill_listings: dict | None = None,
+    *,
+    folder_names: dict | None = None,
 ) -> list[dict]:
     """Build skill metadata from registry skill components.
 
@@ -467,6 +469,7 @@ def _build_skill_configs(
     that harness-specific generators turn into skill files.
     """
     skill_listings = skill_listings or {}
+    folder_names = folder_names or {}
     skills: list[dict] = []
     local_names = _local_registry_names(skill_listings)
 
@@ -479,7 +482,7 @@ def _build_skill_configs(
         delivery_mode = getattr(listing, "delivery_mode", "git_fetch")
         skills.append(
             {
-                "name": _sanitize_name(local_names[comp.component_id]),
+                "name": folder_names.get(comp.component_id, _sanitize_name(local_names[comp.component_id])),
                 "description": getattr(listing, "description", "") or "",
                 "slash_command": getattr(listing, "slash_command", None),
                 "task_type": getattr(listing, "task_type", ""),

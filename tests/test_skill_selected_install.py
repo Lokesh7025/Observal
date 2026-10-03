@@ -106,6 +106,83 @@ async def test_opted_in_standalone_bundle_declares_all_files_and_denies_old_clie
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("declared_name", ["portable-name", "café"])
+async def test_complete_standalone_folder_uses_frontmatter_name_not_slug_or_alias(monkeypatch, declared_name):
+    engine = ds.make_engine()
+    maker = await ds.create_schema(engine)
+    async with engine.begin() as conn:
+        await conn.run_sync(SkillDownload.__table__.create)
+    try:
+        async with maker() as db:
+            owner = await ds.user(db)
+            listing = await ds.skill(db, owner, slug="registry-alias")
+            version = await db.get(SkillVersion, listing.latest_version_id)
+            version.skill_md_content = f"---\nname: {declared_name}\ndescription: Test skill\n---\n# Body\n"
+            version.extra_files = [{"path": "references/guide.md", "content": "Guide\n"}]
+            version.content_revision = skill_content_revision(listing, version)
+            await db.commit()
+            listing_id, version_id, owner_id = listing.id, version.id, owner.id
+        monkeypatch.setattr("api.routes.config.derive_endpoints", AsyncMock(return_value={"api": "https://api.test"}))
+        monkeypatch.setattr("services.dynamic_settings.get_sync_bool", lambda key, default=False: True)
+        async with maker() as db:
+            owner = await db.get(type(owner), owner_id)
+            with pytest.raises(HTTPException) as alias:
+                await skill.install_skill(
+                    str(listing_id),
+                    SkillInstallRequest(
+                        harness="pi", local_name="local-alias", supported_features=["skill_extra_files_v1"]
+                    ),
+                    MagicMock(),
+                    db,
+                    owner,
+                )
+            assert alias.value.status_code == 409
+            assert (await db.get(SkillVersion, version_id)).download_count == 0
+            response = await skill.install_skill(
+                str(listing_id),
+                SkillInstallRequest(harness="pi", supported_features=["skill_extra_files_v1"]),
+                MagicMock(),
+                db,
+                owner,
+            )
+            assert response.bundle.skill_file_path == f".pi/skills/{declared_name}/SKILL.md"
+            assert response.config_snippet["skill"]["name"] == declared_name
+            assert [file.path for file in response.bundle.files] == ["SKILL.md", "references/guide.md"]
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_opted_in_historical_resource_less_skill_keeps_its_local_alias(monkeypatch):
+    engine = ds.make_engine()
+    maker = await ds.create_schema(engine)
+    async with engine.begin() as conn:
+        await conn.run_sync(SkillDownload.__table__.create)
+    try:
+        async with maker() as db:
+            owner = await ds.user(db)
+            listing = await ds.skill(db, owner, slug="registry-alias")  # Old SKILL.md has no description.
+            version = await db.get(SkillVersion, listing.latest_version_id)
+            version.content_revision = skill_content_revision(listing, version)
+            await db.commit()
+            listing_id, owner_id = listing.id, owner.id
+        monkeypatch.setattr("api.routes.config.derive_endpoints", AsyncMock(return_value={"api": "https://api.test"}))
+        async with maker() as db:
+            owner = await db.get(type(owner), owner_id)
+            response = await skill.install_skill(
+                str(listing_id),
+                SkillInstallRequest(harness="pi", local_name="old-local", supported_features=["skill_extra_files_v1"]),
+                MagicMock(),
+                db,
+                owner,
+            )
+            assert response.bundle.skill_file_path == ".pi/skills/old-local/SKILL.md"
+            assert response.config_snippet["skill"]["name"] == "old-local"
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_sixty_file_server_response_is_complete_and_selected(monkeypatch):
     engine = ds.make_engine()
     maker = await ds.create_schema(engine)

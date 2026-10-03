@@ -79,6 +79,8 @@ def merge_skill_draft(base, draft, current) -> tuple[SkillFolderEdit | None, dic
         if path != "SKILL.md"
     ]
     edit = replace_folder(
-        SkillFolderSnapshot(skill_md_content=chosen["SKILL.md"].content.decode("utf-8"), extra_files=resources)
+        SkillFolderSnapshot(skill_md_content=chosen["SKILL.md"].content.decode("utf-8"), extra_files=resources),
+        authored=chosen["SKILL.md"].content != before["SKILL.md"].content,
+        # Inherited historical SKILL.md is not newly authored by this rebase.
     )
     return edit, metadata, conflicts

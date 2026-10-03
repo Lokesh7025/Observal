@@ -569,6 +569,17 @@ async def install_skill(
     from api.routes.config import derive_endpoints
     from services.skill_config_generator import generate_skill_config
 
+    folder_name = None
+    if bundled and installed.extra_files:
+        from services.skill_bundle import declared_skill_folder_name
+
+        try:
+            folder_name = declared_skill_folder_name(installed.skill_md_content)
+        except SkillValidationError as exc:
+            raise HTTPException(status_code=409, detail="Selected skill has no valid installed folder name") from exc
+        if req.local_name is not None and req.local_name != folder_name:
+            raise HTTPException(status_code=409, detail="local_name must match SKILL.md name for a complete folder")
+
     endpoints = await derive_endpoints(request)
     config = generate_skill_config(
         listing,
@@ -579,9 +590,14 @@ async def install_skill(
         local_name=req.local_name,
     )
     if bundled:
-        path = config.get("skills", {}).get("path")
-        if not isinstance(path, str) or not path.endswith("/SKILL.md"):
+        skill_file = config.get("skills")
+        if not isinstance(skill_file, dict) or not isinstance(skill_file.get("path"), str):
             raise HTTPException(status_code=409, detail="Harness has no usable skill folder destination")
+        path = harness_spec["skills"][req.scope].format(name=folder_name) if folder_name else skill_file["path"]
+        if not path.endswith("/SKILL.md"):
+            raise HTTPException(status_code=409, detail="Harness has no usable skill folder destination")
+        if folder_name:
+            config["skill"]["name"] = folder_name
         try:
             bundle = complete_skill_folder(listing.id, installed, skill_file_path=path)
         except SkillValidationError as exc:

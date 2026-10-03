@@ -20,8 +20,13 @@ from schemas.skill import SkillInstallRequest, SkillInstallResponse
 from schemas.skill_resources import SkillInstallFolder
 from services.agent_lock import LOCK_VERSION, SKILL_DIGEST_ALG_V2, content_digest, lock_digest
 from services.harness import generate_agent_config
-from services.skill_bundle import complete_skill_folder
+from services.skill_bundle import (
+    complete_skill_folder,
+    declared_skill_folder_name,
+    prepare_agent_skill_folders,
+)
 from services.skill_config_generator import generate_skill_config
+from services.skill_validator import SkillValidationError
 from tests import discovery_support as ds
 
 
@@ -150,6 +155,87 @@ def test_server_bundle_fixture_binds_selected_files_modes_and_v2_digest():
     }
     assert agent.lock["digest"] == lock_digest(documented_lock)
     assert json.loads(agent.model_dump_json()) == example["agent"]["response"]
+
+
+@pytest.mark.parametrize(
+    "harness", ["claude-code", "codex", "copilot", "copilot-cli", "opencode", "antigravity", "goose", "pi"]
+)
+@pytest.mark.parametrize("scope", ["project", "user"])
+def test_negotiated_agent_uses_pinned_frontmatter_name_even_if_registry_slug_differs(harness, scope):
+    skill_id = uuid.uuid4()
+    version = SimpleNamespace(
+        id=uuid.uuid4(),
+        version="1.1.0",
+        description="Portable skill",
+        task_type="general",
+        target_agents=[],
+        supported_harnesses=[harness],
+        delivery_mode="registry_direct",
+        skill_path="/",
+        skill_md_content="---\nname: café\ndescription: Portable skill\n---\n# Body\n",
+        script_filename=None,
+        script_content=None,
+        extra_files=[{"path": "references/guide.md", "content": "Guide\n"}],
+    )
+    listing = SimpleNamespace(
+        id=skill_id,
+        name="Display title",
+        namespace="acme",
+        slug="registry-alias",
+        description=version.description,
+        task_type=version.task_type,
+        delivery_mode=version.delivery_mode,
+        skill_md_content=version.skill_md_content,
+        pinned_version=version,
+        skill_path="/",
+    )
+    agent = SimpleNamespace(
+        id=uuid.uuid4(),
+        name="Agent",
+        namespace="acme",
+        slug="example-agent",
+        description="Portable agent",
+        prompt="",
+        external_mcps=[],
+        components=[SimpleNamespace(component_type="skill", component_id=skill_id)],
+    )
+    names = {skill_id: declared_skill_folder_name(version.skill_md_content)}
+    snippet = generate_agent_config(
+        agent,
+        harness,
+        skill_listings={skill_id: listing},
+        skill_folder_names=names,
+        options={"scope": scope},
+    )
+    if scope == "user" and harness in {"copilot", "copilot-cli"}:
+        with pytest.raises(SkillValidationError, match="different Agent scope"):
+            prepare_agent_skill_folders({skill_id: listing}, snippet, harness, scope=scope, folder_names=names)
+        return  # These adapters have no user-scoped Agent profile in the harness registry.
+    folders = prepare_agent_skill_folders({skill_id: listing}, snippet, harness, scope=scope, folder_names=names)
+    assert len(folders) == 1
+    assert folders[0].skill_file_path.endswith("/café/SKILL.md")
+    if "skill_components" in snippet:
+        assert snippet["skill_components"][0]["name"] == "café"
+        if "path" in snippet["skill_components"][0]:
+            assert snippet["skill_components"][0]["path"] == folders[0].skill_file_path
+    assert "skills" not in snippet
+
+
+def test_agent_colliding_declared_names_refuse_without_renaming_either_skill():
+    names = {uuid.uuid4(): "same-name", uuid.uuid4(): "same-name"}
+    listings = {
+        key: SimpleNamespace(delivery_mode="registry_direct", slug=f"unique-{n}", namespace="acme")
+        for n, key in enumerate(names)
+    }
+    with pytest.raises(SkillValidationError, match="collide"):
+        prepare_agent_skill_folders(listings, {"skill_components": [], "skills": []}, "pi", folder_names=names)
+
+
+@pytest.mark.parametrize("name", ["UPPER", "bad--name", "-leading", "trailing-", "x" * 65, "CON"])
+def test_complete_folder_name_refuses_invalid_or_unportable_frontmatter(name):
+    content = f"---\nname: {name}\ndescription: Test\n---\n# Body\n"
+    with pytest.raises(SkillValidationError):
+        declared_skill_folder_name(content)
 
 
 @pytest.mark.asyncio

@@ -118,11 +118,18 @@ async def test_folder_draft_http_route_returns_content_free_manifest():
                 assert manifest.headers["X-Content-Type-Options"] == "nosniff"
                 file = await client.get(base + "/files/scripts/one.sh")
                 assert file.json()["content"] == "#!/bin/sh\necho one\n"
+                assert file.headers["Content-Type"] == "application/json"
                 binary = await client.get(base + "/files/assets/logo.bin")
                 assert binary.status_code == 200
                 assert binary.content == b"\x00\xff"
+                assert binary.headers["Content-Type"] == "application/octet-stream"
                 assert binary.headers["Content-Disposition"] == 'attachment; filename="logo.bin"'
                 assert binary.headers["Cache-Control"] == "no-store"
+                assert binary.headers["X-Content-Type-Options"] == "nosniff"
+                media = app.openapi()["paths"]["/api/v1/skills/{listing_id}/versions/{version_id}/files/{file_path}"][
+                    "get"
+                ]["responses"]["200"]["content"]
+                assert set(media) == {"application/json", "application/octet-stream"}
     finally:
         await engine.dispose()
 

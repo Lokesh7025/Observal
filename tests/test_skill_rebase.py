@@ -4,6 +4,7 @@
 """Saved skill drafts merge disjoint files but never silently resolve overlaps."""
 
 import base64
+from types import SimpleNamespace
 
 import pytest
 from fastapi import HTTPException, Response
@@ -15,8 +16,32 @@ from models.user import User
 from schemas.skill import SkillCandidateDraftRequest, SkillUpdateRequest
 from schemas.skill_resources import SkillDraftRebaseRequest, SkillFileOperations
 from services.skill_bundle import validate_skill_bundle
+from services.skill_rebase import merge_skill_draft
 from services.skill_revisions import skill_content_revision
 from tests import discovery_support as ds
+
+
+def test_rebase_grandfathers_unchanged_historical_frontmatter_name():
+    md = "---\nname: UPPER\ndescription: Legacy name\n---\n# Old skill\n"
+    shared = dict(
+        delivery_mode="registry_direct",
+        skill_md_content=md,
+        script_filename=None,
+        script_content=None,
+        description="Old release",
+        target_agents=[],
+        task_type="general",
+        supported_harnesses=["pi"],
+        extra_files=[],
+    )
+    base = SimpleNamespace(**shared)
+    draft = SimpleNamespace(**(shared | {"target_agents": ["pi"]}))
+    current = SimpleNamespace(**(shared | {"description": "Newer release"}))
+    edit, metadata, conflicts = merge_skill_draft(base, draft, current)
+    assert conflicts == {"paths": [], "metadata": []}
+    assert edit.skill_md_content == md
+    assert {file.path for file in edit.files} == {"SKILL.md"}
+    assert metadata["target_agents"] == ["pi"] and metadata["description"] == "Newer release"
 
 
 @pytest.mark.asyncio

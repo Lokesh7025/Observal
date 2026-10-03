@@ -46,13 +46,14 @@ def test_full_tree_and_request_examples_bind_to_same_version():
     )
     assert len(manifest.files) == len(files)
     for file in files:
-        encoded = file.content.decode("utf-8") if file.path != "assets/logo.bin" else "AP8="
+        if file.path == "assets/logo.bin":
+            continue  # Binary previews are raw attachment responses, not SkillFileContents JSON.
         detail = SkillFileContents(
             version_id=manifest.version_id,
             revision=manifest.revision,
             file=file.declaration,
-            content=encoded,
-            encoding="base64" if file.path == "assets/logo.bin" else "utf-8",
+            content=file.content.decode("utf-8"),
+            encoding="utf-8",
         )
         assert detail.file.sha256 == file.declaration.sha256
     assert str(manifest.version_id) == FIXTURE["draft_version_id"]

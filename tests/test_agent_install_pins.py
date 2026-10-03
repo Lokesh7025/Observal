@@ -211,7 +211,9 @@ async def test_opted_in_resource_less_direct_agent_still_declares_skill_md(sessi
     assert folder.digest.startswith("sha256:")  # Stable resource-less v1 pin.
 
 
-@pytest.mark.parametrize("harness", ["claude-code", "pi", "codex", "copilot-cli", "opencode", "antigravity", "goose"])
+@pytest.mark.parametrize(
+    "harness", ["claude-code", "pi", "codex", "copilot", "copilot-cli", "opencode", "antigravity", "goose"]
+)
 @pytest.mark.parametrize("scope", ["project", "user"])
 async def test_agent_bundle_preserves_pinned_tree_for_every_skill_harness(session, harness, scope):
     owner = await ds.user(session)
@@ -241,6 +243,19 @@ async def test_agent_bundle_preserves_pinned_tree_for_every_skill_harness(sessio
             supported_features=["skill_extra_files_v1"],
         )
     assert not_rolled_out.value.detail == CONTRACT["refusals"]["not_rolled_out_agent"]["detail"]
+    if scope == "user" and harness in {"copilot", "copilot-cli"}:
+        with pytest.raises(HTTPException, match="different Agent scope") as unsupported_scope:
+            await _install(
+                session,
+                agent,
+                owner,
+                harness=harness,
+                options={"scope": scope},
+                supported_features=["skill_extra_files_v1"],
+                rollout_enabled=True,
+            )
+        assert unsupported_scope.value.status_code == 409
+        return
     response = await _install(
         session,
         agent,

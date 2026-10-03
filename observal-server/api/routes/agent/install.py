@@ -39,7 +39,12 @@ from schemas.agent import (
 )
 from services.harness import generate_agent_config
 from services.registry_telemetry import emit_registry_event
-from services.skill_bundle import SKILL_EXTRA_FILES_FEATURE, needs_bundle_delivery, prepare_agent_skill_folders
+from services.skill_bundle import (
+    SKILL_EXTRA_FILES_FEATURE,
+    declared_skill_folder_name,
+    needs_bundle_delivery,
+    prepare_agent_skill_folders,
+)
 from services.skill_validator import SkillValidationError
 
 from ._router import router
@@ -297,6 +302,15 @@ async def install_agent(
     hook_listings_map = pins.listings["hook"]
     prompt_listings_map = pins.listings["prompt"]
     sandbox_listings_map = pins.listings["sandbox"]
+    skill_folder_names = {}
+    if SKILL_EXTRA_FILES_FEATURE in req.supported_features:
+        for listing_id, row in skill_listings_map.items():
+            if not row.extra_files:
+                continue  # Resource-less and legacy empty-script releases keep their aliases.
+            try:
+                skill_folder_names[listing_id] = declared_skill_folder_name(row.skill_md_content)
+            except SkillValidationError as exc:
+                raise HTTPException(status_code=409, detail="Pinned skill has no valid installed folder name") from exc
 
     archived_warnings = []
     setup_warnings = []
@@ -349,11 +363,18 @@ async def install_agent(
         hook_listings=hook_listings_map,
         prompt_listings=prompt_listings_map,
         sandbox_listings=sandbox_listings_map,
+        skill_folder_names=skill_folder_names,
     )
 
     try:
         skill_bundles = (
-            prepare_agent_skill_folders(skill_listings_map, snippet, req.harness, scope=req.options.get("scope"))
+            prepare_agent_skill_folders(
+                skill_listings_map,
+                snippet,
+                req.harness,
+                scope=req.options.get("scope"),
+                folder_names=skill_folder_names,
+            )
             if SKILL_EXTRA_FILES_FEATURE in req.supported_features
             else []
         )

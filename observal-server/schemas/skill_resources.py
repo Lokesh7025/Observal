@@ -53,7 +53,7 @@ class SkillInstallFolder(BaseModel):
 
 
 class SkillFileContents(BaseModel):
-    """A single authorized, version-scoped file; binary content uses base64."""
+    """JSON response for an authorized UTF-8 file; binary files download as raw bytes."""
 
     model_config = ConfigDict(extra="forbid", strict=True)
 
@@ -61,7 +61,7 @@ class SkillFileContents(BaseModel):
     revision: SkillRevision
     file: SkillFileDeclaration
     content: str = Field(max_length=4 * 1024 * 1024)
-    encoding: Literal["utf-8", "base64"]
+    encoding: Literal["utf-8"]
 
 
 class SkillVersionManifest(BaseModel):

@@ -53,6 +53,31 @@ SKILL_EXTRA_FILES_FEATURE = "skill_extra_files_v1"
 MAX_INSTALL_RESPONSE_BYTES = 12 * 1024 * 1024
 
 
+def declared_skill_folder_name(skill_md_content: str | None) -> str:
+    """Choose a safe installed directory matching the Agent Skills frontmatter name.
+
+    Registry namespace/slug and user aliases are lookup/display identities, not
+    names for a resource-bearing complete folder. Historical resource-less and
+    empty-script installs retain legacy names even when clients opt in.
+    """
+    analysis = validate_skill_md_content_frontmatter(skill_md_content)
+    name = analysis.frontmatter.get("name")
+    if not isinstance(name, str):
+        raise SkillValidationError("Complete skill folder requires a string SKILL.md name")
+    canonical = unicodedata.normalize("NFKC", name.strip())
+    if (
+        not 1 <= len(canonical) <= 64
+        or canonical != canonical.lower()
+        or canonical.startswith("-")
+        or canonical.endswith("-")
+        or "--" in canonical
+        or not all(char.isalnum() or char == "-" for char in canonical)
+    ):
+        raise SkillValidationError("Complete skill folder has an invalid Agent Skills name")
+    validate_bundle_path(canonical)
+    return canonical
+
+
 def complete_skill_folder(listing_id: Any, version: Any, *, skill_file_path: str) -> SkillInstallFolder:
     """Encode the exact stored tree for an opted-in installer, never inferred paths."""
     from services.agent_lock import content_digest
@@ -90,7 +115,12 @@ def complete_skill_folder(listing_id: Any, version: Any, *, skill_file_path: str
 
 
 def prepare_agent_skill_folders(
-    skill_listings: dict, snippet: dict, harness: str, *, scope: str | None = None
+    skill_listings: dict,
+    snippet: dict,
+    harness: str,
+    *,
+    scope: str | None = None,
+    folder_names: dict | None = None,
 ) -> list[SkillInstallFolder]:
     """Preflight each emitted harness destination; remove incomplete duplicate file copies.
 
@@ -108,6 +138,8 @@ def prepare_agent_skill_folders(
     spec = HARNESS_REGISTRY.get(harness.replace("_", "-"), {})
     if "skills" not in spec.get("capabilities", set()):
         raise SkillValidationError("Harness does not support complete skill folders")
+    if scope is not None and snippet.get("scope") is not None and snippet["scope"] != scope:
+        raise SkillValidationError("Harness emitted a different Agent scope than requested")
     scope = scope or snippet.get("scope") or spec.get("default_scope", "project")
     paths = spec.get("skills", {})
     if scope not in paths:
@@ -121,6 +153,7 @@ def prepare_agent_skill_folders(
     ):
         raise SkillValidationError("Harness emitted invalid skill config")
     local_names = {key: sanitize_name(value) for key, value in _local_registry_names(skill_listings).items()}
+    local_names.update(folder_names or {})
     if len({name.casefold() for name in local_names.values()}) != len(local_names):
         raise SkillValidationError("Skill aliases collide at the harness destination")
     folders = []
@@ -133,6 +166,8 @@ def prepare_agent_skill_folders(
         destination = matches[0].get("path", expected) if matches else expected
         if not isinstance(destination, str) or not destination.endswith("/SKILL.md"):
             raise SkillValidationError("Harness has no usable skill folder destination")
+        if listing_id in (folder_names or {}) and unicodedata.normalize("NFKC", destination.split("/")[-2]) != name:
+            raise SkillValidationError("Harness renamed a skill folder away from its SKILL.md name")
         identity = destination.casefold()
         if identity in chosen_paths or len(matches) > 1:
             raise SkillValidationError("Two skill components share the same destination")

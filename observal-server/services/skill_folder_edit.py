@@ -20,7 +20,12 @@ from schemas.skill_resources import (
     SkillFolderSnapshot,
     SkillResource,
 )
-from services.skill_bundle import SkillBundleFile, validate_bundle_path, validate_skill_bundle
+from services.skill_bundle import (
+    SkillBundleFile,
+    declared_skill_folder_name,
+    validate_bundle_path,
+    validate_skill_bundle,
+)
 from services.skill_validator import SkillValidationError, validate_skill_md_content_frontmatter
 
 
@@ -33,7 +38,8 @@ class SkillFolderEdit:
     files: tuple[SkillBundleFile, ...]
 
 
-def _validate_new_md(content: str) -> str | None:
+def _validate_new_md(content: str, *, authored: bool = False) -> str | None:
+    """Preserve historical forks; validate newly authored folder bytes more strictly."""
     analysis = validate_skill_md_content_frontmatter(content)
     fm = analysis.frontmatter
     if (
@@ -43,11 +49,30 @@ def _validate_new_md(content: str) -> str | None:
         or not fm["description"].strip()
     ):
         raise SkillValidationError("SKILL.md must have nonempty name and description frontmatter")
+    if authored:
+        declared_skill_folder_name(content)
+        if len(fm["description"]) > 1024:
+            raise SkillValidationError("SKILL.md description exceeds 1024 characters")
+        compatibility = fm.get("compatibility")
+        if "compatibility" in fm and (
+            not isinstance(compatibility, str) or not compatibility.strip() or len(compatibility) > 500
+        ):
+            raise SkillValidationError("SKILL.md compatibility must be 1-500 characters")
+        metadata = fm.get("metadata")
+        if "metadata" in fm and (
+            not isinstance(metadata, dict)
+            or any(not isinstance(key, str) or not isinstance(value, str) for key, value in metadata.items())
+        ):
+            raise SkillValidationError("SKILL.md metadata must map strings to strings")
+        for field in ("license", "allowed-tools"):
+            if field in fm and not isinstance(fm[field], str):
+                raise SkillValidationError(f"SKILL.md {field} must be a string")
+        # Keep nonstandard client extensions such as Observal's `command` intact.
     return analysis.slash_command
 
 
-def replace_folder(snapshot: SkillFolderSnapshot) -> SkillFolderEdit:
-    _validate_new_md(snapshot.skill_md_content)
+def replace_folder(snapshot: SkillFolderSnapshot, *, authored: bool = True) -> SkillFolderEdit:
+    _validate_new_md(snapshot.skill_md_content, authored=authored)
     files = validate_skill_bundle(
         delivery_mode="registry_direct",
         skill_md_content=snapshot.skill_md_content,
@@ -105,7 +130,7 @@ def apply_file_operations(version, patch: SkillFileOperations) -> SkillFolderEdi
             if item.path == "SKILL.md":
                 if item.executable or item.encoding != "utf-8":
                     raise SkillValidationError("SKILL.md must be UTF-8 and non-executable")
-                _validate_new_md(item.content)
+                _validate_new_md(item.content, authored=True)
                 md = item.content
             else:
                 if item.path == legacy_path and legacy_filename is not None:

@@ -748,7 +748,16 @@ async def get_skill_manifest(
     )
 
 
-@router.get("/{listing_id}/versions/{version_id}/files/{file_path:path}")
+@router.get(
+    "/{listing_id}/versions/{version_id}/files/{file_path:path}",
+    response_model=SkillFileContents,
+    responses={
+        200: {
+            "description": "UTF-8 files return JSON; binary files download as raw attachment bytes.",
+            "content": {"application/octet-stream": {"schema": {"type": "string", "format": "binary"}}},
+        }
+    },
+)
 async def get_skill_file(
     listing_id: str,
     version_id: uuid.UUID,
