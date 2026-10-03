@@ -1,5 +1,6 @@
 # SPDX-FileCopyrightText: 2026 Lokesh Selvam <lokeshselvam7025@gmail.com>
 # SPDX-FileCopyrightText: 2026 Hari Srinivasan <harisrini21@gmail.com>
+# SPDX-FileCopyrightText: 2026 Kaushik <kaushikrjpm10@gmail.com>
 # SPDX-License-Identifier: Apache-2.0
 
 """Run a registry Agent headless on one task.
@@ -176,6 +177,9 @@ def materialize(task: dict, ws: workspace.Workspace, *, harness: str, adapter) -
         )
     if failed:
         ws.notes.append(f"Skills that could not be installed for the delegated agent: {', '.join(failed)}.")
+        raise LocalRunError(
+            "Required agent skills did not install; refusing to launch a partially configured delegate."
+        )
     m["agentName"] = detail.get("name") or name
     # The version the install resolved, so the child's sessions carry what actually ran.
     m["version"] = result.get("version") or m.get("version") or detail.get("version")

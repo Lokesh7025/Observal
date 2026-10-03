@@ -1,4 +1,5 @@
 # SPDX-FileCopyrightText: 2026 Shree Harini <shree@observal.dev>
+# SPDX-FileCopyrightText: 2026 Kaushik <kaushikrjpm10@gmail.com>
 # SPDX-License-Identifier: Apache-2.0
 
 """Tests for skill folder bundle validation and installation."""
@@ -121,10 +122,12 @@ class TestBundleValidation:
     def test_valid_multi_file_bundle(self):
         skill_md = b"---\nname: test\n---\n# Test"
         script = b"#!/bin/sh\necho hello"
-        bundle = _make_bundle([
-            _make_file("SKILL.md", skill_md),
-            _make_file("scripts/run.sh", script, "0755"),
-        ])
+        bundle = _make_bundle(
+            [
+                _make_file("SKILL.md", skill_md),
+                _make_file("scripts/run.sh", script, "0755"),
+            ]
+        )
         result = validate_bundle(bundle)
 
         assert len(result.files) == 2
@@ -170,25 +173,31 @@ class TestBundleValidation:
             validate_bundle(bundle)
 
     def test_invalid_base64(self):
-        bundle = _make_bundle([{
-            "path": "SKILL.md",
-            "content": "not-valid-base64!!!",
-            "sha256": "test",
-            "size": 10,
-            "mode": "0644",
-            "version_id": "test-version-id",
-            "encoding": "base64",
-        }])
+        bundle = _make_bundle(
+            [
+                {
+                    "path": "SKILL.md",
+                    "content": "not-valid-base64!!!",
+                    "sha256": "test",
+                    "size": 10,
+                    "mode": "0644",
+                    "version_id": "test-version-id",
+                    "encoding": "base64",
+                }
+            ]
+        )
         with pytest.raises(BundleValidationError, match="Invalid base64"):
             validate_bundle(bundle)
 
     def test_case_collision_rejected(self):
         skill_md = b"---\nname: test\n---\n# Test"
-        bundle = _make_bundle([
-            _make_file("SKILL.md", skill_md),
-            _make_file("README.md", b"readme"),
-            _make_file("readme.md", b"readme2"),  # Case collision
-        ])
+        bundle = _make_bundle(
+            [
+                _make_file("SKILL.md", skill_md),
+                _make_file("README.md", b"readme"),
+                _make_file("readme.md", b"readme2"),  # Case collision
+            ]
+        )
         with pytest.raises(BundleValidationError, match=r"collision.*case-insensitive"):
             validate_bundle(bundle)
 
@@ -232,9 +241,7 @@ class TestCollisionDetection:
 
         with tempfile.TemporaryDirectory() as tmpdir:
             target = Path(tmpdir) / "observal"
-            collisions = detect_destination_collisions(
-                target, validated, bundled_skills=["observal"]
-            )
+            collisions = detect_destination_collisions(target, validated)
             assert len(collisions) == 1
             assert "bundled" in collisions[0].lower()
 
@@ -257,10 +264,12 @@ class TestFolderInstallation:
     def test_install_multi_file(self):
         skill_md = b"---\nname: test\n---\n# Test"
         script = b"#!/bin/sh\necho hello"
-        bundle = _make_bundle([
-            _make_file("SKILL.md", skill_md),
-            _make_file("scripts/run.sh", script, "0755"),
-        ])
+        bundle = _make_bundle(
+            [
+                _make_file("SKILL.md", skill_md),
+                _make_file("scripts/run.sh", script, "0755"),
+            ]
+        )
         validated = validate_bundle(bundle)
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -275,7 +284,7 @@ class TestFolderInstallation:
             mode = os.stat(target / "scripts" / "run.sh").st_mode
             assert mode & 0o111  # Has execute bits
 
-    def test_install_force_overwrite(self):
+    def test_force_cannot_overwrite_without_confirmed_backup(self):
         skill_md = b"---\nname: test\n---\n# Test"
         bundle = _make_bundle([_make_file("SKILL.md", skill_md)])
         validated = validate_bundle(bundle)
@@ -285,10 +294,9 @@ class TestFolderInstallation:
             target.mkdir()
             (target / "SKILL.md").write_text("old content")
 
-            result = install_folder_bundle(validated, target, force=True)
-
-            assert result == target / "SKILL.md"
-            assert (target / "SKILL.md").read_bytes() == skill_md
+            with pytest.raises(BundleInstallError, match="confirmed backup"):
+                install_folder_bundle(validated, target, force=True)
+            assert (target / "SKILL.md").read_text() == "old content"
 
     def test_install_fails_without_force(self):
         skill_md = b"---\nname: test\n---\n# Test"
@@ -344,6 +352,15 @@ class TestDirectoryCapture:
             snapshot = capture_directory(source)
 
             assert len(snapshot.extra_files) == 0
+            assert ".git (Git metadata)" in snapshot.excluded_paths
+
+    def test_capture_rejects_symlinked_resource(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            source = Path(tmpdir)
+            (source / "SKILL.md").write_text("---\nname: test\n---\n# Test")
+            (source / "linked.txt").symlink_to(source / "SKILL.md")
+            with pytest.raises(DirectoryCaptureError, match="Symlink"):
+                capture_directory(source)
 
     def test_capture_excludes_venv(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -490,7 +507,10 @@ class TestRollbackAndRecovery:
 
             bundle = _make_bundle([_make_file("SKILL.md", skill_md_v2)])
             validated = validate_bundle(bundle)
-            install_folder_bundle(validated, dest, force=True)
+            backup = Path(tmpdir) / "previous-skill"
+            install_folder_bundle(validated, dest, backup_dir=backup)
+            assert (backup / "SKILL.md").read_bytes() == skill_md_v1
+            assert (dest / "SKILL.md").read_bytes() == skill_md_v2
 
             # New content installed
             assert (dest / "SKILL.md").read_bytes() == skill_md_v2
@@ -524,10 +544,12 @@ class TestRollbackAndRecovery:
         """Verify file permissions are correctly set during install."""
         skill_md = b"---\nname: test\n---\n# Test"
         script = b"#!/bin/sh\necho hello"
-        bundle = _make_bundle([
-            _make_file("SKILL.md", skill_md, "0644"),
-            _make_file("scripts/run.sh", script, "0755"),
-        ])
+        bundle = _make_bundle(
+            [
+                _make_file("SKILL.md", skill_md, "0644"),
+                _make_file("scripts/run.sh", script, "0755"),
+            ]
+        )
         validated = validate_bundle(bundle)
 
         with tempfile.TemporaryDirectory() as tmpdir:

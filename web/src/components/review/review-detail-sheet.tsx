@@ -1,8 +1,10 @@
 // SPDX-FileCopyrightText: 2026 Hari Srinivasan <harisrini21@gmail.com>
+// SPDX-FileCopyrightText: 2026 Kaushik <kaushikrjpm10@gmail.com>
 // SPDX-License-Identifier: Apache-2.0
 
 
-import { useState, useCallback, useMemo } from "react";
+import { useState, useCallback, useMemo, useEffect } from "react";
+import type { ReactElement } from "react";
 import { Link } from "@tanstack/react-router";
 import {
 	CheckCircle2,
@@ -40,6 +42,8 @@ import {
 } from "./validation-badges";
 import {
 	useReviewDetail,
+	useSkillVersionReview,
+	useSkillVersionDecision,
 	useRelatedSkills,
 	useApproveWithSkills,
 	useSkillVersionManifest,
@@ -121,6 +125,9 @@ function SkillFilesSection({ listingId, versionId }: { listingId: string; versio
 		versionId,
 		selectedFile
 	);
+	const binaryBlob = fileContent?.encoding === "binary" ? fileContent.content : null;
+	const binaryUrl = useMemo(() => binaryBlob ? URL.createObjectURL(binaryBlob) : null, [binaryBlob]);
+	useEffect(() => () => { if (binaryUrl) URL.revokeObjectURL(binaryUrl); }, [binaryUrl]);
 
 	if (isLoading) {
 		return <div className="text-sm text-muted-foreground">Loading files...</div>;
@@ -167,7 +174,7 @@ function SkillFilesSection({ listingId, versionId }: { listingId: string; versio
 		});
 	};
 
-	const renderNode = (node: TreeNode, depth: number): JSX.Element | null => {
+	const renderNode = (node: TreeNode, depth: number): ReactElement | null => {
 		if (!node.name) {
 			return <>{node.children.map((c) => renderNode(c, 0))}</>;
 		}
@@ -218,11 +225,11 @@ function SkillFilesSection({ listingId, versionId }: { listingId: string; versio
 					</div>
 					{isLoadingContent ? (
 						<div className="text-sm text-muted-foreground">Loading...</div>
+					) : binaryUrl ? (
+						<a href={binaryUrl} download={selectedFile.split("/").at(-1)} className="text-sm underline">Download binary file ({binaryBlob?.size} bytes)</a>
 					) : (
 						<pre className="max-h-60 overflow-auto rounded bg-muted p-2 text-xs font-mono whitespace-pre-wrap">
-							{fileContent?.encoding === "base64"
-								? atob(fileContent.content)
-								: fileContent?.content ?? ""}
+							{fileContent?.encoding === "utf-8" ? fileContent.content : "File preview unavailable"}
 						</pre>
 					)}
 				</div>
@@ -233,7 +240,7 @@ function SkillFilesSection({ listingId, versionId }: { listingId: string; versio
 
 function SkillConfigSection({ detail }: { detail: ReviewItem }) {
 	// Check if this skill has a pending version with files
-	const hasVersionFiles = detail.pending_version_id && detail.has_extra_files;
+	const hasVersionFiles = detail.version_id && detail.files && detail.files.length > 0;
 
 	return (
 		<div className="space-y-4">
@@ -247,7 +254,7 @@ function SkillConfigSection({ detail }: { detail: ReviewItem }) {
 				<DetailField label="Target Agents" value={detail.target_agents} />
 			</dl>
 			{hasVersionFiles && (
-				<SkillFilesSection listingId={detail.id} versionId={detail.pending_version_id!} />
+				<SkillFilesSection listingId={detail.id} versionId={detail.version_id!} />
 			)}
 		</div>
 	);
@@ -516,7 +523,7 @@ export function ReviewDetailSheet({
 			<SheetContent side="right" className="sm:max-w-2xl overflow-y-auto">
 				{item ? (
 					<SheetBody
-						key={item.id}
+						key={item.review_key ?? item.id}
 						item={item}
 						open={open}
 						onOpenChange={onOpenChange}
@@ -546,17 +553,23 @@ function SheetBody({
 	onApprove: (id: string, type?: string, category?: string) => void;
 	onReject: (id: string, reason: string, type?: string) => void;
 }) {
+	const versionId = item.type === "skill" ? item.version_id : undefined;
 	const { data: detail, isLoading } = useReviewDetail(
-		open ? item.id : undefined,
+		open && !versionId ? item.id : undefined,
 	);
+	const { data: selectedReview, isLoading: isLoadingVersion } = useSkillVersionReview(
+		open && versionId ? item.id : undefined, versionId,
+	);
+	const skillDecision = useSkillVersionDecision();
 	const approveWithSkills = useApproveWithSkills();
 	const [showRejectInput, setShowRejectInput] = useState(false);
 	const [rejectReason, setRejectReason] = useState("");
 
 	const merged = useMemo<ReviewItem>(() => {
+		if (selectedReview) return { ...item, ...selectedReview };
 		if (detail) return { ...item, ...detail };
 		return item;
-	}, [item, detail]);
+	}, [item, detail, selectedReview]);
 
 	const handleReject = useCallback(() => {
 		if (!showRejectInput) {
@@ -564,20 +577,28 @@ function SheetBody({
 			return;
 		}
 		if (!rejectReason.trim()) return;
-		if (merged) {
-			onReject(merged.id, rejectReason, merged.type);
-			setShowRejectInput(false);
-			setRejectReason("");
-			onOpenChange(false);
+		if (versionId) {
+			if (!selectedReview?.revision) return;
+			skillDecision.mutate({ id: item.id, versionId, revision: selectedReview.revision, action: "reject", reason: rejectReason },
+				{ onSuccess: () => onOpenChange(false) });
+			return;
 		}
-	}, [showRejectInput, rejectReason, merged, onReject, onOpenChange]);
+		onReject(merged.id, rejectReason, merged.type);
+		setShowRejectInput(false);
+		setRejectReason("");
+		onOpenChange(false);
+	}, [showRejectInput, rejectReason, merged, onReject, onOpenChange, versionId, selectedReview, skillDecision, item.id]);
 
 	const handleApprove = useCallback(() => {
-		if (merged) {
-			onApprove(merged.id, merged.type);
-			onOpenChange(false);
+		if (versionId) {
+			if (!selectedReview?.revision) return;
+			skillDecision.mutate({ id: item.id, versionId, revision: selectedReview.revision, action: "approve" },
+				{ onSuccess: () => onOpenChange(false) });
+			return;
 		}
-	}, [merged, onApprove, onOpenChange]);
+		onApprove(merged.id, merged.type);
+		onOpenChange(false);
+	}, [merged, onApprove, onOpenChange, versionId, selectedReview, skillDecision, item.id]);
 
 	const handleApproveWithSkills = useCallback(
 		(mcpId: string, skillIds: string[]) => {
@@ -590,7 +611,8 @@ function SheetBody({
 	);
 
 	const disableApprove =
-		merged.type === "agent" && merged.components_ready === false;
+		(merged.type === "agent" && merged.components_ready === false) ||
+		(merged.type === "skill" && (!!versionId && (isLoadingVersion || !selectedReview?.revision)));
 
 	return (
 		<div className="flex flex-col gap-6">

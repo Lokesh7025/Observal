@@ -1,4 +1,5 @@
 # SPDX-FileCopyrightText: 2026 Shree Harini <shree@observal.dev>
+# SPDX-FileCopyrightText: 2026 Kaushik <kaushikrjpm10@gmail.com>
 # SPDX-License-Identifier: Apache-2.0
 
 """Verified skill folder bundle validation and installation.
@@ -26,6 +27,7 @@ import hashlib
 import os
 import shutil
 import stat
+import tempfile
 import unicodedata
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -223,9 +225,7 @@ def validate_bundle(
 
     # Verify expected values if provided
     if expected_version_id and str(version_id) != str(expected_version_id):
-        raise BundleValidationError(
-            f"Bundle version_id mismatch: expected {expected_version_id}, got {version_id}"
-        )
+        raise BundleValidationError(f"Bundle version_id mismatch: expected {expected_version_id}, got {version_id}")
     if expected_digest and digest != expected_digest:
         raise BundleValidationError(
             f"Bundle digest mismatch: expected {expected_digest}, got {digest}",
@@ -353,9 +353,7 @@ def _validate_file(file_raw: dict[str, Any], expected_version_id: str) -> Bundle
 
     # Verify size
     if len(content) != size_expected:
-        raise BundleValidationError(
-            f"Size mismatch for {path}: expected {size_expected}, got {len(content)}"
-        )
+        raise BundleValidationError(f"Size mismatch for {path}: expected {size_expected}, got {len(content)}")
 
     # Check individual file size limit
     if len(content) > MAX_FILE_SIZE:
@@ -364,9 +362,7 @@ def _validate_file(file_raw: dict[str, Any], expected_version_id: str) -> Bundle
     # Verify SHA-256
     actual_sha256 = hashlib.sha256(content).hexdigest()
     if actual_sha256 != sha256_expected:
-        raise BundleValidationError(
-            f"SHA-256 mismatch for {path}: expected {sha256_expected}, got {actual_sha256}"
-        )
+        raise BundleValidationError(f"SHA-256 mismatch for {path}: expected {sha256_expected}, got {actual_sha256}")
 
     return BundleFile(
         path=normalized_path,
@@ -415,8 +411,13 @@ def detect_destination_collisions(
         else:
             collisions.append(f"File exists at skill destination: {target_dir}")
 
-    # Check bundled skill names
-    if bundled_skills and bundle.folder_name in bundled_skills:
+    # Reserve auto-synced bundled skill names even when they are not yet on
+    # disk; the next CLI startup could otherwise overwrite a registry folder.
+    if bundled_skills is None:
+        from observal_cli.skill_installer import _SKILL_DIRS
+
+        bundled_skills = list(_SKILL_DIRS)
+    if bundle.folder_name.casefold() in {name.casefold() for name in bundled_skills}:
         collisions.append(f"Folder name '{bundle.folder_name}' conflicts with bundled Observal skill")
 
     # Check other installed skills for case collisions
@@ -427,9 +428,7 @@ def detect_destination_collisions(
                 continue
             existing_fold = _case_fold_key(skill_path.name)
             if existing_fold == fold_key and skill_path.name != bundle.folder_name:
-                collisions.append(
-                    f"Case-insensitive collision: '{bundle.folder_name}' vs existing '{skill_path.name}'"
-                )
+                collisions.append(f"Case-insensitive collision: '{bundle.folder_name}' vs existing '{skill_path.name}'")
 
     return collisions
 
@@ -450,7 +449,7 @@ def install_folder_bundle(
         bundle: Validated bundle to install
         target_dir: Destination directory (e.g., ~/.claude-code/skills/example)
         backup_dir: Where to back up existing content (if target exists)
-        force: If True, overwrite existing without backup prompt
+        force: Legacy opt-in; still requires an explicit unused backup_dir
 
     Returns:
         Path to installed SKILL.md
@@ -460,20 +459,23 @@ def install_folder_bundle(
     """
     optic.info("Installing skill folder bundle to {}", target_dir)
 
-    # Create parent if needed
+    # Never follow a pre-existing symlink in the destination hierarchy, even
+    # when installing a folder for the first time.
+    for parent in (target_dir, *target_dir.parents):
+        if parent.is_symlink():
+            raise BundleInstallError(f"Symlink in skill destination: {parent}")
+    if target_dir.exists() and backup_dir is None:
+        raise BundleInstallError(f"Target exists and no confirmed backup specified: {target_dir}")
+    if force and backup_dir is None:
+        raise BundleInstallError("Force replacement requires an explicit confirmed backup location")
+    if backup_dir is not None and (backup_dir.exists() or backup_dir.is_symlink()):
+        raise BundleInstallError(f"Backup destination already exists: {backup_dir}")
     target_dir.parent.mkdir(parents=True, exist_ok=True)
 
-    # Stage directory (private sibling)
-    stage_dir = target_dir.parent / f".{target_dir.name}.stage.{os.getpid()}"
+    # A unique stage cannot overwrite a previous interrupted install's files.
+    stage_dir = Path(tempfile.mkdtemp(prefix=f".{target_dir.name}.stage.", dir=target_dir.parent))
 
     try:
-        # Clean up any stale stage from previous interrupted install
-        if stage_dir.exists():
-            shutil.rmtree(stage_dir)
-
-        # Create staging directory
-        stage_dir.mkdir(mode=0o700)
-
         # Write all files to staging
         for file in bundle.files:
             file_path = stage_dir / file.path
@@ -499,22 +501,12 @@ def install_folder_bundle(
 
         # Handle existing target
         backup_path = None
-        if target_dir.exists() or target_dir.is_symlink():
-            if target_dir.is_symlink():
-                # Remove symlink, don't try to back up
-                target_dir.unlink()
-            elif force or backup_dir:
-                # Backup existing
-                backup_path = backup_dir or target_dir.parent / f".{target_dir.name}.backup.{os.getpid()}"
-                if backup_path.exists():
-                    shutil.rmtree(backup_path)
-                target_dir.rename(backup_path)
-                optic.debug("Backed up existing skill to {}", backup_path)
-            else:
-                raise BundleInstallError(
-                    f"Target exists and no backup specified: {target_dir}. "
-                    "Use --force or provide a backup location."
-                )
+        if target_dir.exists():
+            if backup_dir is None:
+                raise BundleInstallError(f"Target exists and no confirmed backup specified: {target_dir}")
+            backup_path = backup_dir
+            target_dir.rename(backup_path)
+            optic.debug("Backed up existing skill to {}", backup_path)
 
         # Atomic swap: rename stage to target
         try:
@@ -528,10 +520,7 @@ def install_folder_bundle(
                 backup_path.rename(target_dir)
             raise BundleInstallError(f"Failed to install skill folder: {e}") from e
 
-        # Remove backup on success (if we created one)
-        if backup_path and backup_path.exists() and backup_dir is None:
-            shutil.rmtree(backup_path)
-
+        # Retain confirmed backups for explicit recovery, including after success.
         optic.info("Skill folder installed successfully: {}", target_dir)
         return target_dir / SKILL_MD_NAME
 
@@ -548,47 +537,21 @@ def install_folder_bundle(
                 pass
 
 
-def uninstall_folder(target_dir: Path, *, backup_dir: Path | None = None) -> bool:
-    """Remove an installed skill folder.
-
-    Args:
-        target_dir: Skill folder to remove
-        backup_dir: Where to move it (instead of deleting)
-
-    Returns:
-        True if removed, False if not found
-    """
-    if not target_dir.exists():
-        return False
-
-    if target_dir.is_symlink():
-        target_dir.unlink()
-        return True
-
-    if backup_dir:
-        backup_dir.parent.mkdir(parents=True, exist_ok=True)
-        if backup_dir.exists():
-            shutil.rmtree(backup_dir)
-        target_dir.rename(backup_dir)
-    else:
-        shutil.rmtree(target_dir)
-
-    return True
-
-
 # ── Directory capture for authoring ─────────────────────────────────────────
 
 # Paths to exclude from directory capture
-_EXCLUDE_PATTERNS = frozenset((
-    ".git",
-    ".venv",
-    "__pycache__",
-    "node_modules",
-    ".DS_Store",
-    "Thumbs.db",
-    ".env",
-    ".env.local",
-))
+_EXCLUDE_PATTERNS = frozenset(
+    (
+        ".git",
+        ".venv",
+        "__pycache__",
+        "node_modules",
+        ".DS_Store",
+        "Thumbs.db",
+        ".env",
+        ".env.local",
+    )
+)
 
 # Files that likely contain secrets
 _SENSITIVE_PATTERNS = (
@@ -659,7 +622,7 @@ def capture_directory(
     """Capture an immutable snapshot of a skill directory.
 
     Reads all regular files, validates paths, and prepares content for upload.
-    Symlinks, special files, and excluded patterns are skipped.
+    Symlinks and special files are refused; excluded patterns are reported.
 
     Args:
         source_dir: Directory to capture (must contain SKILL.md)
@@ -697,6 +660,8 @@ def capture_directory(
     # Build exclusion set
     exclusions = set(_EXCLUDE_PATTERNS)
     if exclude:
+        if any(SKILL_MD_NAME in PurePosixPath(value).parts for value in exclude):
+            raise DirectoryCaptureError("SKILL.md cannot be excluded from a folder upload")
         exclusions.update(exclude)
 
     # Capture all files
@@ -707,31 +672,24 @@ def capture_directory(
     seen_paths: dict[str, str] = {}  # case-folded -> original
 
     for file_path in sorted(source_dir.rglob("*")):
-        # Skip directories
-        if file_path.is_dir():
-            continue
-
-        # Skip symlinks
-        if file_path.is_symlink():
-            rel_path = file_path.relative_to(source_dir).as_posix()
-            excluded_paths.append(f"{rel_path} (symlink)")
-            continue
-
-        # Skip special files
-        if not file_path.is_file():
-            continue
-
-        # Get relative path
         rel_path = file_path.relative_to(source_dir).as_posix()
-
-        # Skip SKILL.md (handled separately)
-        if rel_path == SKILL_MD_NAME:
-            continue
-
-        # Check exclusions
         parts = PurePosixPath(rel_path).parts
+        # Git metadata is never an authored skill resource. Report its root,
+        # not every object in a local checkout.
+        if ".git" in parts:
+            if rel_path == ".git":
+                excluded_paths.append(".git (Git metadata)")
+            continue
         if any(segment in exclusions for segment in parts):
             excluded_paths.append(rel_path)
+            continue
+        if file_path.is_symlink():
+            raise DirectoryCaptureError(f"Symlink cannot be captured: {rel_path}")
+        if file_path.is_dir():
+            continue
+        if not file_path.is_file():
+            raise DirectoryCaptureError(f"Special file cannot be captured: {rel_path}")
+        if rel_path == SKILL_MD_NAME:
             continue
 
         # Skip hidden files unless requested
@@ -762,21 +720,15 @@ def capture_directory(
 
         # Size checks
         if len(content) > MAX_FILE_SIZE:
-            raise DirectoryCaptureError(
-                f"File too large ({len(content):,} > {MAX_FILE_SIZE:,}): {rel_path}"
-            )
+            raise DirectoryCaptureError(f"File too large ({len(content):,} > {MAX_FILE_SIZE:,}): {rel_path}")
 
         total_size += len(content)
         if total_size > MAX_TREE_SIZE:
-            raise DirectoryCaptureError(
-                f"Total size exceeds {MAX_TREE_SIZE:,} bytes at file: {rel_path}"
-            )
+            raise DirectoryCaptureError(f"Total size exceeds {MAX_TREE_SIZE:,} bytes at file: {rel_path}")
 
         # Check file count
         if len(extra_files) >= MAX_EXTRA_FILES:
-            raise DirectoryCaptureError(
-                f"Too many files (limit: {MAX_EXTRA_FILES})"
-            )
+            raise DirectoryCaptureError(f"Too many files (limit: {MAX_EXTRA_FILES})")
 
         # Warn about sensitive files
         if _is_likely_sensitive(rel_path):
@@ -789,12 +741,14 @@ def capture_directory(
         # Check if binary
         is_binary = _is_binary(content)
 
-        extra_files.append(CapturedFile(
-            path=normalized_path,
-            content=content,
-            executable=executable,
-            is_binary=is_binary,
-        ))
+        extra_files.append(
+            CapturedFile(
+                path=normalized_path,
+                content=content,
+                executable=executable,
+                is_binary=is_binary,
+            )
+        )
 
     optic.debug(
         "Captured {} files, {} excluded, total {} bytes",

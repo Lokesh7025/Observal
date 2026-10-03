@@ -129,6 +129,20 @@ const COMPONENT_HELP_DOCS = {
 	agents: { file: "core-concepts/README.md", label: "Agent helper" },
 } as const;
 
+const MAX_SKILL_UPLOAD_BYTES = 2 * 1024 * 1024;
+
+function decodeSkillUpload(bytes: Uint8Array): { content: string; encoding?: "base64" } {
+	try {
+		return { content: new TextDecoder("utf-8", { fatal: true }).decode(bytes) };
+	} catch {
+		const chunks: string[] = [];
+		for (let offset = 0; offset < bytes.length; offset += 8192) {
+			chunks.push(String.fromCharCode(...bytes.subarray(offset, offset + 8192)));
+		}
+		return { content: btoa(chunks.join("")), encoding: "base64" };
+	}
+}
+
 interface SubmitComponentDialogProps {
 	open: boolean;
 	onOpenChange: (open: boolean) => void;
@@ -244,7 +258,79 @@ export function SubmitComponentDialog({
 	const [skillMode, setSkillMode] = useState<"git" | "paste" | "upload">("git");
 	// Folder mode: extra files beyond SKILL.md
 	const [skillExtraFiles, setSkillExtraFiles] = useState<Array<{ path: string; content: string; executable?: boolean; encoding?: "base64" }>>([]);
+	const [pendingSkillUploads, setPendingSkillUploads] = useState(0);
+	const skillUploadGeneration = useRef(0);
 	const [selectedFilePath, setSelectedFilePath] = useState<string | null>(null);
+
+	async function handleSkillFiles(files: FileList | null, folder: boolean) {
+		const selected = Array.from(files ?? []);
+		if (!selected.length) return;
+		const paths = selected.map((file) =>
+			folder && file.webkitRelativePath
+				? file.webkitRelativePath.split("/").slice(1).join("/")
+				: file.name,
+		);
+		const omitted = paths.some((path) =>
+			!path || path.length > 240 || path.split("/").some((segment) =>
+				!segment || segment.startsWith(".") || segment === "node_modules" || segment === ".venv"),
+		);
+		if (omitted) {
+			toast.error("Upload refused: hidden, excluded or unsafe paths were found. Use the CLI to review exclusions.");
+			return;
+		}
+		if (selected.length > 129 || selected.some((file) => file.size > MAX_SKILL_UPLOAD_BYTES)
+			|| selected.reduce((total, file) => total + file.size, 0) > 4 * 1024 * 1024) {
+			toast.error("Skill folder exceeds the per-file, file-count or total-size limit.");
+			return;
+		}
+		if (folder && !paths.includes("SKILL.md")) {
+			toast.error("Folder must contain SKILL.md at its root.");
+			return;
+		}
+		if (new Set(paths.map((path) => path.normalize("NFC").toLowerCase())).size !== paths.length) {
+			toast.error("Folder contains duplicate or case-colliding file paths.");
+			return;
+		}
+		if (paths.some((path) => /(?:secret|credential|private|password|token|\.env|\.pem|\.key)/i.test(path))
+			&& !window.confirm("The selected skill contains likely-sensitive files. Upload them anyway?")) return;
+
+		const generation = skillUploadGeneration.current;
+		setPendingSkillUploads((count) => count + 1);
+		try {
+			const captured = await Promise.all(selected.map(async (file, index) => ({
+				path: paths[index],
+				...decodeSkillUpload(new Uint8Array(await file.arrayBuffer())),
+			})));
+			if (generation !== skillUploadGeneration.current) return;
+			const skillMd = captured.find((file) => file.path === "SKILL.md");
+			if (skillMd?.encoding === "base64") throw new Error("SKILL.md must be UTF-8 text");
+			if (skillMd) {
+				setSkillMdContent(skillMd.content);
+				const frontmatter = skillMd.content.match(/^---\r?\n([\s\S]*?)\r?\n---/);
+				for (const line of frontmatter?.[1].split(/\r?\n/) ?? []) {
+					const parsedName = line.match(/^name:\s*(.+)$/);
+					const parsedDescription = line.match(/^description:\s*["']?(.+?)["']?$/);
+					if (parsedName && !name) setName(parsedName[1].trim());
+					if (parsedDescription && !description) setDescription(parsedDescription[1].trim());
+				}
+			}
+			const resources = captured.filter((file) => file.path !== "SKILL.md");
+			if (folder) {
+				setSkillExtraFiles(resources);
+			} else {
+				setSkillExtraFiles((previous) => [...previous.filter((existing) =>
+					!resources.some((file) => file.path === existing.path)), ...resources]);
+			}
+		} catch (error) {
+			if (generation === skillUploadGeneration.current) {
+				toast.error(error instanceof Error ? error.message : "Could not read the selected skill files.");
+			}
+		} finally {
+			if (generation === skillUploadGeneration.current) {
+				setPendingSkillUploads((count) => count - 1);
+			}
+		}
+	}
 
 	// Auto-discover skill_path from GitHub Trees API when git_url changes
 	const skillDiscoverRef = useRef<ReturnType<typeof setTimeout>>(undefined);
@@ -447,6 +533,10 @@ export function SubmitComponentDialog({
 		setSkillMdContent("");
 		setSkillScriptContent("");
 		setSkillScriptFilename("");
+		skillUploadGeneration.current += 1;
+		setPendingSkillUploads(0);
+		setSkillExtraFiles([]);
+		setSelectedFilePath(null);
 		setSkillMode("git");
 		setEvent("PreToolUse");
 		setHandlerType("command");
@@ -516,7 +606,12 @@ export function SubmitComponentDialog({
 				} else if (skillMode === "upload") {
 					// Folder mode: SKILL.md + extra files
 					if (skillMdContent) skillBody.skill_md_content = skillMdContent;
-					if (skillExtraFiles.length > 0) skillBody.extra_files = skillExtraFiles;
+					skillBody.extra_files = skillExtraFiles.map((file) => ({
+						path: file.path,
+						content: file.content,
+						encoding: file.encoding ?? "utf-8",
+						executable: file.executable ?? false,
+					}));
 				}
 				return skillBody;
 			}
@@ -570,6 +665,12 @@ export function SubmitComponentDialog({
 	function validateForSubmit(): string | null {
 		if (!name) return "Name is required";
 		if (!description) return "Description is required";
+		if (type === "skills" && skillMode === "upload" && pendingSkillUploads > 0) {
+			return "Wait for all skill files to finish uploading";
+		}
+		if (type === "skills" && skillMode === "upload" && !skillMdContent.trim()) {
+			return "SKILL.md is required for a folder draft";
+		}
 
 		if (type === "mcps") {
 			if (mcpMode === "json" && !jsonParsed && !isEditMode) {
@@ -608,12 +709,17 @@ export function SubmitComponentDialog({
 			toast.error(err);
 			return;
 		}
+		if (type === "skills" && skillMode === "upload") {
+			onSaveDraft(buildBody());
+			return;
+		}
 		onSubmit(buildBody());
 	}
 
 	function handleDraft() {
-		if (!name) {
-			toast.error("Name is required");
+		const err = type === "skills" && skillMode === "upload" ? validateForSubmit() : !name ? "Name is required" : null;
+		if (err) {
+			toast.error(err);
 			return;
 		}
 		onSaveDraft(buildBody());
@@ -1167,38 +1273,8 @@ export function SubmitComponentDialog({
 										className="hidden"
 										multiple
 										onChange={(e) => {
-											const files = e.target.files;
-											if (!files) return;
-											Array.from(files).forEach((file) => {
-												const reader = new FileReader();
-												reader.onload = () => {
-													const content = reader.result as string;
-													if (file.name === "SKILL.md") {
-														setSkillMdContent(content);
-														// Auto-fill name/description from frontmatter
-														const fmMatch = content.match(/^---\r?\n([\s\S]*?)\r?\n---/);
-														if (fmMatch) {
-															const lines = fmMatch[1].split(/\r?\n/);
-															for (const line of lines) {
-																const nm = line.match(/^name:\s*(.+)$/);
-																if (nm && !name) setName(nm[1].trim());
-																const dm = line.match(/^description:\s*["']?(.+?)["']?$/);
-																if (dm && !description) setDescription(dm[1].trim());
-															}
-														}
-													} else {
-														setSkillExtraFiles((prev) => {
-															const existing = prev.find((f) => f.path === file.name);
-															if (existing) {
-																return prev.map((f) => f.path === file.name ? { ...f, content } : f);
-															}
-															return [...prev, { path: file.name, content }];
-														});
-													}
-												};
-												reader.readAsText(file);
-											});
-											e.target.value = "";
+											void handleSkillFiles(e.currentTarget.files, false);
+											e.currentTarget.value = "";
 										}}
 									/>
 									<input
@@ -1207,44 +1283,9 @@ export function SubmitComponentDialog({
 										className="hidden"
 										{...({ webkitdirectory: "" } as React.InputHTMLAttributes<HTMLInputElement>)}
 										onChange={(e) => {
-											const files = e.target.files;
-											if (!files) return;
-											Array.from(files).forEach((file) => {
-												// Skip hidden files and common excludes
-												const path = file.webkitRelativePath || file.name;
-												if (path.includes("/.git/") || path.includes("/node_modules/") || path.includes("/.venv/") || path.startsWith(".")) return;
-												// Get relative path without the root folder name
-												const parts = path.split("/");
-												const relativePath = parts.slice(1).join("/") || parts[0];
-												if (!relativePath) return;
-												const reader = new FileReader();
-												reader.onload = () => {
-													const content = reader.result as string;
-													if (relativePath === "SKILL.md") {
-														setSkillMdContent(content);
-														const fmMatch = content.match(/^---\r?\n([\s\S]*?)\r?\n---/);
-														if (fmMatch) {
-															const lines = fmMatch[1].split(/\r?\n/);
-															for (const line of lines) {
-																const nm = line.match(/^name:\s*(.+)$/);
-																if (nm && !name) setName(nm[1].trim());
-																const dm = line.match(/^description:\s*["']?(.+?)["']?$/);
-																if (dm && !description) setDescription(dm[1].trim());
-															}
-														}
-													} else {
-														setSkillExtraFiles((prev) => {
-															const existing = prev.find((f) => f.path === relativePath);
-															if (existing) {
-																return prev.map((f) => f.path === relativePath ? { ...f, content } : f);
-															}
-															return [...prev, { path: relativePath, content }];
-														});
-													}
-												};
-												reader.readAsText(file);
-											});
-											e.target.value = "";
+											void handleSkillFiles(e.currentTarget.files, true);
+											e.currentTarget.value = "";
+
 										}}
 									/>
 
@@ -1312,7 +1353,7 @@ export function SubmitComponentDialog({
 														{file.executable && <span className="text-[10px] text-green-600 font-medium">exec</span>}
 													</span>
 													<div className="flex items-center gap-2">
-														<span className="text-xs text-muted-foreground">{(new Blob([file.content]).size / 1024).toFixed(1)} KB</span>
+														<span className="text-xs text-muted-foreground">{((file.encoding === "base64" ? atob(file.content).length : new Blob([file.content]).size) / 1024).toFixed(1)} KB</span>
 														<Button
 															type="button"
 															variant="ghost"
@@ -1348,11 +1389,17 @@ export function SubmitComponentDialog({
 													</label>
 												)}
 											</div>
+											{skillExtraFiles.find((f) => f.path === selectedFilePath)?.encoding === "base64" && (
+												<p className="text-xs text-muted-foreground">Binary file preserved exactly. Replace it with another upload to edit.</p>
+											)}
 											<Textarea
+												disabled={skillExtraFiles.find((f) => f.path === selectedFilePath)?.encoding === "base64"}
 												value={
 													selectedFilePath === "SKILL.md"
 														? skillMdContent
-														: skillExtraFiles.find((f) => f.path === selectedFilePath)?.content || ""
+														: skillExtraFiles.find((f) => f.path === selectedFilePath)?.encoding === "base64"
+															? ""
+															: skillExtraFiles.find((f) => f.path === selectedFilePath)?.content || ""
 												}
 												onChange={(e) => {
 													if (selectedFilePath === "SKILL.md") {
@@ -1662,7 +1709,7 @@ export function SubmitComponentDialog({
 								<Button
 									variant="outline"
 									onClick={handleDraft}
-									disabled={busy || !name}
+									disabled={busy || !name || pendingSkillUploads > 0}
 								>
 									{isSavingDraft && (
 										<Loader2 className="h-4 w-4 animate-spin mr-1.5" />
@@ -1671,13 +1718,13 @@ export function SubmitComponentDialog({
 								</Button>
 								<Button
 									onClick={handleSubmit}
-									disabled={busy || !!submitError}
+									disabled={busy || !!submitError || pendingSkillUploads > 0}
 									title={submitError ?? undefined}
 								>
-									{isSubmitting && (
+									{(isSubmitting || (type === "skills" && skillMode === "upload" && isSavingDraft)) && (
 										<Loader2 className="h-4 w-4 animate-spin mr-1.5" />
 									)}
-									Submit for Review
+									{type === "skills" && skillMode === "upload" ? "Save folder draft" : "Submit for Review"}
 								</Button>
 							</>
 						)}

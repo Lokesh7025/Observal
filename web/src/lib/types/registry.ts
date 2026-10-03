@@ -360,6 +360,10 @@ export interface ReviewItem {
 	target_agents?: string[];
 	task_type?: string;
 	slash_command?: string;
+	version_id?: string;
+	review_key?: string;
+	revision?: string;
+	files?: SkillManifestFile[];
 	pending_version_id?: string;
 	has_extra_files?: boolean;
 
@@ -438,13 +442,11 @@ export interface SkillFolderDraftRequest {
 	name: string;
 	version: string;
 	description: string;
-	owner?: string;
+	owner: string;
 	task_type?: string;
 	skill_md_content: string;
-	extra_files?: SkillResource[];
-	target_agents?: string[];
+	extra_files: SkillResource[];
 	supported_harnesses?: string[];
-	slash_command?: string;
 	team_id?: string;
 	visibility?: "public" | "team";
 }
@@ -472,12 +474,17 @@ export interface SkillFilesPatchRequest {
 
 /** Response from file read endpoint (text files). */
 export interface SkillFileContents {
-	path: string;
-	content: string;
-	size: number;
-	sha256: string;
-	mode: "0644" | "0755";
 	version_id: string;
+	revision: string;
+	file: SkillManifestFile;
+	content: string;
+	encoding: "utf-8";
+}
+
+/** Binary previews are octet-stream attachments, never JSON. */
+export interface SkillBinaryContents {
+	encoding: "binary";
+	content: Blob;
 }
 
 // ── Scores ──────────────────────────────────────────────────────────

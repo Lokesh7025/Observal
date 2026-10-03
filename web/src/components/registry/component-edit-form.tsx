@@ -1,10 +1,12 @@
 // SPDX-FileCopyrightText: 2026 Hari Srinivasan <harisrini21@gmail.com>
 // SPDX-FileCopyrightText: 2026 Lokesh Selvam <lokeshselvam7025@gmail.com>
 // SPDX-FileCopyrightText: 2026 Shaan Narendran <shaannaren06@gmail.com>
+// SPDX-FileCopyrightText: 2026 Kaushik <kaushikrjpm10@gmail.com>
 // SPDX-License-Identifier: Apache-2.0
 
 
 import { useState, useEffect, useMemo, useRef, useCallback } from "react";
+import { toast } from "sonner";
 import { ArrowRight, Loader2, RotateCcw, Construction, Upload, FolderUp, File, Trash2, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -1087,6 +1089,9 @@ function SkillFields({
 							<p className="text-xs mt-1">Supports scripts, templates, and assets</p>
 						</div>
 					)}
+					<p className="text-xs text-muted-foreground">
+						This release form cannot save folder file changes yet. Use version-bound CLI replace-files; edits here are refused rather than silently dropped.
+					</p>
 				</TabsContent>
 			</Tabs>
 		</div>
@@ -1364,6 +1369,10 @@ function EditFormInner({
 	// ── Handlers ─────────────────────────────────────────────────
 
 	async function handleRelease(selectedVersion: string) {
+		if (singularType === "skill" && skillState.extra_files.length > 0) {
+			toast.error("Folder files require the version-bound editor; this release form cannot save them. Use CLI replace-files.");
+			return;
+		}
 		setPublishing(true);
 		try {
 			const body = buildBody(selectedVersion);

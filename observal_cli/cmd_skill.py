@@ -148,14 +148,16 @@ def _validate_skill_fields(payload: dict, operation: str) -> None:
 @skill_app.command(name="submit")
 def skill_submit(
     from_file: str | None = typer.Option(None, "--from-file", "-f", help="Create from JSON file"),
-    from_dir: str | None = typer.Option(
-        None, "--from-dir", help="Create from directory (must contain SKILL.md)"
-    ),
+    from_dir: str | None = typer.Option(None, "--from-dir", help="Create from directory (must contain SKILL.md)"),
     skill_md: str | None = typer.Option(None, "--skill-md", help="Path to SKILL.md to paste (auto-fills fields)"),
     git_url: str | None = typer.Option(None, "--git-url", help="Git repository URL"),
     git_ref: str | None = typer.Option(None, "--git-ref", help="Branch or tag (default: main)"),
     script: str | None = typer.Option(None, "--script", help="Path to script file (registry_direct mode)"),
     exclude: list[str] | None = typer.Option(None, "--exclude", help="Paths to exclude from --from-dir (repeatable)"),
+    allow_excluded: bool = typer.Option(False, "--allow-excluded", help="Acknowledge paths excluded from --from-dir"),
+    allow_sensitive: bool = typer.Option(
+        False, "--allow-sensitive", help="Acknowledge likely-sensitive files in --from-dir"
+    ),
     delivery_mode: str | None = typer.Option(None, "--delivery-mode", help="Delivery: git_fetch or registry_direct"),
     name: str | None = typer.Option(None, "--name", "-n", help="Skill name"),
     version: str | None = typer.Option(None, "--version", "-v", help="Version (default: 1.0.0)"),
@@ -167,6 +169,7 @@ def skill_submit(
     supported_harnesses: list[str] | None = typer.Option(None, "--harness", help="Supported harness (repeatable)"),
     draft: bool = typer.Option(False, "--draft", help="Save as draft instead of submitting for review"),
     submit_draft: str | None = typer.Option(None, "--submit", help="Submit a draft for review (skill ID)"),
+    version_id: str | None = typer.Option(None, "--version-id", help="Exact saved draft UUID for --submit"),
     team: str | None = typer.Option(None, "--team", help="Teamspace UUID or handle"),
     visibility: str | None = typer.Option(None, "--visibility", help="Visibility: public or team"),
     output: OutputMode = typer.Option("table", "--output", "-o", help="Output format: table or json"),
@@ -185,16 +188,16 @@ def skill_submit(
     optionally --script to submit a skill with inline content (no git repo
     needed). On install, the SKILL.md and script are written directly.
 
-    Complete folders: use --from-dir PATH to submit an entire skill directory
+    Complete folders: use --from-dir PATH to save a versioned folder draft
     containing SKILL.md and additional files (scripts, templates, assets).
-    The complete folder is stored in the registry and installed atomically.
+    It is not submitted for review until --submit ID --version-id UUID succeeds
+    with the current observed revision and delivery setting enabled.
     Use --exclude to skip specific paths (e.g., --exclude .venv).
 
     Only submit skills you created or are the point-of-contact for.
 
     Examples:
         observal registry skill submit --git-url https://github.com/org/repo
-        observal registry skill submit --skill-md ./SKILL.md --git-url https://github.com/org/repo
         observal registry skill submit --skill-md ./SKILL.md --script ./run.sh \
           --delivery-mode registry_direct --name my-skill --description "My skill"
         observal registry skill submit --from-dir ./my-skill --name my-skill --description "My skill"
@@ -221,15 +224,40 @@ def skill_submit(
             remediation="Use --from-dir alone for complete folder submissions.",
         )
 
+    if version_id and not submit_draft:
+        fail(
+            ErrorCategory.VALIDATION,
+            "--version-id requires --submit LISTING.",
+            operation="Submit skill",
+            resource="submit options",
+            remediation="Select an exact saved draft to submit for review.",
+        )
     if submit_draft:
         resolved = client.resolve_registry_reference("skill", submit_draft)
         submit_context = nullcontext() if output == "json" else spinner("Submitting draft for review...")
         with submit_context:
-            result = client.post(f"/api/v1/skills/{resolved}/submit")
+            if version_id:
+                manifest = client.get(f"/api/v1/skills/{resolved}/versions/{version_id}/manifest")
+                if str(manifest.get("version_id")) != version_id or not manifest.get("revision"):
+                    fail(
+                        ErrorCategory.CONFLICT,
+                        "The selected draft manifest changed.",
+                        operation="Submit skill",
+                        resource=submit_draft,
+                        remediation="Refresh the selected version and retry.",
+                    )
+                result = client.post(
+                    f"/api/v1/skills/{resolved}/versions/{version_id}/submit",
+                    {"observed_revision": manifest["revision"]},
+                )
+            else:
+                result = client.post(f"/api/v1/skills/{resolved}/submit")
         if output == "json":
             output_json(result)
         else:
-            rprint(f"[green]✓ Draft submitted for review![/green] ID: [bold]{esc(result['id'])}[/bold]")
+            rprint(
+                f"[green]✓ Draft submitted for review![/green] ID: [bold]{esc(str(result.get('listing_id') or result.get('id')))}[/bold]"
+            )
         return
 
     if from_file:
@@ -268,6 +296,8 @@ def skill_submit(
         _submit_folder_draft(
             from_dir=from_dir,
             exclude=exclude,
+            allow_excluded=allow_excluded,
+            allow_sensitive=allow_sensitive,
             name=name,
             version=version,
             description=description,
@@ -728,6 +758,26 @@ def skill_install(
         scope=scope,
         directory=directory,
     )
+    # Resolve the selected version before sending a name. Older resource-less
+    # skills retain their established aliases; a folder must use SKILL.md name.
+    requested_version = version
+    selected_version_id = None
+    selected_version_name = version or listing.get("version")
+    if listing.get("delivery_mode") == "registry_direct" and selected_version_name:
+        selected = client.get(f"/api/v1/skills/{resolved}/versions/{selected_version_name}")
+        if selected.get("extra_files"):
+            declared_name = _parse_frontmatter(selected.get("skill_md_content") or "").get("name")
+            if not isinstance(declared_name, str) or not declared_name:
+                fail(
+                    ErrorCategory.VALIDATION,
+                    "Selected complete folder has no declared name.",
+                    operation="Install skill",
+                    resource=skill_id,
+                    remediation="Correct the selected reviewed skill version before installing.",
+                )
+            local_name = declared_name
+            selected_version_id = str(selected["id"])
+            version = str(selected["version"])
     install_context = nullcontext() if machine_output else spinner(f"Generating {harness} config...")
     with install_context:
         install_body = {
@@ -741,6 +791,14 @@ def skill_install(
             install_body["version"] = version
         result = client.post_public(f"/api/v1/skills/{resolved}/install", install_body)
     snippet = result.get("config_snippet", result)
+    if selected_version_id and str(result.get("version_id")) != selected_version_id:
+        fail(
+            ErrorCategory.CONFLICT,
+            "The selected skill version changed during installation.",
+            operation="Install skill",
+            resource=skill_id,
+            remediation="Refresh the exact selected version and retry without changing its folder name.",
+        )
 
     if raw:
         print(_json.dumps(snippet, indent=2))
@@ -758,6 +816,14 @@ def skill_install(
 
     installed_path: Path | None = None
     bundle_response = result.get("bundle")
+    if skill_info.get("bundle_version_id") and not (isinstance(bundle_response, dict) and bundle_response.get("files")):
+        fail(
+            ErrorCategory.CONFLICT,
+            "The selected complete skill folder was not returned by the server.",
+            operation="Install skill",
+            resource=skill_id,
+            remediation="Retry with a compatible server; never install only SKILL.md from a selected folder.",
+        )
 
     if not no_write:
         write_context = redirect_stdout(StringIO()) if output == "json" else nullcontext()
@@ -820,7 +886,7 @@ def skill_install(
                 local_name=local_name,
                 version_id=str(result["version_id"]) if result.get("version_id") else None,
                 digest=result.get("digest"),
-                requested_version=version,
+                requested_version=requested_version,
             )
         except PermissionError as error:
             fail(
@@ -864,6 +930,8 @@ def _submit_folder_draft(
     *,
     from_dir: str,
     exclude: list[str] | None,
+    allow_excluded: bool,
+    allow_sensitive: bool,
     name: str | None,
     version: str | None,
     description: str | None,
@@ -882,7 +950,7 @@ def _submit_folder_draft(
     folder-drafts endpoint.
     """
     human_output = output != "json"
-    source_dir = Path(from_dir).resolve()
+    source_dir = Path(from_dir).absolute()
 
     # Capture directory snapshot
     capture_context = nullcontext() if output == "json" else spinner("Capturing directory...")
@@ -907,15 +975,40 @@ def _submit_folder_draft(
         rprint(f"  Files: {len(snapshot.extra_files) + 1} ({snapshot.total_size:,} bytes)")
         if snapshot.excluded_paths:
             rprint(f"  Excluded: {len(snapshot.excluded_paths)} paths")
+            for excluded in snapshot.excluded_paths[:15]:
+                rprint(f"    • {esc(excluded)}")
+            if len(snapshot.excluded_paths) > 15:
+                rprint(f"    • ... and {len(snapshot.excluded_paths) - 15} more")
         for warning in snapshot.warnings:
             rprint(f"  [yellow]Warning:[/yellow] {esc(warning)}")
-        if snapshot.warnings:
-            # Prompt for confirmation on sensitive files
+        if snapshot.excluded_paths and not allow_excluded:
+            from observal_cli.prompts import confirm
+
+            if not confirm("Continue without the excluded paths?", default=False):
+                rprint("[yellow]Aborted.[/yellow]")
+                return
+        if snapshot.warnings and not allow_sensitive:
             from observal_cli.prompts import confirm
 
             if not confirm("Continue with potentially sensitive files?", default=False):
                 rprint("[yellow]Aborted.[/yellow]")
                 return
+    if snapshot.excluded_paths and not human_output and not allow_excluded:
+        fail(
+            ErrorCategory.VALIDATION,
+            "Folder capture excluded local paths.",
+            operation="Save skill folder draft",
+            resource="local skill folder",
+            remediation="Inspect excluded paths, then use --allow-excluded explicitly if intended.",
+        )
+    if snapshot.warnings and not human_output and not allow_sensitive:
+        fail(
+            ErrorCategory.VALIDATION,
+            "Folder contains likely-sensitive paths.",
+            operation="Save skill folder draft",
+            resource="local skill folder",
+            remediation="Inspect excluded/sensitive paths, then use --allow-sensitive explicitly if intended.",
+        )
 
     # Build payload
     _name = name or fm.get("name", "")
@@ -944,10 +1037,14 @@ def _submit_folder_draft(
         "extra_files": snapshot_to_extra_files(snapshot),
     }
 
-    if slash_command or fm.get("command"):
-        payload["slash_command"] = slash_command or str(fm.get("command", "")).strip().lstrip("/")
-    if target_agent:
-        payload["target_agents"] = target_agent
+    if slash_command or target_agent:
+        fail(
+            ErrorCategory.VALIDATION,
+            "Folder drafts do not accept slash-command or target-agent metadata.",
+            operation="Save skill folder draft",
+            resource="skill folder metadata",
+            remediation="Put a command in SKILL.md frontmatter or edit supported metadata after saving the folder.",
+        )
     if supported_harnesses:
         payload["supported_harnesses"] = supported_harnesses
 
@@ -965,20 +1062,18 @@ def _submit_folder_draft(
         output_json(result)
         return
 
-    # Show success message
-    status = "[yellow]draft[/yellow]" if result.get("status") == "draft" else "[cyan]pending[/cyan]"
-    rprint(f"\n[green]✓ Skill folder submitted![/green] Status: {status}")
-    rprint(f"  ID: [bold]{esc(result.get('id', 'unknown'))}[/bold]")
-    rprint(f"  Version: {esc(result.get('version', '1.0.0'))}")
-    if result.get("version_id"):
-        rprint(f"  Version ID: {esc(result.get('version_id'))}")
-
-    # Show next steps
-    if result.get("status") == "draft":
-        rprint("\n[dim]Next steps:")
-        rprint(f"  Submit for review: observal registry skill submit --submit {esc(client.canonical_name(result))}[/dim]")
-    else:
-        rprint(f"\n[dim]Track review: observal registry skill show {esc(client.canonical_name(result))}[/dim]")
+    # The folder endpoint returns a version manifest, not a listing response.
+    listing_id = result.get("listing_id")
+    rprint("\n[green]✓ Skill folder draft saved.[/green] Review and delivery may still be disabled.")
+    rprint(f"  Listing ID: [bold]{esc(str(listing_id))}[/bold]")
+    rprint(f"  Version: {esc(payload['version'])}")
+    rprint(f"  Version ID: {esc(str(result.get('version_id')))}")
+    if listing_id:
+        rprint(f"\n[dim]Show draft: observal registry skill show {esc(str(listing_id))}[/dim]")
+        rprint(
+            "[dim]When review is enabled: observal registry skill submit "
+            f"--submit {esc(str(listing_id))} --version-id {esc(str(result.get('version_id')))}[/dim]"
+        )
 
 
 def _install_complete_folder_bundle(
@@ -1028,23 +1123,21 @@ def _install_complete_folder_bundle(
         )
         return None  # unreachable but helps type checker
 
-    # Determine target directory
-    if scope == "user":
-        target_dir = _user_skill_dest(harness, validated.folder_name)
-    else:
-        base = Path.cwd() / ".agents" / "skills"
-        target_dir = base / validated.folder_name
-        if not _is_path_safe(target_dir, base):
-            if not machine_output:
-                rprint(f"[red]✗ Unsafe folder name (path traversal):[/red] {esc(repr(validated.folder_name))}")
-            fail(
-                ErrorCategory.VALIDATION,
-                "The skill folder name is unsafe.",
-                operation="Install skill",
-                resource=skill_id,
-                remediation="The skill has an invalid folder name. Report this issue.",
-            )
-            return None
+    # Use the selected harness' actual discovery root, not the legacy
+    # .agents/skills staging root used by resource-less installs.
+    from observal_shared.harness_registry import HARNESS_REGISTRY
+
+    template = HARNESS_REGISTRY.get(harness.replace("_", "-"), {}).get("skills", {}).get(scope)
+    expected_path = template.format(name=validated.folder_name) if template else None
+    if not expected_path or validated.skill_file_path != expected_path:
+        fail(
+            ErrorCategory.VALIDATION,
+            "The bundle skill path does not match the selected harness destination.",
+            operation="Install skill",
+            resource=skill_id,
+            remediation="Refresh the selected skill version and report a mismatched server path.",
+        )
+    target_dir = (Path(expected_path).expanduser() if scope == "user" else Path.cwd() / expected_path).parent
 
     # Check for collisions
     collisions = detect_destination_collisions(target_dir, validated)
@@ -1405,40 +1498,30 @@ def skill_rebase(
 @skill_app.command(name="export")
 def skill_export(
     skill_id: str = typer.Argument(..., help="Skill ID, name, or @alias"),
-    dest: str = typer.Argument(..., help="Destination directory (must be empty or not exist)"),
-    version_id: str | None = typer.Option(None, "--version-id", help="Specific version UUID (default: latest approved)"),
+    dest: str = typer.Argument(..., help="Destination directory (must not exist)"),
+    version_id: str | None = typer.Option(
+        None, "--version-id", help="Specific version UUID (default: latest approved)"
+    ),
     output: OutputMode = typer.Option("table", "--output", "-o", help="Output format: table or json"),
 ):
     """Export a skill version to a local directory.
 
     Downloads the complete skill folder (SKILL.md and all extra files) and
-    writes them to the specified directory. The destination must be empty
-    or not exist.
+    writes them atomically to a new directory. Existing paths are never overwritten.
 
     Examples:
         observal registry skill export my-skill ./my-skill-local
         observal registry skill export my-skill ./v2 --version-id abc123
     """
-    dest_path = Path(dest).resolve()
-
-    # Check destination
-    if dest_path.exists():
-        if dest_path.is_file():
-            fail(
-                ErrorCategory.VALIDATION,
-                "Destination is a file, not a directory.",
-                operation="Export skill",
-                resource=str(dest_path),
-                remediation="Choose a different destination path.",
-            )
-        if any(dest_path.iterdir()):
-            fail(
-                ErrorCategory.VALIDATION,
-                "Destination directory is not empty.",
-                operation="Export skill",
-                resource=str(dest_path),
-                remediation="Choose an empty directory or a path that doesn't exist.",
-            )
+    dest_path = Path(dest).expanduser().absolute()
+    if dest_path.is_symlink() or dest_path.exists():
+        fail(
+            ErrorCategory.VALIDATION,
+            "Export destination already exists; refusing to overwrite it.",
+            operation="Export skill",
+            resource=str(dest_path),
+            remediation="Choose a new destination directory.",
+        )
 
     resolved = client.resolve_registry_reference("skill", skill_id)
 
@@ -1448,19 +1531,33 @@ def skill_export(
         if version_id:
             manifest = client.get(f"/api/v1/skills/{resolved}/versions/{version_id}/manifest")
         else:
-            # Get latest approved version
-            listing = client.get(f"/api/v1/skills/{resolved}")
-            latest_version_id = listing.get("latest_version_id")
-            if not latest_version_id:
+            # Listing responses intentionally do not expose latest_version_id.
+            # Select only a cleared approved release, not a pending draft or an
+            # archived historical release, from the paginated version history.
+            for page in range(1, 11):
+                history = client.get(f"/api/v1/skills/{resolved}/versions", {"page": page, "page_size": 50})
+                release = next(
+                    (
+                        v
+                        for v in history.get("items", [])
+                        if v.get("status") == "approved" and not v.get("requires_global_review")
+                    ),
+                    None,
+                )
+                if release:
+                    version_id = release["id"]
+                    break
+                if page * 50 >= history.get("total", 0):
+                    break
+            if version_id is None:
                 fail(
                     ErrorCategory.NOT_FOUND,
-                    "No approved version found for this skill.",
+                    "No approved version found in the first 500 releases.",
                     operation="Export skill",
                     resource=skill_id,
-                    remediation="Specify a version ID or wait for approval.",
+                    remediation="Specify an authorized --version-id, or wait for approval.",
                 )
-            manifest = client.get(f"/api/v1/skills/{resolved}/versions/{latest_version_id}/manifest")
-            version_id = latest_version_id
+            manifest = client.get(f"/api/v1/skills/{resolved}/versions/{version_id}/manifest")
 
     files = manifest.get("files", [])
     if not files:
@@ -1472,45 +1569,103 @@ def skill_export(
             remediation="The skill version may be empty or inaccessible.",
         )
 
-    # Create destination
-    dest_path.mkdir(parents=True, exist_ok=True)
+    # Download the entire version before touching the destination. Both media
+    # types must match the exact version/revision and each manifest hash. A
+    # corrupted response cannot leave a partially exported directory behind.
+    import base64
+    import json
+    from urllib.parse import quote
 
-    # Download and write each file
-    written_files: list[str] = []
+    from observal_cli.skill_folder import (
+        MAX_EXTRA_FILES,
+        BundleInstallError,
+        BundleValidationError,
+        _normalize_path,
+        install_folder_bundle,
+        validate_bundle,
+    )
+
+    if not isinstance(files, list) or len(files) > MAX_EXTRA_FILES + 1:
+        fail(
+            ErrorCategory.UNAVAILABLE,
+            "Invalid skill file manifest.",
+            operation="Export skill",
+            resource=skill_id,
+            remediation="Retry after checking the server version.",
+        )
+    if str(manifest.get("version_id")) != str(version_id) or str(manifest.get("listing_id")) != str(resolved):
+        fail(
+            ErrorCategory.UNAVAILABLE,
+            "Skill manifest identity does not match the selected version.",
+            operation="Export skill",
+            resource=skill_id,
+            remediation="Retry or inspect the server response.",
+        )
     download_context = nullcontext() if output == "json" else spinner(f"Downloading {len(files)} files...")
-    with download_context:
-        for file_info in files:
-            file_path = file_info["path"]
-            # Fetch file content
-            file_content = client.get(
-                f"/api/v1/skills/{resolved}/versions/{version_id}/files/{file_path}"
-            )
+    try:
+        downloaded = []
+        with download_context:
+            for declaration in files:
+                file_path = _normalize_path(declaration["path"])
+                raw, headers = client.get_bytes_with_headers(
+                    f"/api/v1/skills/{resolved}/versions/{version_id}/files/{quote(file_path, safe='/')}"
+                )
+                media = headers.get("content-type", "").split(";", 1)[0].lower()
+                if media == "application/json":
+                    preview = json.loads(raw)
+                    if (
+                        str(preview.get("version_id")) != str(version_id)
+                        or preview.get("revision") != manifest.get("revision")
+                        or preview.get("file") != declaration
+                        or preview.get("encoding") != "utf-8"
+                        or not isinstance(preview.get("content"), str)
+                    ):
+                        raise BundleValidationError(f"Preview identity mismatch for {file_path}")
+                    content = preview["content"].encode("utf-8")
+                elif media == "application/octet-stream":
+                    content = raw
+                else:
+                    raise BundleValidationError(f"Unexpected file response type for {file_path}")
+                downloaded.append(
+                    {
+                        **declaration,
+                        "version_id": str(version_id),
+                        "content": base64.b64encode(content).decode("ascii"),
+                        "encoding": "base64",
+                    }
+                )
+        bundle = validate_bundle(
+            {
+                "listing_id": str(resolved),
+                "version_id": str(version_id),
+                "digest": manifest["revision"],
+                "skill_file_path": "export/skill/SKILL.md",
+                "files": downloaded,
+            },
+            expected_version_id=str(version_id),
+        )
+        install_folder_bundle(bundle, dest_path)
+    except (BundleValidationError, BundleInstallError, ValueError, KeyError, TypeError) as exc:
+        fail(
+            ErrorCategory.UNAVAILABLE,
+            "Cannot export the complete verified skill folder.",
+            operation="Export skill",
+            resource=skill_id,
+            remediation="Inspect the version and destination; no existing directory was overwritten.",
+            detail=str(exc),
+        )
 
-            # Write file
-            local_path = dest_path / file_path
-            local_path.parent.mkdir(parents=True, exist_ok=True)
-
-            content = file_content.get("content", "")
-            if file_content.get("encoding") == "base64":
-                import base64
-                local_path.write_bytes(base64.b64decode(content))
-            else:
-                local_path.write_text(content, encoding="utf-8")
-
-            # Set executable bit if needed
-            if file_info.get("mode") == "0755":
-                import os
-                os.chmod(local_path, 0o755)
-
-            written_files.append(file_path)
+    written_files = [file.path for file in bundle.files]
 
     if output == "json":
-        output_json({
-            "skill_id": resolved,
-            "version_id": version_id,
-            "destination": str(dest_path),
-            "files": written_files,
-        })
+        output_json(
+            {
+                "skill_id": resolved,
+                "version_id": version_id,
+                "destination": str(dest_path),
+                "files": written_files,
+            }
+        )
     else:
         rprint(f"[green]✓ Exported {len(written_files)} files to {esc(str(dest_path))}[/green]")
         for f in written_files:
@@ -1524,6 +1679,12 @@ def skill_replace_files(
     from_dir: str = typer.Option(..., "--from-dir", help="Directory containing new files"),
     revision: str = typer.Option(..., "--revision", help="Observed revision (prevents stale updates)"),
     exclude: list[str] | None = typer.Option(None, "--exclude", help="Paths to exclude (repeatable)"),
+    allow_excluded: bool = typer.Option(
+        False, "--allow-excluded", help="Acknowledge excluded paths before replacing all files"
+    ),
+    allow_sensitive: bool = typer.Option(
+        False, "--allow-sensitive", help="Acknowledge likely-sensitive paths before upload"
+    ),
     output: OutputMode = typer.Option("table", "--output", "-o", help="Output format: table or json"),
 ):
     """Replace all files in a skill version with contents from a directory.
@@ -1551,10 +1712,38 @@ def skill_replace_files(
                 remediation="Fix the reported issue and retry.",
             )
 
-    # Show warnings
-    if output != "json" and snapshot.warnings:
+    # This is a *complete* replacement. Excluded local files would be deleted
+    # remotely; never treat the defaults (.git, hidden files, etc.) as silent
+    # consent to remove a file from an existing draft.
+    if output != "json":
+        for excluded in snapshot.excluded_paths[:15]:
+            rprint(f"[yellow]Excluded:[/yellow] {esc(excluded)}")
+        if len(snapshot.excluded_paths) > 15:
+            rprint(f"  ... and {len(snapshot.excluded_paths) - 15} more")
         for warning in snapshot.warnings:
             rprint(f"[yellow]Warning:[/yellow] {esc(warning)}")
+    if snapshot.excluded_paths and not allow_excluded:
+        fail(
+            ErrorCategory.VALIDATION,
+            "Source folder contains excluded paths; complete replacement may delete files.",
+            operation="Replace skill files",
+            resource=str(source_dir),
+            remediation="Inspect excluded paths and explicitly use --allow-excluded if deletion is intended.",
+        )
+    if snapshot.warnings and not allow_sensitive:
+        if output == "json":
+            fail(
+                ErrorCategory.VALIDATION,
+                "Source folder contains likely-sensitive files.",
+                operation="Replace skill files",
+                resource=str(source_dir),
+                remediation="Inspect the files, then use --allow-sensitive explicitly if intended.",
+            )
+        from observal_cli.prompts import confirm
+
+        if not confirm("Continue uploading potentially sensitive files?", default=False):
+            rprint("[yellow]Aborted.[/yellow]")
+            return
 
     resolved = client.resolve_registry_reference("skill", skill_id)
     body = {
