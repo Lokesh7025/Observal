@@ -15,14 +15,17 @@ import { test, expect } from "@playwright/test";
 import { getAccessToken, API_BASE, loginToWebUI } from "./helpers";
 import * as crypto from "crypto";
 
-// Helper to create base64 content with SHA-256
-function encodeFile(content: string): { content_base64: string; sha256: string; size: number } {
-	const buffer = Buffer.from(content, "utf-8");
-	return {
-		content_base64: buffer.toString("base64"),
-		sha256: crypto.createHash("sha256").update(buffer).digest("hex"),
-		size: buffer.length,
-	};
+// Helper to create file content for submission
+// Server expects: { path, content, encoding?, executable? }
+// NOT: sha256, size, mode (those are for manifests only)
+function encodeFile(content: string, binary = false): { content: string; encoding?: string } {
+	if (binary) {
+		return {
+			content: Buffer.from(content, "utf-8").toString("base64"),
+			encoding: "base64",
+		};
+	}
+	return { content };
 }
 
 test.describe("Skill Folder API", () => {
@@ -50,34 +53,27 @@ echo "Hello from skill folder"
 `;
 		const configContent = `{"setting": "value"}`;
 
-		const skillMdEncoded = encodeFile(skillMd);
-		const scriptEncoded = encodeFile(scriptContent);
-		const configEncoded = encodeFile(configContent);
-
 		// Submit with extra_files
+		// Server expects: { path, content, encoding?, executable? }
 		const submitRes = await fetch(`${API_BASE}/api/v1/skills/folder-drafts`, {
 			method: "POST",
 			headers,
 			body: JSON.stringify({
 				name: skillName,
+				version: "1.0.0",
 				description: "E2E test skill with extra files",
 				owner: "admin",
-				task_type: "automation",
+				task_type: "general",
 				skill_md_content: skillMd,
 				extra_files: [
 					{
 						path: "scripts/run.sh",
-						content_base64: scriptEncoded.content_base64,
-						sha256: scriptEncoded.sha256,
-						size: scriptEncoded.size,
-						mode: "0755",
+						content: scriptContent,
+						executable: true,
 					},
 					{
 						path: "config/settings.json",
-						content_base64: configEncoded.content_base64,
-						sha256: configEncoded.sha256,
-						size: configEncoded.size,
-						mode: "0644",
+						content: configContent,
 					},
 				],
 			}),
@@ -90,11 +86,13 @@ echo "Hello from skill folder"
 		}
 
 		expect(submitRes.status).toBe(200);
-		const skill = await submitRes.json();
-		expect(skill.name).toBe(skillName);
-		expect(skill.id).toBeDefined();
-		const skillId = skill.id;
-		const versionId = skill.pending_version_id || skill.version_id;
+		const result = await submitRes.json();
+		// API returns listing_id, version_id, revision, files
+		expect(result.listing_id).toBeDefined();
+		expect(result.version_id).toBeDefined();
+		expect(result.files).toBeDefined();
+		const skillId = result.listing_id;
+		const versionId = result.version_id;
 
 		// Get manifest if we have a version ID
 		if (versionId) {
@@ -145,26 +143,22 @@ description: Test file content retrieval
 print("test")
 `;
 
-		const skillMdEncoded = encodeFile(skillMd);
-		const scriptEncoded = encodeFile(testScript);
-
 		// Submit skill
 		const submitRes = await fetch(`${API_BASE}/api/v1/skills/folder-drafts`, {
 			method: "POST",
 			headers,
 			body: JSON.stringify({
 				name: uniqueName,
+				version: "1.0.0",
 				description: "Test file content retrieval",
 				owner: "admin",
-				task_type: "test",
+				task_type: "testing",
 				skill_md_content: skillMd,
 				extra_files: [
 					{
 						path: "test.py",
-						content_base64: scriptEncoded.content_base64,
-						sha256: scriptEncoded.sha256,
-						size: scriptEncoded.size,
-						mode: "0755",
+						content: testScript,
+						executable: true,
 					},
 				],
 			}),
@@ -176,9 +170,9 @@ print("test")
 		}
 
 		expect(submitRes.status).toBe(200);
-		const skill = await submitRes.json();
-		const skillId = skill.id;
-		const versionId = skill.pending_version_id || skill.version_id;
+		const result = await submitRes.json();
+		const skillId = result.listing_id;
+		const versionId = result.version_id;
 
 		if (versionId) {
 			// Fetch individual file content
@@ -189,7 +183,8 @@ print("test")
 			expect(fileRes.status).toBe(200);
 			const fileData = await fileRes.json();
 
-			expect(fileData.path).toBe("test.py");
+			// Response structure: { version_id, revision, file: { path, size, sha256, mode }, content, encoding }
+			expect(fileData.file.path).toBe("test.py");
 			expect(fileData.content).toBeDefined();
 
 			// Decode if base64
@@ -226,26 +221,22 @@ description: Test review UI
 `;
 		const scriptContent = `echo "test"`;
 
-		const skillMdEncoded = encodeFile(skillMd);
-		const scriptEncoded = encodeFile(scriptContent);
-
 		// Submit skill with extra files
 		const submitRes = await fetch(`${API_BASE}/api/v1/skills/folder-drafts`, {
 			method: "POST",
 			headers,
 			body: JSON.stringify({
 				name: uniqueName,
+				version: "1.0.0",
 				description: "Test review UI",
 				owner: "admin",
-				task_type: "test",
+				task_type: "general",
 				skill_md_content: skillMd,
 				extra_files: [
 					{
 						path: "run.sh",
-						content_base64: scriptEncoded.content_base64,
-						sha256: scriptEncoded.sha256,
-						size: scriptEncoded.size,
-						mode: "0755",
+						content: scriptContent,
+						executable: true,
 					},
 				],
 			}),
@@ -257,8 +248,8 @@ description: Test review UI
 		}
 
 		expect(submitRes.status).toBe(200);
-		const skill = await submitRes.json();
-		const skillId = skill.id;
+		const result = await submitRes.json();
+		const skillId = result.listing_id;
 
 		// Login and navigate to review page
 		await loginToWebUI(page);
@@ -291,7 +282,7 @@ description: Test review UI
 });
 
 test.describe("Skill Folder Validation", () => {
-	test("rejects invalid SHA-256 checksum", async () => {
+	test("rejects missing version field", async () => {
 		const token = await getAccessToken();
 		const headers = {
 			"Content-Type": "application/json",
@@ -299,44 +290,37 @@ test.describe("Skill Folder Validation", () => {
 		};
 
 		const skillMd = `---
-name: test-invalid-sha
-description: Test SHA validation
+name: test-no-version
+description: Test version validation
 ---
 `;
-		const skillMdEncoded = encodeFile(skillMd);
 
-		// Submit with wrong SHA
+		// Submit without version field
 		const submitRes = await fetch(`${API_BASE}/api/v1/skills/folder-drafts`, {
 			method: "POST",
 			headers,
 			body: JSON.stringify({
-				name: `e2e-invalid-sha-${Date.now()}`,
-				description: "Test SHA validation",
+				name: `e2e-no-version-${Date.now()}`,
+				description: "Test version validation",
 				owner: "admin",
-				task_type: "test",
+				task_type: "general",
 				skill_md_content: skillMd,
 				extra_files: [
 					{
 						path: "test.txt",
-						content_base64: Buffer.from("real content").toString("base64"),
-						sha256: "0000000000000000000000000000000000000000000000000000000000000000", // Wrong SHA
-						size: 12,
-						mode: "0644",
+						content: "test content",
 					},
 				],
 			}),
 		});
 
-		// Should either 404 (endpoint not implemented) or 400/422 (validation error)
 		if (submitRes.status === 404) {
 			test.skip();
 			return;
 		}
 
-		// Expect validation error
+		// Expect validation error for missing version
 		expect([400, 422]).toContain(submitRes.status);
-		const error = await submitRes.json();
-		expect(error.detail || error.message || JSON.stringify(error)).toMatch(/sha|checksum|hash/i);
 	});
 
 	test("rejects path traversal attempts", async () => {
@@ -351,7 +335,6 @@ name: test-traversal
 description: Test path security
 ---
 `;
-		const fileEncoded = encodeFile("malicious");
 
 		// Submit with path traversal
 		const submitRes = await fetch(`${API_BASE}/api/v1/skills/folder-drafts`, {
@@ -359,17 +342,15 @@ description: Test path security
 			headers,
 			body: JSON.stringify({
 				name: `e2e-traversal-${Date.now()}`,
+				version: "1.0.0",
 				description: "Test path security",
 				owner: "admin",
-				task_type: "test",
+				task_type: "general",
 				skill_md_content: skillMd,
 				extra_files: [
 					{
 						path: "../../../etc/passwd",
-						content_base64: fileEncoded.content_base64,
-						sha256: fileEncoded.sha256,
-						size: fileEncoded.size,
-						mode: "0644",
+						content: "malicious content",
 					},
 				],
 			}),
@@ -400,14 +381,9 @@ description: Test file limit
 		// Create 130 files (exceeds MAX_EXTRA_FILES = 128)
 		const extraFiles = [];
 		for (let i = 0; i < 130; i++) {
-			const content = `file ${i}`;
-			const encoded = encodeFile(content);
 			extraFiles.push({
 				path: `files/file${i}.txt`,
-				content_base64: encoded.content_base64,
-				sha256: encoded.sha256,
-				size: encoded.size,
-				mode: "0644",
+				content: `file ${i}`,
 			});
 		}
 
@@ -416,9 +392,10 @@ description: Test file limit
 			headers,
 			body: JSON.stringify({
 				name: `e2e-too-many-${Date.now()}`,
+				version: "1.0.0",
 				description: "Test file limit",
 				owner: "admin",
-				task_type: "test",
+				task_type: "general",
 				skill_md_content: skillMd,
 				extra_files: extraFiles,
 			}),
