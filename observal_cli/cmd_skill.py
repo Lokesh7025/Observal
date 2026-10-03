@@ -46,8 +46,11 @@ from observal_cli.skill_folder import (
 from observal_cli.skill_folder import (
     BundleInstallError,
     BundleValidationError,
+    DirectoryCaptureError,
+    capture_directory,
     detect_destination_collisions,
     install_folder_bundle,
+    snapshot_to_extra_files,
     validate_bundle,
 )
 
@@ -145,10 +148,14 @@ def _validate_skill_fields(payload: dict, operation: str) -> None:
 @skill_app.command(name="submit")
 def skill_submit(
     from_file: str | None = typer.Option(None, "--from-file", "-f", help="Create from JSON file"),
+    from_dir: str | None = typer.Option(
+        None, "--from-dir", help="Create from directory (must contain SKILL.md)"
+    ),
     skill_md: str | None = typer.Option(None, "--skill-md", help="Path to SKILL.md to paste (auto-fills fields)"),
     git_url: str | None = typer.Option(None, "--git-url", help="Git repository URL"),
     git_ref: str | None = typer.Option(None, "--git-ref", help="Branch or tag (default: main)"),
     script: str | None = typer.Option(None, "--script", help="Path to script file (registry_direct mode)"),
+    exclude: list[str] | None = typer.Option(None, "--exclude", help="Paths to exclude from --from-dir (repeatable)"),
     delivery_mode: str | None = typer.Option(None, "--delivery-mode", help="Delivery: git_fetch or registry_direct"),
     name: str | None = typer.Option(None, "--name", "-n", help="Skill name"),
     version: str | None = typer.Option(None, "--version", "-v", help="Version (default: 1.0.0)"),
@@ -178,13 +185,19 @@ def skill_submit(
     optionally --script to submit a skill with inline content (no git repo
     needed). On install, the SKILL.md and script are written directly.
 
+    Complete folders: use --from-dir PATH to submit an entire skill directory
+    containing SKILL.md and additional files (scripts, templates, assets).
+    The complete folder is stored in the registry and installed atomically.
+    Use --exclude to skip specific paths (e.g., --exclude .venv).
+
     Only submit skills you created or are the point-of-contact for.
 
     Examples:
         observal registry skill submit --git-url https://github.com/org/repo
         observal registry skill submit --skill-md ./SKILL.md --git-url https://github.com/org/repo
         observal registry skill submit --skill-md ./SKILL.md --script ./run.sh \
-          --delivery-mode registry_direct --name my-skill --description "My skill" --output json
+          --delivery-mode registry_direct --name my-skill --description "My skill"
+        observal registry skill submit --from-dir ./my-skill --name my-skill --description "My skill"
     """
     human_output = output != "json"
     if human_output:
@@ -196,6 +209,16 @@ def skill_submit(
             operation="Submit skill",
             resource="submit options",
             remediation="Choose either draft creation or draft submission and retry.",
+        )
+
+    # Validate conflicting options
+    if from_dir and (skill_md or script or git_url):
+        fail(
+            ErrorCategory.VALIDATION,
+            "--from-dir cannot be combined with --skill-md, --script, or --git-url.",
+            operation="Submit skill",
+            resource="submit options",
+            remediation="Use --from-dir alone for complete folder submissions.",
         )
 
     if submit_draft:
@@ -240,6 +263,24 @@ def skill_submit(
                 remediation="Replace the file contents with a JSON object and retry.",
             )
         _validate_skill_fields(payload, "Submit skill")
+    elif from_dir:
+        # --- Complete folder submission ---
+        _submit_folder_draft(
+            from_dir=from_dir,
+            exclude=exclude,
+            name=name,
+            version=version,
+            description=description,
+            task_type=task_type,
+            target_agent=target_agent,
+            slash_command=slash_command,
+            supported_harnesses=supported_harnesses,
+            team=team,
+            visibility=visibility,
+            draft=draft,
+            output=output,
+        )
+        return
     else:
         # --- Paste-first: parse SKILL.md locally if provided ---
         prefill: dict = {}
@@ -817,6 +858,127 @@ def skill_install(
 
     rprint(f"\n[bold]Config for {esc(harness)}:[/bold]\n")
     console.print_json(_json.dumps(snippet, indent=2))
+
+
+def _submit_folder_draft(
+    *,
+    from_dir: str,
+    exclude: list[str] | None,
+    name: str | None,
+    version: str | None,
+    description: str | None,
+    task_type: str | None,
+    target_agent: list[str] | None,
+    slash_command: str | None,
+    supported_harnesses: list[str] | None,
+    team: str | None,
+    visibility: str | None,
+    draft: bool,
+    output: OutputMode,
+) -> None:
+    """Submit a complete skill folder as a registry-direct draft.
+
+    Captures the directory, validates content, and submits to the
+    folder-drafts endpoint.
+    """
+    human_output = output != "json"
+    source_dir = Path(from_dir).resolve()
+
+    # Capture directory snapshot
+    capture_context = nullcontext() if output == "json" else spinner("Capturing directory...")
+    with capture_context:
+        try:
+            snapshot = capture_directory(source_dir, exclude=exclude or [])
+        except DirectoryCaptureError as e:
+            fail(
+                ErrorCategory.VALIDATION,
+                f"Cannot capture skill directory: {e}",
+                operation="Submit skill",
+                resource=str(source_dir),
+                remediation="Fix the reported issue and retry.",
+            )
+
+    # Parse frontmatter for default values
+    fm = _parse_frontmatter(snapshot.skill_md_content)
+
+    # Show capture summary
+    if human_output:
+        rprint(f"[green]✓ Captured directory:[/green] {esc(str(source_dir))}")
+        rprint(f"  Files: {len(snapshot.extra_files) + 1} ({snapshot.total_size:,} bytes)")
+        if snapshot.excluded_paths:
+            rprint(f"  Excluded: {len(snapshot.excluded_paths)} paths")
+        for warning in snapshot.warnings:
+            rprint(f"  [yellow]Warning:[/yellow] {esc(warning)}")
+        if snapshot.warnings:
+            # Prompt for confirmation on sensitive files
+            from observal_cli.prompts import confirm
+
+            if not confirm("Continue with potentially sensitive files?", default=False):
+                rprint("[yellow]Aborted.[/yellow]")
+                return
+
+    # Build payload
+    _name = name or fm.get("name", "")
+    _description = description or fm.get("description", "")
+
+    if not _name or not _description:
+        if output == "json":
+            fail(
+                ErrorCategory.VALIDATION,
+                "Skill name and description are required.",
+                operation="Submit skill",
+                resource="skill payload",
+                remediation="Provide --name and --description, or add them to SKILL.md frontmatter.",
+            )
+        # Interactive mode
+        _name = _name or text_input("Skill name", default=fm.get("name", ""))
+        _description = _description or text_input("Description", default=fm.get("description", ""))
+
+    payload: dict = {
+        "name": _name,
+        "version": version or "1.0.0",
+        "description": _description,
+        "owner": config.load().get("username", ""),
+        "task_type": task_type or "general",
+        "skill_md_content": snapshot.skill_md_content,
+        "extra_files": snapshot_to_extra_files(snapshot),
+    }
+
+    if slash_command or fm.get("command"):
+        payload["slash_command"] = slash_command or str(fm.get("command", "")).strip().lstrip("/")
+    if target_agent:
+        payload["target_agents"] = target_agent
+    if supported_harnesses:
+        payload["supported_harnesses"] = supported_harnesses
+
+    _validate_skill_fields(payload, "Submit skill")
+    client.add_publish_target(payload, team, visibility)
+
+    # Submit to folder-drafts endpoint
+    endpoint = "/api/v1/skills/folder-drafts"
+    label = "folder draft" if draft else "skill folder"
+    submit_context = nullcontext() if output == "json" else spinner(f"Saving {label}...")
+    with submit_context:
+        result = client.post(endpoint, payload)
+
+    if output == "json":
+        output_json(result)
+        return
+
+    # Show success message
+    status = "[yellow]draft[/yellow]" if result.get("status") == "draft" else "[cyan]pending[/cyan]"
+    rprint(f"\n[green]✓ Skill folder submitted![/green] Status: {status}")
+    rprint(f"  ID: [bold]{esc(result.get('id', 'unknown'))}[/bold]")
+    rprint(f"  Version: {esc(result.get('version', '1.0.0'))}")
+    if result.get("version_id"):
+        rprint(f"  Version ID: {esc(result.get('version_id'))}")
+
+    # Show next steps
+    if result.get("status") == "draft":
+        rprint("\n[dim]Next steps:")
+        rprint(f"  Submit for review: observal registry skill submit --submit {esc(client.canonical_name(result))}[/dim]")
+    else:
+        rprint(f"\n[dim]Track review: observal registry skill show {esc(client.canonical_name(result))}[/dim]")
 
 
 def _install_complete_folder_bundle(

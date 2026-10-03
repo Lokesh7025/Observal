@@ -574,3 +574,271 @@ def uninstall_folder(target_dir: Path, *, backup_dir: Path | None = None) -> boo
         shutil.rmtree(target_dir)
 
     return True
+
+
+# ── Directory capture for authoring ─────────────────────────────────────────
+
+# Paths to exclude from directory capture
+_EXCLUDE_PATTERNS = frozenset((
+    ".git",
+    ".venv",
+    "__pycache__",
+    "node_modules",
+    ".DS_Store",
+    "Thumbs.db",
+    ".env",
+    ".env.local",
+))
+
+# Files that likely contain secrets
+_SENSITIVE_PATTERNS = (
+    ".env",
+    "secrets",
+    "credentials",
+    "private",
+    ".pem",
+    ".key",
+    "password",
+    "token",
+)
+
+
+@dataclass(frozen=True, slots=True)
+class CapturedFile:
+    """A file captured from a local directory."""
+
+    path: str  # Relative POSIX path
+    content: bytes  # Raw bytes
+    executable: bool  # Has execute permission
+    is_binary: bool  # Non-UTF-8 content
+
+
+@dataclass(frozen=True, slots=True)
+class DirectorySnapshot:
+    """Immutable snapshot of a skill directory for upload."""
+
+    skill_md_content: str
+    extra_files: tuple[CapturedFile, ...]
+    total_size: int
+    excluded_paths: tuple[str, ...]
+    warnings: tuple[str, ...]
+
+
+class DirectoryCaptureError(Exception):
+    """Directory capture failed."""
+
+    pass
+
+
+def _is_binary(content: bytes) -> bool:
+    """Check if content appears to be binary (non-UTF-8)."""
+    try:
+        content.decode("utf-8")
+        return False
+    except UnicodeDecodeError:
+        return True
+
+
+def _is_likely_sensitive(path: str) -> bool:
+    """Check if a file path suggests sensitive content."""
+    lower = path.lower()
+    return any(pattern in lower for pattern in _SENSITIVE_PATTERNS)
+
+
+def _should_exclude(segment: str) -> bool:
+    """Check if a path segment should be excluded."""
+    return segment in _EXCLUDE_PATTERNS or segment.startswith(".")
+
+
+def capture_directory(
+    source_dir: Path,
+    *,
+    exclude: list[str] | None = None,
+    include_hidden: bool = False,
+) -> DirectorySnapshot:
+    """Capture an immutable snapshot of a skill directory.
+
+    Reads all regular files, validates paths, and prepares content for upload.
+    Symlinks, special files, and excluded patterns are skipped.
+
+    Args:
+        source_dir: Directory to capture (must contain SKILL.md)
+        exclude: Additional paths to exclude (relative to source_dir)
+        include_hidden: If True, include hidden files (except .git)
+
+    Returns:
+        DirectorySnapshot with validated content
+
+    Raises:
+        DirectoryCaptureError: If capture fails
+    """
+    optic.debug("Capturing directory: {}", source_dir)
+
+    if not source_dir.is_dir():
+        raise DirectoryCaptureError(f"Not a directory: {source_dir}")
+
+    if source_dir.is_symlink():
+        raise DirectoryCaptureError(f"Directory is a symlink: {source_dir}")
+
+    # Check for SKILL.md
+    skill_md_path = source_dir / SKILL_MD_NAME
+    if not skill_md_path.is_file():
+        raise DirectoryCaptureError(f"Directory must contain {SKILL_MD_NAME}: {source_dir}")
+
+    if skill_md_path.is_symlink():
+        raise DirectoryCaptureError(f"{SKILL_MD_NAME} must not be a symlink")
+
+    # Read SKILL.md content
+    try:
+        skill_md_content = skill_md_path.read_text(encoding="utf-8")
+    except UnicodeDecodeError as e:
+        raise DirectoryCaptureError(f"{SKILL_MD_NAME} must be valid UTF-8: {e}") from e
+
+    # Build exclusion set
+    exclusions = set(_EXCLUDE_PATTERNS)
+    if exclude:
+        exclusions.update(exclude)
+
+    # Capture all files
+    extra_files: list[CapturedFile] = []
+    excluded_paths: list[str] = []
+    warnings: list[str] = []
+    total_size = len(skill_md_content.encode("utf-8"))
+    seen_paths: dict[str, str] = {}  # case-folded -> original
+
+    for file_path in sorted(source_dir.rglob("*")):
+        # Skip directories
+        if file_path.is_dir():
+            continue
+
+        # Skip symlinks
+        if file_path.is_symlink():
+            rel_path = file_path.relative_to(source_dir).as_posix()
+            excluded_paths.append(f"{rel_path} (symlink)")
+            continue
+
+        # Skip special files
+        if not file_path.is_file():
+            continue
+
+        # Get relative path
+        rel_path = file_path.relative_to(source_dir).as_posix()
+
+        # Skip SKILL.md (handled separately)
+        if rel_path == SKILL_MD_NAME:
+            continue
+
+        # Check exclusions
+        parts = PurePosixPath(rel_path).parts
+        if any(segment in exclusions for segment in parts):
+            excluded_paths.append(rel_path)
+            continue
+
+        # Skip hidden files unless requested
+        if not include_hidden and any(p.startswith(".") and p != "." for p in parts):
+            if not any(p == ".git" for p in parts):  # .git is always excluded
+                excluded_paths.append(f"{rel_path} (hidden)")
+            continue
+
+        # Validate path
+        try:
+            normalized_path = _normalize_path(rel_path)
+        except BundleValidationError as e:
+            raise DirectoryCaptureError(f"Invalid path '{rel_path}': {e}") from e
+
+        # Case-fold collision check
+        fold_key = _case_fold_key(normalized_path)
+        if fold_key in seen_paths:
+            raise DirectoryCaptureError(
+                f"Path collision (case-insensitive): '{normalized_path}' vs '{seen_paths[fold_key]}'"
+            )
+        seen_paths[fold_key] = normalized_path
+
+        # Read content
+        try:
+            content = file_path.read_bytes()
+        except OSError as e:
+            raise DirectoryCaptureError(f"Cannot read '{rel_path}': {e}") from e
+
+        # Size checks
+        if len(content) > MAX_FILE_SIZE:
+            raise DirectoryCaptureError(
+                f"File too large ({len(content):,} > {MAX_FILE_SIZE:,}): {rel_path}"
+            )
+
+        total_size += len(content)
+        if total_size > MAX_TREE_SIZE:
+            raise DirectoryCaptureError(
+                f"Total size exceeds {MAX_TREE_SIZE:,} bytes at file: {rel_path}"
+            )
+
+        # Check file count
+        if len(extra_files) >= MAX_EXTRA_FILES:
+            raise DirectoryCaptureError(
+                f"Too many files (limit: {MAX_EXTRA_FILES})"
+            )
+
+        # Warn about sensitive files
+        if _is_likely_sensitive(rel_path):
+            warnings.append(f"Potentially sensitive file: {rel_path}")
+
+        # Check executable bit
+        mode = os.stat(file_path).st_mode
+        executable = bool(mode & stat.S_IXUSR)
+
+        # Check if binary
+        is_binary = _is_binary(content)
+
+        extra_files.append(CapturedFile(
+            path=normalized_path,
+            content=content,
+            executable=executable,
+            is_binary=is_binary,
+        ))
+
+    optic.debug(
+        "Captured {} files, {} excluded, total {} bytes",
+        len(extra_files) + 1,  # +1 for SKILL.md
+        len(excluded_paths),
+        total_size,
+    )
+
+    return DirectorySnapshot(
+        skill_md_content=skill_md_content,
+        extra_files=tuple(extra_files),
+        total_size=total_size,
+        excluded_paths=tuple(excluded_paths),
+        warnings=tuple(warnings),
+    )
+
+
+def snapshot_to_extra_files(snapshot: DirectorySnapshot) -> list[dict[str, Any]]:
+    """Convert a directory snapshot to API extra_files format.
+
+    Args:
+        snapshot: Captured directory snapshot
+
+    Returns:
+        List of dicts suitable for the folder-drafts API
+    """
+    result: list[dict[str, Any]] = []
+
+    for captured in snapshot.extra_files:
+        entry: dict[str, Any] = {
+            "path": captured.path,
+        }
+
+        if captured.is_binary:
+            # Binary files use base64 encoding
+            entry["content"] = base64.b64encode(captured.content).decode("ascii")
+            entry["encoding"] = "base64"
+        else:
+            # Text files use UTF-8
+            entry["content"] = captured.content.decode("utf-8")
+
+        if captured.executable:
+            entry["executable"] = True
+
+        result.append(entry)
+
+    return result

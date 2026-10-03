@@ -16,10 +16,13 @@ import pytest
 from observal_cli.skill_folder import (
     BundleInstallError,
     BundleValidationError,
+    DirectoryCaptureError,
     _case_fold_key,
     _normalize_path,
+    capture_directory,
     detect_destination_collisions,
     install_folder_bundle,
+    snapshot_to_extra_files,
     validate_bundle,
 )
 
@@ -299,3 +302,115 @@ class TestFolderInstallation:
 
             with pytest.raises(BundleInstallError, match="exists"):
                 install_folder_bundle(validated, target, force=False)
+
+
+class TestDirectoryCapture:
+    """Tests for capturing local directories for upload."""
+
+    def test_capture_minimal(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            source = Path(tmpdir)
+            (source / "SKILL.md").write_text("---\nname: test\n---\n# Test")
+
+            snapshot = capture_directory(source)
+
+            assert "name: test" in snapshot.skill_md_content
+            assert len(snapshot.extra_files) == 0
+
+    def test_capture_with_script(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            source = Path(tmpdir)
+            (source / "SKILL.md").write_text("---\nname: test\n---\n# Test")
+            scripts_dir = source / "scripts"
+            scripts_dir.mkdir()
+            script = scripts_dir / "run.sh"
+            script.write_text("#!/bin/sh\necho hello")
+            os.chmod(script, 0o755)
+
+            snapshot = capture_directory(source)
+
+            assert len(snapshot.extra_files) == 1
+            assert snapshot.extra_files[0].path == "scripts/run.sh"
+            assert snapshot.extra_files[0].executable is True
+
+    def test_capture_excludes_git(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            source = Path(tmpdir)
+            (source / "SKILL.md").write_text("---\nname: test\n---\n# Test")
+            git_dir = source / ".git"
+            git_dir.mkdir()
+            (git_dir / "config").write_text("git config")
+
+            snapshot = capture_directory(source)
+
+            assert len(snapshot.extra_files) == 0
+
+    def test_capture_excludes_venv(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            source = Path(tmpdir)
+            (source / "SKILL.md").write_text("---\nname: test\n---\n# Test")
+            venv_dir = source / ".venv"
+            venv_dir.mkdir()
+            (venv_dir / "pyvenv.cfg").write_text("config")
+
+            snapshot = capture_directory(source)
+
+            assert len(snapshot.extra_files) == 0
+            assert any(".venv" in p for p in snapshot.excluded_paths)
+
+    def test_capture_missing_skill_md(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            source = Path(tmpdir)
+            (source / "README.md").write_text("# Readme")
+
+            with pytest.raises(DirectoryCaptureError, match=r"SKILL\.md"):
+                capture_directory(source)
+
+    def test_capture_binary_file(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            source = Path(tmpdir)
+            (source / "SKILL.md").write_text("---\nname: test\n---\n# Test")
+            assets_dir = source / "assets"
+            assets_dir.mkdir()
+            (assets_dir / "icon.bin").write_bytes(b"\x00\xff\x00\xff")
+
+            snapshot = capture_directory(source)
+
+            assert len(snapshot.extra_files) == 1
+            assert snapshot.extra_files[0].is_binary is True
+
+    def test_snapshot_to_extra_files(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            source = Path(tmpdir)
+            (source / "SKILL.md").write_text("---\nname: test\n---\n# Test")
+            scripts_dir = source / "scripts"
+            scripts_dir.mkdir()
+            (scripts_dir / "run.sh").write_text("echo hello")
+            assets_dir = source / "assets"
+            assets_dir.mkdir()
+            (assets_dir / "icon.bin").write_bytes(b"\x00\xff")
+
+            snapshot = capture_directory(source)
+            extra_files = snapshot_to_extra_files(snapshot)
+
+            assert len(extra_files) == 2
+
+            # Find the script file
+            script_file = next(f for f in extra_files if f["path"] == "scripts/run.sh")
+            assert script_file["content"] == "echo hello"
+            assert "encoding" not in script_file  # UTF-8, no encoding field
+
+            # Find the binary file
+            bin_file = next(f for f in extra_files if f["path"] == "assets/icon.bin")
+            assert bin_file["encoding"] == "base64"
+
+    def test_capture_warns_on_sensitive(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            source = Path(tmpdir)
+            (source / "SKILL.md").write_text("---\nname: test\n---\n# Test")
+            (source / "secrets.txt").write_text("password123")
+
+            snapshot = capture_directory(source)
+
+            assert len(snapshot.warnings) > 0
+            assert any("sensitive" in w.lower() for w in snapshot.warnings)
