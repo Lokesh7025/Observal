@@ -360,6 +360,8 @@ export interface ReviewItem {
 	target_agents?: string[];
 	task_type?: string;
 	slash_command?: string;
+	pending_version_id?: string;
+	has_extra_files?: boolean;
 
 	// Hook-specific
 	event?: string;

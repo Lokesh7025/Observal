@@ -547,6 +547,14 @@ export const registry = {
 	) => post<ComponentVersionDetail>(`/${type}/${listingId}/versions`, body),
 	componentVersionSuggestions: (type: RegistryType, listingId: string) =>
 		get<VersionSuggestions>(`/${type}/${listingId}/version-suggestions`),
+	getSkillVersionManifest: (listingId: string, versionId: string) =>
+		get<{ version_id: string; revision: string; files: Array<{ path: string; size: number; sha256: string; mode: string }> }>(
+			`/skills/${listingId}/versions/${versionId}/manifest`
+		),
+	getSkillFileContent: (listingId: string, versionId: string, filePath: string) =>
+		get<{ path: string; content: string; encoding: string }>(
+			`/skills/${listingId}/versions/${versionId}/files/${encodeURIComponent(filePath)}`
+		),
 	startEdit: (id: string, type?: RegistryType) =>
 		post<{ status: string }>(`/${type ?? "agents"}/${id}/start-edit`),
 	cancelEdit: (id: string, type?: RegistryType) =>

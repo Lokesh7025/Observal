@@ -199,3 +199,21 @@ export function useComponentVersionSuggestions(type: RegistryType | undefined, l
     queryFn: () => registry.componentVersionSuggestions(type!, listingId!),
   });
 }
+
+// ── Skill Folder Version APIs ──────────────────────────────────────
+
+export function useSkillVersionManifest(listingId: string | undefined, versionId: string | undefined) {
+  return useQuery({
+    queryKey: ["skill-version-manifest", listingId, versionId],
+    enabled: !!listingId && !!versionId,
+    queryFn: () => registry.getSkillVersionManifest(listingId!, versionId!),
+  });
+}
+
+export function useSkillFileContent(listingId: string | undefined, versionId: string | undefined, filePath: string | null) {
+  return useQuery({
+    queryKey: ["skill-file-content", listingId, versionId, filePath],
+    enabled: !!listingId && !!versionId && !!filePath,
+    queryFn: () => registry.getSkillFileContent(listingId!, versionId!, filePath!),
+  });
+}
