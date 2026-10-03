@@ -5,7 +5,7 @@
 
 
 import { useState, useEffect, useMemo, useRef, useCallback } from "react";
-import { ArrowRight, Loader2, RotateCcw, Construction } from "lucide-react";
+import { ArrowRight, Loader2, RotateCcw, Construction, Upload, FolderUp, File, Trash2, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -767,7 +767,7 @@ function SkillFields({
 	const scriptLanguage = codeLanguageFromFilename(state.script_filename);
 	const scriptLanguageName = codeLanguageLabel(scriptLanguage);
 	const [selectedFilePath, setSelectedFilePath] = useState<string | null>(null);
-	const defaultTab = state.extra_files?.length > 0 ? "folder" : state.git_url ? "git" : "paste";
+	const defaultTab = state.extra_files?.length > 0 ? "upload" : state.git_url ? "git" : "paste";
 
 	return (
 		<div className="space-y-4">
@@ -800,8 +800,8 @@ function SkillFields({
 			<Tabs defaultValue={defaultTab} className="w-full">
 				<TabsList className="grid w-full grid-cols-3">
 					<TabsTrigger value="git">Git</TabsTrigger>
-					<TabsTrigger value="paste">Single File</TabsTrigger>
-					<TabsTrigger value="folder">Folder</TabsTrigger>
+					<TabsTrigger value="paste">Paste</TabsTrigger>
+					<TabsTrigger value="upload">Upload</TabsTrigger>
 				</TabsList>
 
 				<TabsContent value="git" className="space-y-4 pt-4">
@@ -889,110 +889,205 @@ function SkillFields({
 					</div>
 				</TabsContent>
 
-				<TabsContent value="folder" className="space-y-4 pt-4">
-					<div className="space-y-2">
-						<Label htmlFor="folder-skill-md" className="text-sm font-medium">
-							SKILL.md *
-						</Label>
-						<Textarea
-							id="folder-skill-md"
-							value={state.skill_md_content}
-							onChange={(e) => onChange({ skill_md_content: e.target.value })}
-							placeholder="---\nname: my-skill\ndescription: Skill description\n---\n\n## Instructions"
-							rows={6}
-							className="resize-y font-[family-name:var(--font-mono)] text-xs leading-relaxed"
-						/>
-					</div>
+				<TabsContent value="upload" className="space-y-4 pt-4">
+					{/* Hidden file inputs */}
+					<input
+						type="file"
+						id="skill-edit-file-upload"
+						className="hidden"
+						multiple
+						onChange={(e) => {
+							const files = e.target.files;
+							if (!files) return;
+							Array.from(files).forEach((file) => {
+								const reader = new FileReader();
+								reader.onload = () => {
+									const content = reader.result as string;
+									if (file.name === "SKILL.md") {
+										onChange({ skill_md_content: content });
+									} else {
+										const existing = state.extra_files?.find((f) => f.path === file.name);
+										if (existing) {
+											onChange({ extra_files: state.extra_files?.map((f) => f.path === file.name ? { ...f, content } : f) });
+										} else {
+											onChange({ extra_files: [...(state.extra_files || []), { path: file.name, content }] });
+										}
+									}
+								};
+								reader.readAsText(file);
+							});
+							e.target.value = "";
+						}}
+					/>
+					<input
+						type="file"
+						id="skill-edit-folder-upload"
+						className="hidden"
+						{/* @ts-expect-error webkitdirectory is non-standard but widely supported */}
+						webkitdirectory=""
+						onChange={(e) => {
+							const files = e.target.files;
+							if (!files) return;
+							Array.from(files).forEach((file) => {
+								const path = file.webkitRelativePath || file.name;
+								if (path.includes("/.git/") || path.includes("/node_modules/") || path.includes("/.venv/") || path.startsWith(".")) return;
+								const parts = path.split("/");
+								const relativePath = parts.slice(1).join("/") || parts[0];
+								if (!relativePath) return;
+								const reader = new FileReader();
+								reader.onload = () => {
+									const content = reader.result as string;
+									if (relativePath === "SKILL.md") {
+										onChange({ skill_md_content: content });
+									} else {
+										const existing = state.extra_files?.find((f) => f.path === relativePath);
+										if (existing) {
+											onChange({ extra_files: state.extra_files?.map((f) => f.path === relativePath ? { ...f, content } : f) });
+										} else {
+											onChange({ extra_files: [...(state.extra_files || []), { path: relativePath, content }] });
+										}
+									}
+								};
+								reader.readAsText(file);
+							});
+							e.target.value = "";
+						}}
+					/>
 
-					<div className="space-y-2">
-						<div className="flex items-center justify-between">
-							<Label className="text-sm font-medium">Extra Files ({state.extra_files?.length || 0})</Label>
+					{/* Upload buttons */}
+					<div className="flex gap-2">
+						<Button
+							type="button"
+							variant="outline"
+							size="sm"
+							onClick={() => document.getElementById("skill-edit-file-upload")?.click()}
+						>
+							<Upload className="h-4 w-4 mr-1" />
+							Upload Files
+						</Button>
+						<Button
+							type="button"
+							variant="outline"
+							size="sm"
+							onClick={() => document.getElementById("skill-edit-folder-upload")?.click()}
+						>
+							<FolderUp className="h-4 w-4 mr-1" />
+							Upload Folder
+						</Button>
+						{(state.skill_md_content || (state.extra_files?.length ?? 0) > 0) && (
 							<Button
 								type="button"
-								variant="outline"
+								variant="ghost"
 								size="sm"
 								onClick={() => {
-									const path = prompt("Enter file path (e.g., scripts/run.sh):");
-									if (path?.trim()) {
-										const newFiles = [...(state.extra_files || []), { path: path.trim(), content: "" }];
-										onChange({ extra_files: newFiles });
-										setSelectedFilePath(path.trim());
-									}
+									onChange({ skill_md_content: "", extra_files: [] });
+									setSelectedFilePath(null);
 								}}
 							>
-								Add File
+								<Trash2 className="h-4 w-4 mr-1" />
+								Clear All
 							</Button>
-						</div>
-
-						{(state.extra_files?.length ?? 0) > 0 && (
-							<div className="border rounded-md divide-y max-h-32 overflow-auto">
-								{state.extra_files?.map((file, idx) => (
-									<div
-										key={file.path}
-										className={`flex items-center justify-between px-3 py-1.5 text-sm cursor-pointer hover:bg-muted/50 ${selectedFilePath === file.path ? "bg-primary/10" : ""}`}
-										onClick={() => setSelectedFilePath(file.path)}
-									>
-										<span className="font-[family-name:var(--font-mono)] text-xs truncate">{file.path}</span>
-										<div className="flex items-center gap-1">
-											{file.executable && <span className="text-[10px] text-green-600">exec</span>}
-											<Button
-												type="button"
-												variant="ghost"
-												size="icon"
-												className="h-5 w-5"
-												onClick={(e) => {
-													e.stopPropagation();
-													onChange({ extra_files: state.extra_files?.filter((_, i) => i !== idx) });
-													if (selectedFilePath === file.path) setSelectedFilePath(null);
-												}}
-											>
-												×
-											</Button>
-										</div>
-									</div>
-								))}
-							</div>
 						)}
+					</div>
 
-						{selectedFilePath && (
-							<div className="space-y-2 pt-2">
-								<div className="flex items-center justify-between">
-									<Label className="font-[family-name:var(--font-mono)] text-xs">{selectedFilePath}</Label>
+					{/* File tree */}
+					{(state.skill_md_content || (state.extra_files?.length ?? 0) > 0) && (
+						<div className="border rounded-md divide-y max-h-40 overflow-auto">
+							{state.skill_md_content && (
+								<div
+									className={`flex items-center justify-between px-3 py-1.5 text-sm cursor-pointer hover:bg-muted/50 ${selectedFilePath === "SKILL.md" ? "bg-primary/10" : ""}`}
+									onClick={() => setSelectedFilePath("SKILL.md")}
+								>
+									<span className="flex items-center gap-2">
+										<File className="h-4 w-4 text-muted-foreground" />
+										<span className="font-[family-name:var(--font-mono)] text-xs">SKILL.md</span>
+									</span>
+									<span className="text-xs text-muted-foreground">{(new Blob([state.skill_md_content]).size / 1024).toFixed(1)} KB</span>
+								</div>
+							)}
+							{state.extra_files?.map((file, idx) => (
+								<div
+									key={file.path}
+									className={`flex items-center justify-between px-3 py-1.5 text-sm cursor-pointer hover:bg-muted/50 ${selectedFilePath === file.path ? "bg-primary/10" : ""}`}
+									onClick={() => setSelectedFilePath(file.path)}
+								>
+									<span className="flex items-center gap-2">
+										<File className="h-4 w-4 text-muted-foreground" />
+										<span className="font-[family-name:var(--font-mono)] text-xs truncate">{file.path}</span>
+										{file.executable && <span className="text-[10px] text-green-600 font-medium">exec</span>}
+									</span>
+									<div className="flex items-center gap-2">
+										<span className="text-xs text-muted-foreground">{(new Blob([file.content]).size / 1024).toFixed(1)} KB</span>
+										<Button
+											type="button"
+											variant="ghost"
+											size="icon"
+											className="h-5 w-5"
+											onClick={(e) => {
+												e.stopPropagation();
+												onChange({ extra_files: state.extra_files?.filter((_, i) => i !== idx) });
+												if (selectedFilePath === file.path) setSelectedFilePath(null);
+											}}
+										>
+											<X className="h-3 w-3" />
+										</Button>
+									</div>
+								</div>
+							))}
+						</div>
+					)}
+
+					{/* File editor */}
+					{selectedFilePath && (
+						<div className="space-y-2">
+							<div className="flex items-center justify-between">
+								<Label className="font-[family-name:var(--font-mono)] text-xs">{selectedFilePath}</Label>
+								{selectedFilePath !== "SKILL.md" && (
 									<label className="flex items-center gap-1 text-xs cursor-pointer">
 										<input
 											type="checkbox"
 											checked={state.extra_files?.find((f) => f.path === selectedFilePath)?.executable || false}
-											onChange={(e) =>
-												onChange({
-													extra_files: state.extra_files?.map((f) =>
-														f.path === selectedFilePath ? { ...f, executable: e.target.checked } : f
-													),
-												})
-											}
+											onChange={(e) => onChange({
+												extra_files: state.extra_files?.map((f) =>
+													f.path === selectedFilePath ? { ...f, executable: e.target.checked } : f
+												),
+											})}
 										/>
 										Executable
 									</label>
-								</div>
-								<Textarea
-									value={state.extra_files?.find((f) => f.path === selectedFilePath)?.content || ""}
-									onChange={(e) =>
+								)}
+							</div>
+							<Textarea
+								value={
+									selectedFilePath === "SKILL.md"
+										? state.skill_md_content
+										: state.extra_files?.find((f) => f.path === selectedFilePath)?.content || ""
+								}
+								onChange={(e) => {
+									if (selectedFilePath === "SKILL.md") {
+										onChange({ skill_md_content: e.target.value });
+									} else {
 										onChange({
 											extra_files: state.extra_files?.map((f) =>
 												f.path === selectedFilePath ? { ...f, content: e.target.value } : f
 											),
-										})
+										});
 									}
-									rows={5}
-									className="resize-y font-[family-name:var(--font-mono)] text-xs leading-relaxed"
-									placeholder="File content..."
-								/>
-							</div>
-						)}
+								}}
+								rows={8}
+								className="resize-y font-[family-name:var(--font-mono)] text-xs leading-relaxed"
+								placeholder="File content..."
+							/>
+						</div>
+					)}
 
-						<p className="text-xs text-muted-foreground">
-							Add scripts, templates, and assets. The complete folder is installed atomically.
-						</p>
-					</div>
+					{!state.skill_md_content && (state.extra_files?.length ?? 0) === 0 && (
+						<div className="border-2 border-dashed rounded-md p-6 text-center text-muted-foreground">
+							<FolderUp className="h-8 w-8 mx-auto mb-2 opacity-50" />
+							<p className="text-sm">Upload files or a folder containing SKILL.md</p>
+							<p className="text-xs mt-1">Supports scripts, templates, and assets</p>
+						</div>
+					)}
 				</TabsContent>
 			</Tabs>
 		</div>
@@ -1153,6 +1248,7 @@ function EditFormInner({
 		skill_md_content: (item.skill_md_content as string) ?? "",
 		script_content: (item.script_content as string) ?? "",
 		script_filename: (item.script_filename as string) ?? "",
+		extra_files: (item.extra_files as SkillExtraFile[]) ?? [],
 	};
 	const initialPrompt: PromptFieldState = {
 		category: (item.category as string) ?? "",

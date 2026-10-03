@@ -23,7 +23,7 @@ import {
 } from "@/components/ui/code-editor";
 import { PickerSelect } from "@/components/ui/picker-select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Check, HelpCircle, Info, Loader2, Plus, X } from "lucide-react";
+import { Check, HelpCircle, Info, Loader2, Plus, X, Upload, FolderUp, File, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import type { RegistryType } from "@/lib/api";
 import { useTeams, useWhoami } from "@/hooks/use-api";
@@ -241,7 +241,7 @@ export function SubmitComponentDialog({
 	const [skillScriptFilename, setSkillScriptFilename] = useState(
 		(d?.script_filename as string) ?? "",
 	);
-	const [skillMode, setSkillMode] = useState<"git" | "paste" | "folder">("git");
+	const [skillMode, setSkillMode] = useState<"git" | "paste" | "upload">("git");
 	// Folder mode: extra files beyond SKILL.md
 	const [skillExtraFiles, setSkillExtraFiles] = useState<Array<{ path: string; content: string; executable?: boolean; encoding?: "base64" }>>([]);
 	const [selectedFilePath, setSelectedFilePath] = useState<string | null>(null);
@@ -513,7 +513,7 @@ export function SubmitComponentDialog({
 					if (skillMdContent) skillBody.skill_md_content = skillMdContent;
 					if (skillScriptContent) skillBody.script_content = skillScriptContent;
 					if (skillScriptFilename) skillBody.script_filename = skillScriptFilename;
-				} else if (skillMode === "folder") {
+				} else if (skillMode === "upload") {
 					// Folder mode: SKILL.md + extra files
 					if (skillMdContent) skillBody.skill_md_content = skillMdContent;
 					if (skillExtraFiles.length > 0) skillBody.extra_files = skillExtraFiles;
@@ -1041,11 +1041,11 @@ export function SubmitComponentDialog({
 								/>
 							</div>
 
-							<Tabs value={skillMode} onValueChange={(v) => setSkillMode(v as "git" | "paste" | "folder")} className="w-full">
+							<Tabs value={skillMode} onValueChange={(v) => setSkillMode(v as "git" | "paste" | "upload")} className="w-full">
 								<TabsList className="grid w-full grid-cols-3">
 									<TabsTrigger value="git">Git</TabsTrigger>
-									<TabsTrigger value="paste">Single File</TabsTrigger>
-									<TabsTrigger value="folder">Folder</TabsTrigger>
+									<TabsTrigger value="paste">Paste</TabsTrigger>
+									<TabsTrigger value="upload">Upload</TabsTrigger>
 								</TabsList>
 
 								<TabsContent value="git" className="space-y-3 pt-3">
@@ -1159,83 +1159,223 @@ export function SubmitComponentDialog({
 									</div>
 								</TabsContent>
 
-								<TabsContent value="folder" className="space-y-3 pt-3">
-									<div className="space-y-1.5">
-										<Label htmlFor="folder-skill-md">SKILL.md *</Label>
-										<Textarea
-											id="folder-skill-md"
-											value={skillMdContent}
-											onChange={(e) => {
-												const raw = e.target.value;
-												setSkillMdContent(raw);
-												const fmMatch = raw.match(/^---\r?\n([\s\S]*?)\r?\n---/);
-												if (fmMatch) {
-													const lines = fmMatch[1].split(/\r?\n/);
-													for (const line of lines) {
-														const nm = line.match(/^name:\s*(.+)$/);
-														if (nm && !name) setName(nm[1].trim());
-														const dm = line.match(/^description:\s*["']?(.+?)["']?$/);
-														if (dm && !description) setDescription(dm[1].trim());
+								<TabsContent value="upload" className="space-y-3 pt-3">
+									{/* Hidden file inputs */}
+									<input
+										type="file"
+										id="skill-file-upload"
+										className="hidden"
+										multiple
+										onChange={(e) => {
+											const files = e.target.files;
+											if (!files) return;
+											Array.from(files).forEach((file) => {
+												const reader = new FileReader();
+												reader.onload = () => {
+													const content = reader.result as string;
+													if (file.name === "SKILL.md") {
+														setSkillMdContent(content);
+														// Auto-fill name/description from frontmatter
+														const fmMatch = content.match(/^---\r?\n([\s\S]*?)\r?\n---/);
+														if (fmMatch) {
+															const lines = fmMatch[1].split(/\r?\n/);
+															for (const line of lines) {
+																const nm = line.match(/^name:\s*(.+)$/);
+																if (nm && !name) setName(nm[1].trim());
+																const dm = line.match(/^description:\s*["']?(.+?)["']?$/);
+																if (dm && !description) setDescription(dm[1].trim());
+															}
+														}
+													} else {
+														setSkillExtraFiles((prev) => {
+															const existing = prev.find((f) => f.path === file.name);
+															if (existing) {
+																return prev.map((f) => f.path === file.name ? { ...f, content } : f);
+															}
+															return [...prev, { path: file.name, content }];
+														});
 													}
-												}
-											}}
-											placeholder={`---\nname: my-skill\ndescription: Skill description\n---\n\n## Instructions`}
-											rows={6}
-											className="font-mono text-xs"
-										/>
-									</div>
-									<div className="space-y-1.5">
-										<div className="flex items-center justify-between">
-											<Label>Extra Files ({skillExtraFiles.length})</Label>
+												};
+												reader.readAsText(file);
+											});
+											e.target.value = "";
+										}}
+									/>
+									<input
+										type="file"
+										id="skill-folder-upload"
+										className="hidden"
+										{/* @ts-expect-error webkitdirectory is non-standard but widely supported */}
+										webkitdirectory=""
+										onChange={(e) => {
+											const files = e.target.files;
+											if (!files) return;
+											Array.from(files).forEach((file) => {
+												// Skip hidden files and common excludes
+												const path = file.webkitRelativePath || file.name;
+												if (path.includes("/.git/") || path.includes("/node_modules/") || path.includes("/.venv/") || path.startsWith(".")) return;
+												// Get relative path without the root folder name
+												const parts = path.split("/");
+												const relativePath = parts.slice(1).join("/") || parts[0];
+												if (!relativePath) return;
+												const reader = new FileReader();
+												reader.onload = () => {
+													const content = reader.result as string;
+													if (relativePath === "SKILL.md") {
+														setSkillMdContent(content);
+														const fmMatch = content.match(/^---\r?\n([\s\S]*?)\r?\n---/);
+														if (fmMatch) {
+															const lines = fmMatch[1].split(/\r?\n/);
+															for (const line of lines) {
+																const nm = line.match(/^name:\s*(.+)$/);
+																if (nm && !name) setName(nm[1].trim());
+																const dm = line.match(/^description:\s*["']?(.+?)["']?$/);
+																if (dm && !description) setDescription(dm[1].trim());
+															}
+														}
+													} else {
+														setSkillExtraFiles((prev) => {
+															const existing = prev.find((f) => f.path === relativePath);
+															if (existing) {
+																return prev.map((f) => f.path === relativePath ? { ...f, content } : f);
+															}
+															return [...prev, { path: relativePath, content }];
+														});
+													}
+												};
+												reader.readAsText(file);
+											});
+											e.target.value = "";
+										}}
+									/>
+
+									{/* Upload buttons */}
+									<div className="flex gap-2">
+										<Button
+											type="button"
+											variant="outline"
+											size="sm"
+											onClick={() => document.getElementById("skill-file-upload")?.click()}
+										>
+											<Upload className="h-4 w-4 mr-1" />
+											Upload Files
+										</Button>
+										<Button
+											type="button"
+											variant="outline"
+											size="sm"
+											onClick={() => document.getElementById("skill-folder-upload")?.click()}
+										>
+											<FolderUp className="h-4 w-4 mr-1" />
+											Upload Folder
+										</Button>
+										{(skillMdContent || skillExtraFiles.length > 0) && (
 											<Button
 												type="button"
-												variant="outline"
+												variant="ghost"
 												size="sm"
 												onClick={() => {
-													const path = prompt("Enter file path (e.g., scripts/run.sh):");
-													if (path?.trim()) {
-														setSkillExtraFiles([...skillExtraFiles, { path: path.trim(), content: "" }]);
-														setSelectedFilePath(path.trim());
-													}
+													setSkillMdContent("");
+													setSkillExtraFiles([]);
+													setSelectedFilePath(null);
 												}}
 											>
-												<Plus className="h-4 w-4 mr-1" />
-												Add File
+												<Trash2 className="h-4 w-4 mr-1" />
+												Clear All
 											</Button>
-										</div>
-										{skillExtraFiles.length > 0 && (
-											<div className="border rounded-md divide-y max-h-32 overflow-auto">
-												{skillExtraFiles.map((file, idx) => (
-													<div
-														key={file.path}
-														className={`flex items-center justify-between px-3 py-1.5 text-sm cursor-pointer hover:bg-muted/50 ${selectedFilePath === file.path ? "bg-primary/10" : ""}`}
-														onClick={() => setSelectedFilePath(file.path)}
-													>
-														<span className="font-mono text-xs truncate">{file.path}</span>
-														<div className="flex items-center gap-1">
-															{file.executable && <span className="text-[10px] text-green-600">exec</span>}
-															<Button type="button" variant="ghost" size="icon" className="h-5 w-5" onClick={(e) => { e.stopPropagation(); setSkillExtraFiles(skillExtraFiles.filter((_, i) => i !== idx)); if (selectedFilePath === file.path) setSelectedFilePath(null); }}>
-																<X className="h-3 w-3" />
-															</Button>
-														</div>
-													</div>
-												))}
-											</div>
 										)}
-										{selectedFilePath && (
-											<div className="space-y-1.5 pt-2">
-												<div className="flex items-center justify-between">
-													<Label className="font-mono text-xs">{selectedFilePath}</Label>
+									</div>
+
+									{/* File tree */}
+									{(skillMdContent || skillExtraFiles.length > 0) && (
+										<div className="border rounded-md divide-y max-h-40 overflow-auto">
+											{skillMdContent && (
+												<div
+													className={`flex items-center justify-between px-3 py-1.5 text-sm cursor-pointer hover:bg-muted/50 ${selectedFilePath === "SKILL.md" ? "bg-primary/10" : ""}`}
+													onClick={() => setSelectedFilePath("SKILL.md")}
+												>
+													<span className="flex items-center gap-2">
+														<File className="h-4 w-4 text-muted-foreground" />
+														<span className="font-mono text-xs">SKILL.md</span>
+													</span>
+													<span className="text-xs text-muted-foreground">{(new Blob([skillMdContent]).size / 1024).toFixed(1)} KB</span>
+												</div>
+											)}
+											{skillExtraFiles.map((file, idx) => (
+												<div
+													key={file.path}
+													className={`flex items-center justify-between px-3 py-1.5 text-sm cursor-pointer hover:bg-muted/50 ${selectedFilePath === file.path ? "bg-primary/10" : ""}`}
+													onClick={() => setSelectedFilePath(file.path)}
+												>
+													<span className="flex items-center gap-2">
+														<File className="h-4 w-4 text-muted-foreground" />
+														<span className="font-mono text-xs truncate">{file.path}</span>
+														{file.executable && <span className="text-[10px] text-green-600 font-medium">exec</span>}
+													</span>
+													<div className="flex items-center gap-2">
+														<span className="text-xs text-muted-foreground">{(new Blob([file.content]).size / 1024).toFixed(1)} KB</span>
+														<Button
+															type="button"
+															variant="ghost"
+															size="icon"
+															className="h-5 w-5"
+															onClick={(e) => {
+																e.stopPropagation();
+																setSkillExtraFiles(skillExtraFiles.filter((_, i) => i !== idx));
+																if (selectedFilePath === file.path) setSelectedFilePath(null);
+															}}
+														>
+															<X className="h-3 w-3" />
+														</Button>
+													</div>
+												</div>
+											))}
+										</div>
+									)}
+
+									{/* File editor */}
+									{selectedFilePath && (
+										<div className="space-y-1.5">
+											<div className="flex items-center justify-between">
+												<Label className="font-mono text-xs">{selectedFilePath}</Label>
+												{selectedFilePath !== "SKILL.md" && (
 													<label className="flex items-center gap-1 text-xs cursor-pointer">
-														<input type="checkbox" checked={skillExtraFiles.find(f => f.path === selectedFilePath)?.executable || false} onChange={(e) => setSkillExtraFiles(skillExtraFiles.map(f => f.path === selectedFilePath ? { ...f, executable: e.target.checked } : f))} />
+														<input
+															type="checkbox"
+															checked={skillExtraFiles.find((f) => f.path === selectedFilePath)?.executable || false}
+															onChange={(e) => setSkillExtraFiles(skillExtraFiles.map((f) => f.path === selectedFilePath ? { ...f, executable: e.target.checked } : f))}
+														/>
 														Executable
 													</label>
-												</div>
-												<Textarea value={skillExtraFiles.find(f => f.path === selectedFilePath)?.content || ""} onChange={(e) => setSkillExtraFiles(skillExtraFiles.map(f => f.path === selectedFilePath ? { ...f, content: e.target.value } : f))} rows={5} className="font-mono text-xs" placeholder="File content..." />
+												)}
 											</div>
-										)}
-										<p className="text-xs text-muted-foreground">Add scripts, templates, and assets. The complete folder is installed atomically.</p>
-									</div>
+											<Textarea
+												value={
+													selectedFilePath === "SKILL.md"
+														? skillMdContent
+														: skillExtraFiles.find((f) => f.path === selectedFilePath)?.content || ""
+												}
+												onChange={(e) => {
+													if (selectedFilePath === "SKILL.md") {
+														setSkillMdContent(e.target.value);
+													} else {
+														setSkillExtraFiles(skillExtraFiles.map((f) => f.path === selectedFilePath ? { ...f, content: e.target.value } : f));
+													}
+												}}
+												rows={8}
+												className="font-mono text-xs"
+												placeholder="File content..."
+											/>
+										</div>
+									)}
+
+									{!skillMdContent && skillExtraFiles.length === 0 && (
+										<div className="border-2 border-dashed rounded-md p-6 text-center text-muted-foreground">
+											<FolderUp className="h-8 w-8 mx-auto mb-2 opacity-50" />
+											<p className="text-sm">Upload files or a folder containing SKILL.md</p>
+											<p className="text-xs mt-1">Supports scripts, templates, and assets</p>
+										</div>
+									)}
 								</TabsContent>
 							</Tabs>
 						</>
