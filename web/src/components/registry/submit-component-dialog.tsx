@@ -241,7 +241,10 @@ export function SubmitComponentDialog({
 	const [skillScriptFilename, setSkillScriptFilename] = useState(
 		(d?.script_filename as string) ?? "",
 	);
-	const [skillMode, setSkillMode] = useState<"git" | "paste">("git");
+	const [skillMode, setSkillMode] = useState<"git" | "paste" | "folder">("git");
+	// Folder mode: extra files beyond SKILL.md
+	const [skillExtraFiles, setSkillExtraFiles] = useState<Array<{ path: string; content: string; executable?: boolean; encoding?: "base64" }>>([]);
+	const [selectedFilePath, setSelectedFilePath] = useState<string | null>(null);
 
 	// Auto-discover skill_path from GitHub Trees API when git_url changes
 	const skillDiscoverRef = useRef<ReturnType<typeof setTimeout>>(undefined);
@@ -500,16 +503,20 @@ export function SubmitComponentDialog({
 				const skillBody: Record<string, unknown> = {
 					...base,
 					task_type: taskType,
-					delivery_mode: skillMode === "paste" ? "registry_direct" : "git_fetch",
+					delivery_mode: skillMode === "git" ? "git_fetch" : "registry_direct",
 				};
 				if (skillMode === "git") {
 					skillBody.git_url = skillGitUrl || undefined;
 					skillBody.skill_path = skillPath || "/";
 					if (skillGitRef) skillBody.git_ref = skillGitRef;
-				} else {
+				} else if (skillMode === "paste") {
 					if (skillMdContent) skillBody.skill_md_content = skillMdContent;
 					if (skillScriptContent) skillBody.script_content = skillScriptContent;
 					if (skillScriptFilename) skillBody.script_filename = skillScriptFilename;
+				} else if (skillMode === "folder") {
+					// Folder mode: SKILL.md + extra files
+					if (skillMdContent) skillBody.skill_md_content = skillMdContent;
+					if (skillExtraFiles.length > 0) skillBody.extra_files = skillExtraFiles;
 				}
 				return skillBody;
 			}
@@ -1034,10 +1041,11 @@ export function SubmitComponentDialog({
 								/>
 							</div>
 
-							<Tabs value={skillMode} onValueChange={(v) => setSkillMode(v as "git" | "paste")} className="w-full">
-								<TabsList className="grid w-full grid-cols-2">
-									<TabsTrigger value="git">Git Submit</TabsTrigger>
-									<TabsTrigger value="paste">Registry Submit</TabsTrigger>
+							<Tabs value={skillMode} onValueChange={(v) => setSkillMode(v as "git" | "paste" | "folder")} className="w-full">
+								<TabsList className="grid w-full grid-cols-3">
+									<TabsTrigger value="git">Git</TabsTrigger>
+									<TabsTrigger value="paste">Single File</TabsTrigger>
+									<TabsTrigger value="folder">Folder</TabsTrigger>
 								</TabsList>
 
 								<TabsContent value="git" className="space-y-3 pt-3">
@@ -1148,6 +1156,85 @@ export function SubmitComponentDialog({
 										<p className="text-xs text-muted-foreground">
 											Detected from filename. Use .sh for Bash, .py for Python, or .mjs/.js for JavaScript.
 										</p>
+									</div>
+								</TabsContent>
+
+								<TabsContent value="folder" className="space-y-3 pt-3">
+									<div className="space-y-1.5">
+										<Label htmlFor="folder-skill-md">SKILL.md *</Label>
+										<Textarea
+											id="folder-skill-md"
+											value={skillMdContent}
+											onChange={(e) => {
+												const raw = e.target.value;
+												setSkillMdContent(raw);
+												const fmMatch = raw.match(/^---\r?\n([\s\S]*?)\r?\n---/);
+												if (fmMatch) {
+													const lines = fmMatch[1].split(/\r?\n/);
+													for (const line of lines) {
+														const nm = line.match(/^name:\s*(.+)$/);
+														if (nm && !name) setName(nm[1].trim());
+														const dm = line.match(/^description:\s*["']?(.+?)["']?$/);
+														if (dm && !description) setDescription(dm[1].trim());
+													}
+												}
+											}}
+											placeholder={`---\nname: my-skill\ndescription: Skill description\n---\n\n## Instructions`}
+											rows={6}
+											className="font-mono text-xs"
+										/>
+									</div>
+									<div className="space-y-1.5">
+										<div className="flex items-center justify-between">
+											<Label>Extra Files ({skillExtraFiles.length})</Label>
+											<Button
+												type="button"
+												variant="outline"
+												size="sm"
+												onClick={() => {
+													const path = prompt("Enter file path (e.g., scripts/run.sh):");
+													if (path?.trim()) {
+														setSkillExtraFiles([...skillExtraFiles, { path: path.trim(), content: "" }]);
+														setSelectedFilePath(path.trim());
+													}
+												}}
+											>
+												<Plus className="h-4 w-4 mr-1" />
+												Add File
+											</Button>
+										</div>
+										{skillExtraFiles.length > 0 && (
+											<div className="border rounded-md divide-y max-h-32 overflow-auto">
+												{skillExtraFiles.map((file, idx) => (
+													<div
+														key={file.path}
+														className={`flex items-center justify-between px-3 py-1.5 text-sm cursor-pointer hover:bg-muted/50 ${selectedFilePath === file.path ? "bg-primary/10" : ""}`}
+														onClick={() => setSelectedFilePath(file.path)}
+													>
+														<span className="font-mono text-xs truncate">{file.path}</span>
+														<div className="flex items-center gap-1">
+															{file.executable && <span className="text-[10px] text-green-600">exec</span>}
+															<Button type="button" variant="ghost" size="icon" className="h-5 w-5" onClick={(e) => { e.stopPropagation(); setSkillExtraFiles(skillExtraFiles.filter((_, i) => i !== idx)); if (selectedFilePath === file.path) setSelectedFilePath(null); }}>
+																<X className="h-3 w-3" />
+															</Button>
+														</div>
+													</div>
+												))}
+											</div>
+										)}
+										{selectedFilePath && (
+											<div className="space-y-1.5 pt-2">
+												<div className="flex items-center justify-between">
+													<Label className="font-mono text-xs">{selectedFilePath}</Label>
+													<label className="flex items-center gap-1 text-xs cursor-pointer">
+														<input type="checkbox" checked={skillExtraFiles.find(f => f.path === selectedFilePath)?.executable || false} onChange={(e) => setSkillExtraFiles(skillExtraFiles.map(f => f.path === selectedFilePath ? { ...f, executable: e.target.checked } : f))} />
+														Executable
+													</label>
+												</div>
+												<Textarea value={skillExtraFiles.find(f => f.path === selectedFilePath)?.content || ""} onChange={(e) => setSkillExtraFiles(skillExtraFiles.map(f => f.path === selectedFilePath ? { ...f, content: e.target.value } : f))} rows={5} className="font-mono text-xs" placeholder="File content..." />
+											</div>
+										)}
+										<p className="text-xs text-muted-foreground">Add scripts, templates, and assets. The complete folder is installed atomically.</p>
 									</div>
 								</TabsContent>
 							</Tabs>
