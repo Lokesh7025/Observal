@@ -56,6 +56,44 @@ observal registry version list mcp NAMESPACE/SLUG --output json
 
 Report review status separately from version creation.
 
+## Skill folder version management
+
+Skills with extra files (scripts, templates, assets) use folder-based authoring.
+
+### Submit a folder
+
+```bash
+observal registry skill submit --from-dir ./my-skill --name my-skill --description 'My skill' --output json
+```
+
+### Replace all files in a version
+
+```bash
+observal registry skill replace-files NAMESPACE/SLUG --version-id UUID --from-dir ./my-skill --revision REVISION --output json
+```
+
+### Withdraw a pending version
+
+```bash
+observal registry skill withdraw NAMESPACE/SLUG --version-id UUID --revision REVISION --output json
+```
+
+### Rebase a draft on current approved
+
+```bash
+observal registry skill rebase NAMESPACE/SLUG --version-id DRAFT_UUID --revision DRAFT_REV \
+    --current-version-id APPROVED_UUID --current-revision APPROVED_REV --new-version 1.2.0 --output json
+```
+
+### Export a version to local directory
+
+```bash
+observal registry skill export NAMESPACE/SLUG ./local-dir --output json
+observal registry skill export NAMESPACE/SLUG ./local-dir --version-id UUID --output json
+```
+
+Always use `--output json` for machine-readable responses. Verify revision fields match before mutations.
+
 ## Archive and restore
 
 ```bash

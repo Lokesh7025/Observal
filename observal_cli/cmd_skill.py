@@ -1326,3 +1326,252 @@ def skill_edit(
         output_json(result)
     else:
         rprint(f"[green]✓ Updated {esc(result['name'])}[/green] (status: {esc(result.get('status', 'unknown'))})")
+
+
+# ── Version lifecycle commands ──────────────────────────────────────────────
+
+
+@skill_app.command(name="withdraw")
+def skill_withdraw(
+    skill_id: str = typer.Argument(..., help="Skill ID, name, or @alias"),
+    version_id: str = typer.Option(..., "--version-id", help="Version UUID to withdraw"),
+    revision: str = typer.Option(..., "--revision", help="Observed revision (prevents stale withdrawals)"),
+    output: OutputMode = typer.Option("table", "--output", "-o", help="Output format: table or json"),
+):
+    """Withdraw a pending skill version from review.
+
+    Returns the version to draft status so you can make further edits.
+    Requires the observed revision to prevent withdrawing a version that
+    has changed since you last viewed it.
+
+    Examples:
+        observal registry skill withdraw my-skill --version-id abc123 --revision def456
+    """
+    resolved = client.resolve_registry_reference("skill", skill_id)
+    body = {"observed_revision": revision}
+    withdraw_context = nullcontext() if output == "json" else spinner("Withdrawing version...")
+    with withdraw_context:
+        result = client.post(f"/api/v1/skills/{resolved}/versions/{version_id}/withdraw", body)
+    if output == "json":
+        output_json(result)
+    else:
+        rprint("[green]✓ Version withdrawn[/green] - now in draft status")
+        rprint(f"  Version ID: {esc(version_id)}")
+
+
+@skill_app.command(name="rebase")
+def skill_rebase(
+    skill_id: str = typer.Argument(..., help="Skill ID, name, or @alias"),
+    version_id: str = typer.Option(..., "--version-id", help="Draft version UUID to rebase"),
+    revision: str = typer.Option(..., "--revision", help="Observed revision of your draft"),
+    current_version_id: str = typer.Option(..., "--current-version-id", help="Current approved version UUID"),
+    current_revision: str = typer.Option(..., "--current-revision", help="Observed revision of current approved"),
+    new_version: str = typer.Option(..., "--new-version", "-v", help="New version string after rebase"),
+    output: OutputMode = typer.Option("table", "--output", "-o", help="Output format: table or json"),
+):
+    """Rebase a draft skill version on the current approved version.
+
+    Use this when the approved version has changed since you created your draft.
+    The server reports any conflicts between your changes and the approved changes.
+
+    Examples:
+        observal registry skill rebase my-skill --version-id draft123 --revision abc \\
+            --current-version-id approved456 --current-revision def --new-version 1.3.0
+    """
+    resolved = client.resolve_registry_reference("skill", skill_id)
+    body = {
+        "observed_revision": revision,
+        "current_version_id": current_version_id,
+        "observed_current_revision": current_revision,
+        "new_version": new_version,
+    }
+    rebase_context = nullcontext() if output == "json" else spinner("Rebasing version...")
+    with rebase_context:
+        result = client.post(f"/api/v1/skills/{resolved}/versions/{version_id}/rebase", body)
+    if output == "json":
+        output_json(result)
+    else:
+        conflicts = result.get("conflicts", [])
+        if conflicts:
+            rprint(f"[yellow]⚠ Rebase completed with {len(conflicts)} conflict(s)[/yellow]")
+            for conflict in conflicts:
+                rprint(f"  • {esc(conflict)}")
+        else:
+            rprint("[green]✓ Rebased successfully[/green]")
+        rprint(f"  New version: {esc(new_version)}")
+        rprint(f"  New revision: {esc(result.get('revision', 'unknown'))}")
+
+
+@skill_app.command(name="export")
+def skill_export(
+    skill_id: str = typer.Argument(..., help="Skill ID, name, or @alias"),
+    dest: str = typer.Argument(..., help="Destination directory (must be empty or not exist)"),
+    version_id: str | None = typer.Option(None, "--version-id", help="Specific version UUID (default: latest approved)"),
+    output: OutputMode = typer.Option("table", "--output", "-o", help="Output format: table or json"),
+):
+    """Export a skill version to a local directory.
+
+    Downloads the complete skill folder (SKILL.md and all extra files) and
+    writes them to the specified directory. The destination must be empty
+    or not exist.
+
+    Examples:
+        observal registry skill export my-skill ./my-skill-local
+        observal registry skill export my-skill ./v2 --version-id abc123
+    """
+    dest_path = Path(dest).resolve()
+
+    # Check destination
+    if dest_path.exists():
+        if dest_path.is_file():
+            fail(
+                ErrorCategory.VALIDATION,
+                "Destination is a file, not a directory.",
+                operation="Export skill",
+                resource=str(dest_path),
+                remediation="Choose a different destination path.",
+            )
+        if any(dest_path.iterdir()):
+            fail(
+                ErrorCategory.VALIDATION,
+                "Destination directory is not empty.",
+                operation="Export skill",
+                resource=str(dest_path),
+                remediation="Choose an empty directory or a path that doesn't exist.",
+            )
+
+    resolved = client.resolve_registry_reference("skill", skill_id)
+
+    # Get manifest
+    manifest_context = nullcontext() if output == "json" else spinner("Fetching manifest...")
+    with manifest_context:
+        if version_id:
+            manifest = client.get(f"/api/v1/skills/{resolved}/versions/{version_id}/manifest")
+        else:
+            # Get latest approved version
+            listing = client.get(f"/api/v1/skills/{resolved}")
+            latest_version_id = listing.get("latest_version_id")
+            if not latest_version_id:
+                fail(
+                    ErrorCategory.NOT_FOUND,
+                    "No approved version found for this skill.",
+                    operation="Export skill",
+                    resource=skill_id,
+                    remediation="Specify a version ID or wait for approval.",
+                )
+            manifest = client.get(f"/api/v1/skills/{resolved}/versions/{latest_version_id}/manifest")
+            version_id = latest_version_id
+
+    files = manifest.get("files", [])
+    if not files:
+        fail(
+            ErrorCategory.UNAVAILABLE,
+            "No files found in skill version manifest.",
+            operation="Export skill",
+            resource=skill_id,
+            remediation="The skill version may be empty or inaccessible.",
+        )
+
+    # Create destination
+    dest_path.mkdir(parents=True, exist_ok=True)
+
+    # Download and write each file
+    written_files: list[str] = []
+    download_context = nullcontext() if output == "json" else spinner(f"Downloading {len(files)} files...")
+    with download_context:
+        for file_info in files:
+            file_path = file_info["path"]
+            # Fetch file content
+            file_content = client.get(
+                f"/api/v1/skills/{resolved}/versions/{version_id}/files/{file_path}"
+            )
+
+            # Write file
+            local_path = dest_path / file_path
+            local_path.parent.mkdir(parents=True, exist_ok=True)
+
+            content = file_content.get("content", "")
+            if file_content.get("encoding") == "base64":
+                import base64
+                local_path.write_bytes(base64.b64decode(content))
+            else:
+                local_path.write_text(content, encoding="utf-8")
+
+            # Set executable bit if needed
+            if file_info.get("mode") == "0755":
+                import os
+                os.chmod(local_path, 0o755)
+
+            written_files.append(file_path)
+
+    if output == "json":
+        output_json({
+            "skill_id": resolved,
+            "version_id": version_id,
+            "destination": str(dest_path),
+            "files": written_files,
+        })
+    else:
+        rprint(f"[green]✓ Exported {len(written_files)} files to {esc(str(dest_path))}[/green]")
+        for f in written_files:
+            rprint(f"  • {esc(f)}")
+
+
+@skill_app.command(name="replace-files")
+def skill_replace_files(
+    skill_id: str = typer.Argument(..., help="Skill ID, name, or @alias"),
+    version_id: str = typer.Option(..., "--version-id", help="Version UUID to update"),
+    from_dir: str = typer.Option(..., "--from-dir", help="Directory containing new files"),
+    revision: str = typer.Option(..., "--revision", help="Observed revision (prevents stale updates)"),
+    exclude: list[str] | None = typer.Option(None, "--exclude", help="Paths to exclude (repeatable)"),
+    output: OutputMode = typer.Option("table", "--output", "-o", help="Output format: table or json"),
+):
+    """Replace all files in a skill version with contents from a directory.
+
+    This is a complete replacement - files not in the source directory will
+    be deleted from the version. Use for updating a draft after local edits.
+
+    Examples:
+        observal registry skill replace-files my-skill --version-id abc123 \\
+            --from-dir ./my-skill --revision def456
+    """
+    source_dir = Path(from_dir).resolve()
+
+    # Capture directory
+    capture_context = nullcontext() if output == "json" else spinner("Capturing directory...")
+    with capture_context:
+        try:
+            snapshot = capture_directory(source_dir, exclude=exclude or [])
+        except DirectoryCaptureError as e:
+            fail(
+                ErrorCategory.VALIDATION,
+                f"Cannot capture directory: {e}",
+                operation="Replace skill files",
+                resource=str(source_dir),
+                remediation="Fix the reported issue and retry.",
+            )
+
+    # Show warnings
+    if output != "json" and snapshot.warnings:
+        for warning in snapshot.warnings:
+            rprint(f"[yellow]Warning:[/yellow] {esc(warning)}")
+
+    resolved = client.resolve_registry_reference("skill", skill_id)
+    body = {
+        "observed_revision": revision,
+        "skill_md_content": snapshot.skill_md_content,
+        "extra_files": snapshot_to_extra_files(snapshot),
+    }
+
+    replace_context = nullcontext() if output == "json" else spinner("Replacing files...")
+    with replace_context:
+        result = client.put(f"/api/v1/skills/{resolved}/versions/{version_id}/files", body)
+
+    if output == "json":
+        output_json(result)
+    else:
+        rprint("[green]✓ Files replaced[/green]")
+        rprint(f"  Files: {len(snapshot.extra_files) + 1}")
+        rprint(f"  New revision: {esc(result.get('revision', 'unknown'))}")
+        if snapshot.excluded_paths:
+            rprint(f"  Excluded: {len(snapshot.excluded_paths)} paths")
