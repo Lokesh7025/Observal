@@ -923,8 +923,7 @@ function SkillFields({
 						type="file"
 						id="skill-edit-folder-upload"
 						className="hidden"
-						{/* @ts-expect-error webkitdirectory is non-standard but widely supported */}
-						webkitdirectory=""
+						{...({ webkitdirectory: "" } as React.InputHTMLAttributes<HTMLInputElement>)}
 						onChange={(e) => {
 							const files = e.target.files;
 							if (!files) return;
