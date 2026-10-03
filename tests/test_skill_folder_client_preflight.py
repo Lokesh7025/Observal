@@ -15,6 +15,7 @@ from observal_cli import cmd_pull
 from observal_cli.cmd_pull import write_install_snippet
 from observal_cli.errors import CliError
 from observal_cli.main import app
+from observal_cli.skill_folder import BundleInstallError, install_folder_bundle, validate_bundle
 
 FIXTURE = Path(__file__).parent / "fixtures" / "skill_folder_install_contract.json"
 
@@ -49,7 +50,7 @@ def test_skill_export_verifies_binary_attachment_before_atomic_write(tmp_path, m
     listing_id = "1" * 32
     version_id = "2" * 32
     skill_md = b"---\nname: exported\ndescription: test\n---\n"
-    icon = b"\\x00\\xffimage"
+    icon = bytes([0, 255]) + b"image"
     files = [
         {"path": path, "size": len(body), "sha256": hashlib.sha256(body).hexdigest(), "mode": "0644"}
         for path, body in [("SKILL.md", skill_md), ("assets/icon.bin", icon)]
@@ -130,6 +131,45 @@ def test_complete_folder_is_written_before_agent_activation(tmp_path, monkeypatc
     assert failed == []
     assert observed
     assert any(status == "installed (complete folder)" for _, status in written)
+
+
+def test_stage_integrity_detects_same_size_file_corruption(tmp_path, monkeypatch):
+    bundle = validate_bundle(_agent_install()["skill_bundles"][0])
+    original_write = Path.write_bytes
+
+    def corrupt_stage_file(path, content):
+        if path.name == "SKILL.md" and ".stage." in str(path):
+            content = b"X" + content[1:]
+        return original_write(path, content)
+
+    monkeypatch.setattr(Path, "write_bytes", corrupt_stage_file)
+    target = tmp_path / "installed-skill"
+    with pytest.raises(BundleInstallError):
+        install_folder_bundle(bundle, target)
+    assert not target.exists()
+    assert not list(tmp_path.glob(".installed-skill.stage.*"))
+
+
+def test_duplicate_bundle_destination_refuses_before_any_folder_write(tmp_path):
+    response = _agent_install()
+    snippet = response["config_snippet"]
+    snippet["skill_components"].append(dict(snippet["skill_components"][0]))
+    target = tmp_path / ".pi" / "agents" / "example-agent" / "skills" / "example"
+
+    with pytest.raises(CliError):
+        write_install_snippet(
+            snippet,
+            harness="pi",
+            adapter=MagicMock(),
+            target_dir=tmp_path,
+            agent_id=response["agent_id"],
+            is_user_scope=False,
+            skill_bundles=response["skill_bundles"],
+            lock=response["lock"],
+        )
+
+    assert not target.exists(), "All bundle destination conflicts must fail before any folder is written"
+    assert not (tmp_path / "AGENTS.md").exists()
 
 
 def test_existing_skill_refuses_before_any_agent_config_write(tmp_path):

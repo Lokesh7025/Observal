@@ -1359,6 +1359,7 @@ def write_install_snippet(
         )
     from observal_cli.skill_folder import detect_destination_collisions
 
+    planned_destinations: set[str] = set()
     for skill in skill_components:
         version_id = skill.get("bundle_version_id")
         if not version_id:
@@ -1373,6 +1374,18 @@ def write_install_snippet(
                 remediation="Refresh the Agent installation; do not activate an inconsistent folder.",
             )
         destination = _resolve_path(skill["path"], target_dir, allow_home=is_user_scope)
+        # Two not-yet-written bundles can target the same folder. Check the
+        # entire plan before installing the first one or writing activation.
+        destination_key = str(destination.parent).casefold()
+        if destination_key in planned_destinations:
+            fail(
+                ErrorCategory.CONFLICT,
+                "Multiple Agent skill bundles target one folder.",
+                operation="Pull agent",
+                resource=str(destination.parent),
+                remediation="Repair the Agent's pinned skill list; no folder was installed.",
+            )
+        planned_destinations.add(destination_key)
         if destination.name != "SKILL.md" or detect_destination_collisions(destination.parent, validated):
             fail(
                 ErrorCategory.CONFLICT,

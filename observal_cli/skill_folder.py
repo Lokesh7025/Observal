@@ -8,7 +8,7 @@ This module implements secure installation of complete skill folders from the
 registry. It validates all bundle metadata, verifies file integrity, stages
 files atomically, and handles collision detection.
 
-Security requirements (per implementation-1730.md):
+Security requirements for complete-folder delivery:
 - Validate complete response before ANY destination write
 - Require exactly one SKILL.md per bundle
 - All file version IDs must equal selected version UUID
@@ -495,6 +495,8 @@ def install_folder_bundle(
                 raise BundleInstallError(f"Staged file missing: {file.path}")
             if staged_file.stat().st_size != file.size:
                 raise BundleInstallError(f"Staged file size mismatch: {file.path}")
+            if hashlib.sha256(staged_file.read_bytes()).hexdigest() != file.sha256:
+                raise BundleInstallError(f"Staged file content mismatch: {file.path}")
             actual_mode = stat.S_IMODE(staged_file.stat().st_mode)
             if actual_mode != file.mode:
                 raise BundleInstallError(f"Staged file mode mismatch: {file.path}")
