@@ -40,6 +40,16 @@ from observal_cli.render import (
     status_badge,
 )
 from observal_cli.shared.utils import sanitize_name as _sanitize_name
+from observal_cli.skill_folder import (
+    SUPPORTED_FEATURE as SKILL_FOLDER_FEATURE,
+)
+from observal_cli.skill_folder import (
+    BundleInstallError,
+    BundleValidationError,
+    detect_destination_collisions,
+    install_folder_bundle,
+    validate_bundle,
+)
 
 skill_app = typer.Typer(
     help=(
@@ -679,7 +689,13 @@ def skill_install(
     )
     install_context = nullcontext() if machine_output else spinner(f"Generating {harness} config...")
     with install_context:
-        install_body = {"harness": harness, "scope": scope, "local_name": local_name}
+        install_body = {
+            "harness": harness,
+            "scope": scope,
+            "local_name": local_name,
+            # Advertise folder bundle support for complete skill folders
+            "supported_features": [SKILL_FOLDER_FEATURE],
+        }
         if version:
             install_body["version"] = version
         result = client.post_public(f"/api/v1/skills/{resolved}/install", install_body)
@@ -700,11 +716,25 @@ def skill_install(
         )
 
     installed_path: Path | None = None
+    bundle_response = result.get("bundle")
+
     if not no_write:
         write_context = redirect_stdout(StringIO()) if output == "json" else nullcontext()
         with write_context:
             delivery_mode = skill_info.get("delivery_mode", "git_fetch")
-            if delivery_mode == "registry_direct":
+
+            # Complete folder bundle from server (registry_direct with extra files)
+            if bundle_response and isinstance(bundle_response, dict) and bundle_response.get("files"):
+                installed_path = _install_complete_folder_bundle(
+                    bundle_response=bundle_response,
+                    result=result,
+                    harness=harness,
+                    scope=scope,
+                    skill_id=skill_id,
+                    output=output,
+                )
+            elif delivery_mode == "registry_direct":
+                # Legacy single-file registry_direct (SKILL.md + optional script)
                 installed_path = install_skill_registry_direct(
                     name=skill_info.get("name", "skill"),
                     skill_md_content=skill_info.get("skill_md_content"),
@@ -714,6 +744,7 @@ def skill_install(
                     scope=scope,
                 )
             else:
+                # Git-fetch delivery mode
                 installed_path = install_skill_from_git(
                     name=skill_info.get("name", "skill"),
                     git_url=skill_info.get("git_url"),
@@ -786,6 +817,111 @@ def skill_install(
 
     rprint(f"\n[bold]Config for {esc(harness)}:[/bold]\n")
     console.print_json(_json.dumps(snippet, indent=2))
+
+
+def _install_complete_folder_bundle(
+    *,
+    bundle_response: dict,
+    result: dict,
+    harness: str,
+    scope: str,
+    skill_id: str,
+    output: OutputMode,
+) -> Path | None:
+    """Install a complete skill folder bundle from server response.
+
+    This handles skills with extra_files (multiple files beyond SKILL.md).
+    Validates all files, checks for collisions, and atomically installs.
+
+    Args:
+        bundle_response: The bundle dict from server response
+        result: Full install response for version info
+        harness: Target harness
+        scope: Install scope (user or project)
+        skill_id: Original skill identifier for error messages
+        output: Output mode for controlling print behavior
+
+    Returns:
+        Path to installed SKILL.md, or None on failure
+    """
+    machine_output = output == "json"
+
+    # Validate the bundle before any filesystem operations
+    try:
+        validated = validate_bundle(
+            bundle_response,
+            expected_version_id=result.get("version_id"),
+            expected_digest=result.get("digest"),
+        )
+    except BundleValidationError as e:
+        if not machine_output:
+            rprint(f"[red]✗ Bundle validation failed:[/red] {esc(str(e))}")
+        fail(
+            ErrorCategory.VALIDATION,
+            "The skill bundle from the registry is invalid.",
+            operation="Install skill",
+            resource=skill_id,
+            remediation="The server returned corrupted or tampered data. Report this issue.",
+            detail=str(e),
+        )
+        return None  # unreachable but helps type checker
+
+    # Determine target directory
+    if scope == "user":
+        target_dir = _user_skill_dest(harness, validated.folder_name)
+    else:
+        base = Path.cwd() / ".agents" / "skills"
+        target_dir = base / validated.folder_name
+        if not _is_path_safe(target_dir, base):
+            if not machine_output:
+                rprint(f"[red]✗ Unsafe folder name (path traversal):[/red] {esc(repr(validated.folder_name))}")
+            fail(
+                ErrorCategory.VALIDATION,
+                "The skill folder name is unsafe.",
+                operation="Install skill",
+                resource=skill_id,
+                remediation="The skill has an invalid folder name. Report this issue.",
+            )
+            return None
+
+    # Check for collisions
+    collisions = detect_destination_collisions(target_dir, validated)
+    if collisions:
+        if not machine_output:
+            rprint("[yellow]⚠ Destination conflicts detected:[/yellow]")
+            for collision in collisions:
+                rprint(f"  • {esc(collision)}")
+            rprint("[dim]Use --force to overwrite (not yet implemented).[/dim]")
+        # For now, fail on collision - the plan mentions backup/recovery UX needs design
+        fail(
+            ErrorCategory.CONFLICT,
+            "The skill destination conflicts with existing files.",
+            operation="Install skill",
+            resource=str(target_dir),
+            remediation="Remove the existing skill or choose a different destination.",
+        )
+        return None
+
+    # Install the bundle
+    try:
+        installed_path = install_folder_bundle(validated, target_dir, force=False)
+        if not machine_output:
+            rprint(f"[green]✓ Installed skill folder:[/green] {esc(str(target_dir))}")
+            rprint(f"  Files: {len(validated.files)}")
+            rprint(f"  Size: {validated.total_size:,} bytes")
+        return installed_path
+    except BundleInstallError as e:
+        if not machine_output:
+            rprint(f"[red]✗ Installation failed:[/red] {esc(str(e))}")
+        fail(
+            ErrorCategory.UNAVAILABLE,
+            "The skill folder could not be written.",
+            operation="Install skill",
+            resource=str(target_dir),
+            remediation="Check filesystem permissions and disk space, then retry.",
+            detail=str(e),
+        )
+        return None
 
 
 # Harness config dirs to check for symlinking (canonical name → dir name)

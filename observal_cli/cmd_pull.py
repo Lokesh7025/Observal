@@ -1244,12 +1244,19 @@ def write_install_snippet(
     is_user_scope: bool,
     dry_run: bool = False,
     quiet: bool = False,
+    skill_bundles: list[dict] | None = None,
+    lock: dict | None = None,
 ) -> tuple[list[tuple[str, str]], list[str]]:
     """Write every file an agent install snippet carries under *target_dir*.
 
     Shared by ``observal agent pull`` and delegation, which materializes an
     agent into a throwaway worktree. Returns ``(written, failed_skills)``;
     setup commands and install tracking stay with the caller.
+
+    When *skill_bundles* is provided (complete folder installs), bundles are
+    matched with skill_components by bundle_version_id and installed using
+    the folder bundle installer. Legacy components without a matching bundle
+    fall back to git or single-file registry_direct installs.
     """
     written: list[tuple[str, str]] = []  # (path, status)
 
@@ -1396,26 +1403,72 @@ def write_install_snippet(
             written.append((str(p), status))
 
     # ── Skills ────────────────────────────────────
-    # Two install modes:
-    #   1. git_url present → clone full skill directory from git
-    #   2. skill_md_content present (registry_direct) → write SKILL.md + optional script
+    # Three install modes:
+    #   1. skill_bundles present → complete folder bundle from server
+    #   2. git_url present → clone full skill directory from git
+    #   3. skill_md_content present (registry_direct) → write SKILL.md + optional script
     from observal_cli.cmd_skill import _sanitize_name, install_skill_from_git, install_skill_registry_direct
 
     skill_components = snippet.get("skill_components") or []
     failed_skills: list[str] = []
     scope_str = "user" if is_user_scope else "project"
+
+    # Build a lookup for skill bundles by version_id
+    bundle_by_version_id: dict[str, dict] = {}
+    if skill_bundles:
+        for bundle in skill_bundles:
+            vid = bundle.get("version_id")
+            if vid:
+                bundle_by_version_id[str(vid)] = bundle
+
+    # Build lock component lookup for digest verification
+    lock_component_by_id: dict[str, dict] = {}
+    if lock and lock.get("components"):
+        for lc in lock["components"]:
+            if lc.get("type") == "skill" and lc.get("id"):
+                lock_component_by_id[str(lc["id"])] = lc
+
     for sc in skill_components:
         sc_name = _sanitize_name(sc.get("name", "skill"))
         git_url = sc.get("git_url")
+        bundle_version_id = sc.get("bundle_version_id")
         skill_dest = None
         if sc.get("path"):
             skill_dest = _resolve_path(sc["path"], target_dir, allow_home=is_user_scope).parent
 
+        # Check if we have a complete bundle for this skill
+        bundle = bundle_by_version_id.get(str(bundle_version_id)) if bundle_version_id else None
+
         if dry_run:
-            mode = "would clone" if git_url else "would write"
+            if bundle:
+                mode = "would install (complete folder)"
+            elif git_url:
+                mode = "would clone"
+            else:
+                mode = "would write"
             written.append((str(skill_dest) if skill_dest else f"<skill:{sc_name}>", mode))
             continue
 
+        # Priority 1: Complete folder bundle
+        if bundle and bundle.get("files"):
+            result_path = _install_skill_bundle(
+                sc_name=sc_name,
+                bundle=bundle,
+                lock_component=lock_component_by_id.get(str(sc.get("listing_id") or "")),
+                skill_dest=skill_dest,
+                target_dir=target_dir,
+                is_user_scope=is_user_scope,
+                quiet=quiet,
+            )
+            if result_path:
+                written.append((str(result_path), "installed (complete folder)"))
+            else:
+                failed_skills.append(sc_name)
+                if not quiet:
+                    rprint(f"[red]✗ Failed to install skill '{esc(sc_name)}'.[/red] Bundle installation failed.")
+            continue
+
+        # Priority 2: Git clone
         if git_url:
             result_path = tracked_skill_install(
                 sc_name,
@@ -1436,10 +1489,10 @@ def write_install_snippet(
                 failed_skills.append(sc_name)
                 if not quiet:
                     rprint(
-                        f"[red]\u2717 Failed to install skill '{esc(sc_name)}'.[/red] Clone from {esc(git_url)} failed."
+                        f"[red]✗ Failed to install skill '{esc(sc_name)}'.[/red] Clone from {esc(git_url)} failed."
                     )
         else:
-            # Registry direct: SKILL.md content + optional script
+            # Priority 3: Registry direct (SKILL.md + optional script)
             result_path = tracked_skill_install(
                 sc_name,
                 install_skill_registry_direct,
@@ -1457,9 +1510,92 @@ def write_install_snippet(
             else:
                 failed_skills.append(sc_name)
                 if not quiet:
-                    rprint(f"[red]\u2717 Failed to install skill '{esc(sc_name)}'.[/red] No content available.")
+                    rprint(f"[red]✗ Failed to install skill '{esc(sc_name)}'.[/red] No content available.")
 
     return written, failed_skills
+
+
+def _install_skill_bundle(
+    *,
+    sc_name: str,
+    bundle: dict,
+    lock_component: dict | None,
+    skill_dest: Path | None,
+    target_dir: Path,
+    is_user_scope: bool,
+    quiet: bool,
+) -> Path | None:
+    """Install a complete skill folder bundle for an agent.
+
+    Args:
+        sc_name: Skill name for error messages
+        bundle: Complete folder bundle from server
+        lock_component: Lock component for digest verification (optional)
+        skill_dest: Explicit destination from skill_component path (optional)
+        target_dir: Project directory
+        is_user_scope: Whether this is a user-scope install
+        quiet: Suppress output
+
+    Returns:
+        Path to installed SKILL.md, or None on failure
+    """
+    from observal_cli.cmd_skill import _is_path_safe, _user_skill_dest
+    from observal_cli.skill_folder import (
+        BundleInstallError,
+        BundleValidationError,
+        detect_destination_collisions,
+        install_folder_bundle,
+        validate_bundle,
+    )
+
+    # Validate bundle with optional digest verification from lock
+    expected_digest = lock_component.get("digest") if lock_component else None
+    try:
+        validated = validate_bundle(
+            bundle,
+            expected_version_id=bundle.get("version_id"),
+            expected_digest=expected_digest,
+        )
+    except BundleValidationError as e:
+        if not quiet:
+            rprint(f"[red]✗ Bundle validation failed for '{esc(sc_name)}':[/red] {esc(str(e))}")
+        return None
+
+    # Determine target directory
+    if skill_dest:
+        final_dest = skill_dest
+    elif is_user_scope:
+        # User scope: use the default user skill path
+        final_dest = _user_skill_dest("claude-code", validated.folder_name)  # TODO: use actual harness
+    else:
+        # Project scope: use the path from skill_file_path
+        base = target_dir / ".agents" / "skills"
+        final_dest = base / validated.folder_name
+        if not _is_path_safe(final_dest, base):
+            if not quiet:
+                rprint(f"[red]✗ Unsafe folder name for '{esc(sc_name)}':[/red] {esc(repr(validated.folder_name))}")
+            return None
+
+    # Check for collisions
+    collisions = detect_destination_collisions(final_dest, validated)
+    if collisions and not quiet:
+        rprint(f"[yellow]⚠ Destination conflicts for '{esc(sc_name)}':[/yellow]")
+        for collision in collisions:
+            rprint(f"  • {esc(collision)}")
+        # For agent installs, we'll overwrite since we're managing the agent folder
+        # This differs from standalone skill install which is more cautious
+
+    # Install the bundle
+    try:
+        installed_path = install_folder_bundle(validated, final_dest, force=True)
+        if not quiet:
+            rprint(f"[green]✓ Installed skill folder:[/green] {esc(str(final_dest))}")
+            rprint(f"  Files: {len(validated.files)}, Size: {validated.total_size:,} bytes")
+        return installed_path
+    except BundleInstallError as e:
+        if not quiet:
+            rprint(f"[red]✗ Installation failed for '{esc(sc_name)}':[/red] {esc(str(e))}")
+        return None
 
 
 def register_pull(app: typer.Typer):
@@ -1729,12 +1865,16 @@ def register_pull(app: typer.Typer):
         )
 
         with _progress(output, f"Pulling {harness} config for agent {resolved[:8]}..."):
+            from observal_cli.skill_folder import SUPPORTED_FEATURE as SKILL_FOLDER_FEATURE
+
             install_body: dict = {
                 "harness": harness,
                 "env_values": env_values,
                 "header_values": header_values,
                 "options": options,
                 "platform": sys.platform,
+                # Advertise complete skill folder support
+                "supported_features": [SKILL_FOLDER_FEATURE],
             }
             if version:
                 install_body["version"] = version
@@ -1792,7 +1932,6 @@ def register_pull(app: typer.Typer):
             )
 
         snippet = rewrite_observal_interpreter(snippet)
-
         def disclose_telemetry() -> None:
             if output != "json" and not dry_run:
                 server_url = config.load().get("server_url") or "the Observal server"
@@ -1811,6 +1950,8 @@ def register_pull(app: typer.Typer):
                 is_user_scope=is_user_scope,
                 dry_run=dry_run,
                 quiet=output == "json",
+                skill_bundles=result.get("skill_bundles"),
+                lock=lock,
             )
         except CliError as error:
             # A failed write can also leave a pre-existing hook active when
