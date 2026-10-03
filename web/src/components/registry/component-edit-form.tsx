@@ -80,6 +80,12 @@ interface HookFieldState {
 	script_filename: string;
 }
 
+interface SkillExtraFile {
+	path: string;
+	content: string;
+	executable?: boolean;
+}
+
 interface SkillFieldState {
 	task_type: string;
 	skill_path: string;
@@ -89,6 +95,7 @@ interface SkillFieldState {
 	skill_md_content: string;
 	script_content: string;
 	script_filename: string;
+	extra_files: SkillExtraFile[];
 }
 
 interface PromptFieldState {
@@ -759,7 +766,8 @@ function SkillFields({
 }) {
 	const scriptLanguage = codeLanguageFromFilename(state.script_filename);
 	const scriptLanguageName = codeLanguageLabel(scriptLanguage);
-	const defaultTab = state.git_url ? "git" : "paste";
+	const [selectedFilePath, setSelectedFilePath] = useState<string | null>(null);
+	const defaultTab = state.extra_files?.length > 0 ? "folder" : state.git_url ? "git" : "paste";
 
 	return (
 		<div className="space-y-4">
@@ -790,9 +798,10 @@ function SkillFields({
 			</div>
 
 			<Tabs defaultValue={defaultTab} className="w-full">
-				<TabsList>
-					<TabsTrigger value="git">Git source</TabsTrigger>
-					<TabsTrigger value="paste">Pasted files</TabsTrigger>
+				<TabsList className="grid w-full grid-cols-3">
+					<TabsTrigger value="git">Git</TabsTrigger>
+					<TabsTrigger value="paste">Single File</TabsTrigger>
+					<TabsTrigger value="folder">Folder</TabsTrigger>
 				</TabsList>
 
 				<TabsContent value="git" className="space-y-4 pt-4">
@@ -876,6 +885,112 @@ function SkillFields({
 						/>
 						<p className="text-xs text-muted-foreground">
 							Detected from filename. Use .sh for Bash, .py for Python, or .mjs/.js for JavaScript.
+						</p>
+					</div>
+				</TabsContent>
+
+				<TabsContent value="folder" className="space-y-4 pt-4">
+					<div className="space-y-2">
+						<Label htmlFor="folder-skill-md" className="text-sm font-medium">
+							SKILL.md *
+						</Label>
+						<Textarea
+							id="folder-skill-md"
+							value={state.skill_md_content}
+							onChange={(e) => onChange({ skill_md_content: e.target.value })}
+							placeholder="---\nname: my-skill\ndescription: Skill description\n---\n\n## Instructions"
+							rows={6}
+							className="resize-y font-[family-name:var(--font-mono)] text-xs leading-relaxed"
+						/>
+					</div>
+
+					<div className="space-y-2">
+						<div className="flex items-center justify-between">
+							<Label className="text-sm font-medium">Extra Files ({state.extra_files?.length || 0})</Label>
+							<Button
+								type="button"
+								variant="outline"
+								size="sm"
+								onClick={() => {
+									const path = prompt("Enter file path (e.g., scripts/run.sh):");
+									if (path?.trim()) {
+										const newFiles = [...(state.extra_files || []), { path: path.trim(), content: "" }];
+										onChange({ extra_files: newFiles });
+										setSelectedFilePath(path.trim());
+									}
+								}}
+							>
+								Add File
+							</Button>
+						</div>
+
+						{(state.extra_files?.length ?? 0) > 0 && (
+							<div className="border rounded-md divide-y max-h-32 overflow-auto">
+								{state.extra_files?.map((file, idx) => (
+									<div
+										key={file.path}
+										className={`flex items-center justify-between px-3 py-1.5 text-sm cursor-pointer hover:bg-muted/50 ${selectedFilePath === file.path ? "bg-primary/10" : ""}`}
+										onClick={() => setSelectedFilePath(file.path)}
+									>
+										<span className="font-[family-name:var(--font-mono)] text-xs truncate">{file.path}</span>
+										<div className="flex items-center gap-1">
+											{file.executable && <span className="text-[10px] text-green-600">exec</span>}
+											<Button
+												type="button"
+												variant="ghost"
+												size="icon"
+												className="h-5 w-5"
+												onClick={(e) => {
+													e.stopPropagation();
+													onChange({ extra_files: state.extra_files?.filter((_, i) => i !== idx) });
+													if (selectedFilePath === file.path) setSelectedFilePath(null);
+												}}
+											>
+												×
+											</Button>
+										</div>
+									</div>
+								))}
+							</div>
+						)}
+
+						{selectedFilePath && (
+							<div className="space-y-2 pt-2">
+								<div className="flex items-center justify-between">
+									<Label className="font-[family-name:var(--font-mono)] text-xs">{selectedFilePath}</Label>
+									<label className="flex items-center gap-1 text-xs cursor-pointer">
+										<input
+											type="checkbox"
+											checked={state.extra_files?.find((f) => f.path === selectedFilePath)?.executable || false}
+											onChange={(e) =>
+												onChange({
+													extra_files: state.extra_files?.map((f) =>
+														f.path === selectedFilePath ? { ...f, executable: e.target.checked } : f
+													),
+												})
+											}
+										/>
+										Executable
+									</label>
+								</div>
+								<Textarea
+									value={state.extra_files?.find((f) => f.path === selectedFilePath)?.content || ""}
+									onChange={(e) =>
+										onChange({
+											extra_files: state.extra_files?.map((f) =>
+												f.path === selectedFilePath ? { ...f, content: e.target.value } : f
+											),
+										})
+									}
+									rows={5}
+									className="resize-y font-[family-name:var(--font-mono)] text-xs leading-relaxed"
+									placeholder="File content..."
+								/>
+							</div>
+						)}
+
+						<p className="text-xs text-muted-foreground">
+							Add scripts, templates, and assets. The complete folder is installed atomically.
 						</p>
 					</div>
 				</TabsContent>
