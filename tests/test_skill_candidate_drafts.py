@@ -81,6 +81,7 @@ async def test_authoritative_approved_base_is_owner_only_and_ignores_pending_poi
             base = await skill_files.get_skill_approved_base(str(listing_id), response, db, owner)
             assert base["version_id"] == str(approved_id)
             assert base["delivery_mode"] == "registry_direct"
+            assert base["import_required"] is False
             assert len(base["revision"]) == 64
             assert response.headers["cache-control"] == "no-store"
     finally:
@@ -111,6 +112,7 @@ async def test_atomic_folder_import_preserves_old_release_and_refuses_stale_base
             owner = await db.get(User, owner_id)
             stranger = await db.get(User, stranger_id)
             base = await skill_files.get_skill_approved_base(str(listing_id), Response(), db, owner)
+            assert base["import_required"] is True
             req = SkillFolderImportDraftRequest(
                 base_version_id=old_id,
                 observed_base_revision=base["revision"],

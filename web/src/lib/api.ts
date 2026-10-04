@@ -34,6 +34,8 @@ import type {
 	ReviewItem,
 	SkillFolderDraftRequest,
 	SkillVersionManifest,
+	SkillApprovedBase,
+	SkillSuccessorRequest,
 	SkillFileContents,
 	SkillBinaryContents,
 	RegistryItem,
@@ -572,6 +574,13 @@ export const registry = {
 	) => post<ComponentVersionDetail>(`/${type}/${listingId}/versions`, body),
 	componentVersionSuggestions: (type: RegistryType, listingId: string) =>
 		get<VersionSuggestions>(`/${type}/${listingId}/version-suggestions`),
+	getSkillApprovedBase: (listingId: string) =>
+		get<SkillApprovedBase>(`/skills/${listingId}/approved-base`),
+	forkSkillVersion: (listingId: string, body: SkillSuccessorRequest) =>
+		post<SkillVersionManifest>(`/skills/${listingId}/drafts`, body),
+	importSkillFolder: (listingId: string, body: SkillSuccessorRequest & {
+		skill_md_content: string; extra_files: SkillFolderDraftRequest["extra_files"];
+	}) => post<SkillVersionManifest>(`/skills/${listingId}/folder-import-drafts`, body),
 	getSkillVersionManifest: (listingId: string, versionId: string) =>
 		get<SkillVersionManifest>(`/skills/${listingId}/versions/${versionId}/manifest`),
 	updateSkillVersionDraft: (listingId: string, versionId: string, body: unknown) =>

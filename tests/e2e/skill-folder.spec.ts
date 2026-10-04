@@ -184,6 +184,28 @@ test("gated reviewer and installer compare exact candidate with reviewed base", 
 	}
 });
 
+test("owner forks an exact approved folder and resumes the same version-bound web editor", async ({ page }) => {
+	test.skip(!process.env.OBSERVAL_APPROVED_SKILL_LISTING_ID, "Provide an existing approved isolated-stack listing");
+	const listingId = process.env.OBSERVAL_APPROVED_SKILL_LISTING_ID!;
+	await loginToWebUI(page);
+	await page.goto(`/components/${listingId}?type=skills`);
+	await page.getByRole("button", { name: "Create next version" }).click();
+	await expect(page.getByText("Reviewed base", { exact: false })).toBeVisible();
+	const version = `99999.0.${Date.now()}`;
+	await page.getByPlaceholder("1.1.0").fill(version);
+	await page.getByRole("textbox", { name: "Description" }).fill("Browser successor authoring test");
+	await page.getByRole("button", { name: "Create new folder version" }).click();
+	await expect(page.getByText("Upload", { exact: true })).toBeVisible();
+	await expect(page.getByRole("textbox", { name: "Version" })).toHaveValue(version);
+	const url = page.url();
+	await page.reload();
+	await expect(page).toHaveURL(url);
+	await expect(page.getByText("Upload", { exact: true })).toBeVisible();
+	if (process.env.OBSERVAL_1730_SCREENSHOT_DIR) {
+		await page.screenshot({ path: `${process.env.OBSERVAL_1730_SCREENSHOT_DIR}/successor-folder-editor.png`, fullPage: true, animations: "disabled" });
+	}
+});
+
 test("approved exact version exposes inert reviewed files without a misleading gate-off install command", async ({ page }) => {
 	test.skip(!process.env.OBSERVAL_APPROVED_SKILL_LISTING_ID, "Provide an existing approved isolated-stack listing");
 	const listingId = process.env.OBSERVAL_APPROVED_SKILL_LISTING_ID!;
@@ -213,6 +235,32 @@ test("resource-bearing draft cannot be submitted while delivery gate remains off
 		});
 		expect(submit.status).toBe(409);
 	}
+});
+
+test("accepts a representative 60-file skill with two scripts and five templates", async () => {
+	const extra = [
+		...Array.from({ length: 2 }, (_, index) => ({ path: `scripts/run-${index}.sh`, content: `#!/bin/sh\necho ${index}\n`, executable: true })),
+		...Array.from({ length: 5 }, (_, index) => ({ path: `templates/template-${index}.txt`, content: `template ${index}\n` })),
+		...Array.from({ length: 53 }, (_, index) => ({ path: `assets/file-${index}.txt`, content: `asset ${index}\n` })),
+	];
+	const { response } = await createDraft(skillName("e2e-capacity-60"), extra);
+	if (response.status !== 200) throw new Error(`Representative upload failed (${response.status}): ${await response.text()}`);
+	const manifest = await response.json();
+	expect(manifest.files).toHaveLength(61);
+	expect(manifest.files.filter((file: {mode: string}) => file.mode === "0755")).toHaveLength(2);
+});
+
+test("near-4-MiB binary folder survives the isolated load balancer and API without truncation", async () => {
+	const binary = Buffer.alloc(2 * 1024 * 1024 - 100, 0xaf);
+	const name = skillName("e2e-capacity-binary");
+	const { response } = await createDraft(name, [
+		{ path: "assets/large-a.bin", content: binary.toString("base64"), encoding: "base64" },
+		{ path: "assets/large-b.bin", content: binary.toString("base64"), encoding: "base64" },
+	]);
+	if (response.status !== 200) throw new Error(`Binary upload failed (${response.status}): ${await response.text()}`);
+	const manifest = await response.json();
+	expect(manifest.files.filter((file: {path: string}) => file.path.endsWith(".bin")).map((file: {size: number}) => file.size))
+		.toEqual([binary.length, binary.length]);
 });
 
 test("refuses invalid base64 rather than silently accepting partial bytes", async () => {

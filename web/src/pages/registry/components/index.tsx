@@ -4,6 +4,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { Link, useRouter, useSearch } from "@tanstack/react-router";
+import type { ComponentsSearch } from "@/routes/_authed/components/index";
 import { toast } from "sonner";
 import { useState, useEffect, useRef, useMemo, useCallback } from "react";
 import {
@@ -31,6 +32,8 @@ import {
   useUpdateSkillFolderDraft,
   useSubmitSkillFolderDraft,
   useTeams,
+  useRegistryItem,
+  useComponentVersionDetail,
 } from "@/hooks/use-api";
 import { useOptionalAuth } from "@/hooks/use-auth";
 import { registry, type RegistryType } from "@/lib/api";
@@ -254,12 +257,12 @@ function ComponentListRow({
 /*  Main page                                                  */
 /* ────────────────────────────────────────────────────────── */
 
-export default function ComponentsPage() {
+export default function ComponentsPage(): React.JSX.Element {
   const router = useRouter();
-  const searchParams = useSearch({ from: "/_authed/components/" });
+  const searchParams: ComponentsSearch = useSearch({ from: "/_authed/components/" });
   const { ready: authReady, role, isAuthenticated } = useOptionalAuth();
   const { data: teams = [] } = useTeams(isAuthenticated);
-  const activeType = searchParams.type ?? "mcps";
+  const activeType: RegistryType = searchParams.type ?? "mcps";
   const [search, setSearch] = useState(searchParams.search ?? "");
   const [debouncedSearch, setDebouncedSearch] = useState(searchParams.search ?? "");
   const [publisherQuery, setPublisherQuery] = useState(searchParams.namespace ? `@${searchParams.namespace}` : "");
@@ -273,6 +276,16 @@ export default function ComponentsPage() {
   const [findingFolder, setFindingFolder] = useState(false);
   const folderConfirmRef = useRef<HTMLButtonElement>(null);
   const timerRef = useRef<ReturnType<typeof setTimeout>>(undefined);
+  const attemptedFolderLink = useRef<string | null>(null);
+  const [folderLinkError, setFolderLinkError] = useState("");
+  const [folderLinkRetry, setFolderLinkRetry] = useState(0);
+  const linkedListingId = activeType === "skills" ? searchParams.folderListingId : undefined;
+  const linkedVersionId = activeType === "skills" ? searchParams.folderVersionId : undefined;
+  const linkedVersion = activeType === "skills" ? searchParams.folderVersion : undefined;
+  const { data: linkedListing, isError: linkedListingError } = useRegistryItem("skills", linkedListingId);
+  const { data: linkedDraft, isError: linkedDraftError } = useComponentVersionDetail(
+    linkedVersion ? "skills" : undefined, linkedListingId, linkedVersion ?? null,
+  );
 
   useEffect(() => {
     timerRef.current = setTimeout(() => setDebouncedSearch(search), 300);
@@ -318,6 +331,34 @@ export default function ComponentsPage() {
   const loadFolderMutation = useLoadSkillFolderDraft();
   const updateFolderMutation = useUpdateSkillFolderDraft();
   const submitFolderMutation = useSubmitSkillFolderDraft();
+
+  useEffect(() => {
+    if (!linkedListingId || !linkedVersionId || !linkedVersion || !linkedListing || !linkedDraft) return;
+    const key = `${linkedListingId}/${linkedVersionId}/${folderLinkRetry}`;
+    if (attemptedFolderLink.current === key) return;
+    attemptedFolderLink.current = key;
+    let active = true;
+    if (linkedDraft.id !== linkedVersionId || linkedDraft.version !== linkedVersion ||
+        !["draft", "rejected"].includes(linkedDraft.status) || linkedListing.user_permission !== "owner") {
+      setFolderLinkError("The exact draft is not editable or no longer belongs to this listing. Refresh its Versions tab.");
+      return;
+    }
+    setFolderLinkError("");
+    void loadFolderMutation.mutateAsync({ listingId: linkedListingId, versionId: linkedVersionId })
+      .then((snapshot) => {
+        if (!active) return;
+        setEditItem({ ...linkedListing, version: linkedVersion, description: linkedDraft.description,
+          task_type: linkedDraft.task_type ?? linkedListing.task_type,
+          supported_harnesses: linkedDraft.supported_harnesses,
+          delivery_mode: "registry_direct", folder_version_id: linkedVersionId,
+          folder_revision: snapshot.revision, skill_md_content: snapshot.skill_md_content,
+          extra_files: snapshot.extra_files });
+        setSubmitOpen(true);
+      }).catch((error: unknown) => {
+        if (active) setFolderLinkError(error instanceof Error ? error.message : "The draft could not be loaded. Retry this exact version.");
+      });
+    return () => { active = false; };
+  }, [linkedListingId, linkedVersionId, linkedVersion, linkedListing, linkedDraft, loadFolderMutation.mutateAsync, folderLinkRetry]);
 
   const editItemRef = useRef(editItem);
   editItemRef.current = editItem;
@@ -382,20 +423,27 @@ export default function ComponentsPage() {
     if (activeType === "skills") {
       setFindingFolder(true);
       try {
-        const versions = await registry.listComponentVersions("skills", item.id, 1, 100);
-        // Never choose an arbitrary version when the list is incomplete.
-        if (versions.total > versions.items.length) {
-          toast.error("Too many skill versions to choose safely; use the exact version UUID in the CLI");
+        const first = await registry.listComponentVersions("skills", item.id, 1, 100);
+        const allVersions = [...first.items];
+        // Only page on an explicit owner action. Never silently pick a draft
+        // from a partial history or fetch a version list for every catalog card.
+        for (let page = 2; allVersions.length < first.total && page <= 10; page++) {
+          const next = await registry.listComponentVersions("skills", item.id, page, 100);
+          if (next.items.length === 0) break;
+          allVersions.push(...next.items);
+        }
+        if (allVersions.length < first.total) {
+          toast.error("More than 1,000 skill versions. Open the exact draft from its Versions page or use the CLI.");
           return;
         }
-        const folders = versions.items.filter((version) =>
+        const folders = allVersions.filter((version) =>
           version.delivery_mode === "registry_direct" && ["draft", "rejected"].includes(version.status),
         );
         if (folders.length > 0) {
           setFolderSelection({ item, action, versions: folders, versionId: folders[0].id });
           return;
         }
-        if (versions.items.some((version) => version.delivery_mode === "registry_direct" && version.status === "pending")) {
+        if (allVersions.some((version) => version.delivery_mode === "registry_direct" && version.status === "pending")) {
           toast.error("Withdraw the pending folder version before editing or resubmitting it");
           return;
         }
@@ -762,6 +810,12 @@ export default function ComponentsPage() {
         )}
       </div>
 
+      {(linkedListingError || linkedDraftError || folderLinkError) && linkedVersionId && (
+        <div role="alert" className="rounded-md border border-destructive p-3 text-sm text-destructive">
+          {folderLinkError || "The exact folder draft is unavailable. Check permissions and refresh the Versions tab."}
+          <Button type="button" variant="outline" className="ml-3" onClick={() => setFolderLinkRetry((value) => value + 1)}>Retry draft</Button>
+        </div>
+      )}
       <Dialog open={!!folderSelection} onOpenChange={(open) => { if (!open) setFolderSelection(null); }}>
         <DialogContent onOpenAutoFocus={(event) => { event.preventDefault(); folderConfirmRef.current?.focus(); }}>
           <DialogHeader><DialogTitle>Choose the exact folder version</DialogTitle></DialogHeader>

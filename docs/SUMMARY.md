@@ -3,6 +3,7 @@
 <!-- SPDX-FileCopyrightText: 2026 Nithin-Bhargav-07 <gaddamnithinbhargav@gmail.com> -->
 <!-- SPDX-FileCopyrightText: 2026 RAWx18 <rawx18.dev@gmail.com> -->
 <!-- SPDX-FileCopyrightText: 2026 Hari Srinivasan <harisrini21@gmail.com> -->
+<!-- SPDX-FileCopyrightText: 2026 Kaushik <kaushikrjpm10@gmail.com> -->
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 
 # Table of contents
@@ -56,6 +57,7 @@
 * [observal server](cli/server.md)
   * [observal server migrate](cli/migrate.md)
 * [observal registry skill](cli/skill.md)
+  * [Complete skill folder developer workflow](skill-folder-workflow.md)
 
 ## Self-Hosting
 

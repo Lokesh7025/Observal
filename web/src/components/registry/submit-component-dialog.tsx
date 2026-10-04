@@ -270,6 +270,10 @@ export function SubmitComponentDialog({
 	async function handleSkillFiles(files: FileList | null, folder: boolean) {
 		const selected = Array.from(files ?? []);
 		if (!selected.length) return;
+		if (folder && selected.some((file) => !file.webkitRelativePath || !file.webkitRelativePath.includes("/"))) {
+			toast.error("Browser cannot preserve this folder's relative paths. Use `skill replace-files --from-dir` instead.");
+			return;
+		}
 		const paths = selected.map((file) =>
 			folder && file.webkitRelativePath
 				? file.webkitRelativePath.split("/").slice(1).join("/")
@@ -283,9 +287,10 @@ export function SubmitComponentDialog({
 			toast.error("Upload refused: hidden, excluded or unsafe paths were found. Use the CLI to review exclusions.");
 			return;
 		}
+		const selectedBytes = selected.reduce((total, file) => total + file.size, 0);
 		if (selected.length > 129 || selected.some((file) => file.size > MAX_SKILL_UPLOAD_BYTES)
-			|| selected.reduce((total, file) => total + file.size, 0) > 4 * 1024 * 1024) {
-			toast.error("Skill folder exceeds the per-file, file-count or total-size limit.");
+			|| selectedBytes > 4 * 1024 * 1024) {
+			toast.error(`Selected ${selected.length - (paths.includes("SKILL.md") ? 1 : 0)} extra files (${selectedBytes} bytes). Limits: 128 extra, 2097152 bytes per file, 4194304 bytes total.`);
 			return;
 		}
 		if (folder && !paths.includes("SKILL.md")) {
@@ -309,6 +314,19 @@ export function SubmitComponentDialog({
 			if (generation !== skillUploadGeneration.current) return;
 			const skillMd = captured.find((file) => file.path === "SKILL.md");
 			if (skillMd?.encoding === "base64") throw new Error("SKILL.md must be UTF-8 text");
+			const resources = captured.filter((file) => file.path !== "SKILL.md").map((file) => ({
+				...file, executable: skillExtraFiles.find((existing) => existing.path === file.path)?.executable ?? false,
+			}));
+			if (folder) {
+				const priorPaths = new Set(skillExtraFiles.map((file) => file.path));
+				const newPaths = new Set(resources.map((file) => file.path));
+				const removed = [...priorPaths].filter((path) => !newPaths.has(path));
+				if (removed.length && !window.confirm(
+					`Replace the whole unsaved folder? ${[...newPaths].filter((path) => !priorPaths.has(path)).length} added, ` +
+					`${[...newPaths].filter((path) => priorPaths.has(path)).length} replaced, ${removed.length} removed.\n\n` +
+					`Removed files: ${removed.slice(0, 10).join(", ")}${removed.length > 10 ? "…" : ""}`,
+				)) return;
+			}
 			if (skillMd) {
 				setSkillMdContent(skillMd.content);
 				const frontmatter = skillMd.content.match(/^---\r?\n([\s\S]*?)\r?\n---/);
@@ -319,7 +337,9 @@ export function SubmitComponentDialog({
 					if (parsedDescription && !description) setDescription(parsedDescription[1].trim());
 				}
 			}
-			const resources = captured.filter((file) => file.path !== "SKILL.md");
+			if (resources.some((file) => !skillExtraFiles.some((old) => old.path === file.path) && /\.(?:sh|py|js|ts)$/.test(file.path))) {
+				toast.message("New scripts are not executable by default. Review their executable switches before saving.");
+			}
 			if (folder) {
 				setSkillExtraFiles(resources);
 			} else {
@@ -1305,7 +1325,7 @@ export function SubmitComponentDialog({
 											onClick={() => document.getElementById("skill-file-upload")?.click()}
 										>
 											<Upload className="h-4 w-4 mr-1" />
-											Upload Files
+											Add Files
 										</Button>
 										<Button
 											type="button"
@@ -1314,7 +1334,7 @@ export function SubmitComponentDialog({
 											onClick={() => document.getElementById("skill-folder-upload")?.click()}
 										>
 											<FolderUp className="h-4 w-4 mr-1" />
-											Upload Folder
+											Replace Whole Folder
 										</Button>
 										{(skillMdContent || skillExtraFiles.length > 0) && (
 											<Button
@@ -1337,53 +1357,36 @@ export function SubmitComponentDialog({
 									{(skillMdContent || skillExtraFiles.length > 0) && (
 										<div className="border rounded-md divide-y max-h-40 overflow-auto">
 											{skillMdContent && (
-												<div
-													className={`flex items-center justify-between px-3 py-1.5 text-sm cursor-pointer hover:bg-muted/50 ${selectedFilePath === "SKILL.md" ? "bg-primary/10" : ""}`}
-												role="button"
-												tabIndex={0}
+												<button type="button"
+												className={`flex w-full items-center justify-between px-3 py-1.5 text-sm text-left hover:bg-muted/50 ${selectedFilePath === "SKILL.md" ? "bg-primary/10" : ""}`}
 												aria-label="Edit SKILL.md"
 												onClick={() => setSelectedFilePath("SKILL.md")}
-												onKeyDown={(event) => {
-													if (event.key === "Enter" || event.key === " ") {
-														event.preventDefault();
-														setSelectedFilePath("SKILL.md");
-													}
-												}}
 												>
 													<span className="flex items-center gap-2">
 														<File className="h-4 w-4 text-muted-foreground" />
 														<span className="font-mono text-xs">SKILL.md</span>
 													</span>
 													<span className="text-xs text-muted-foreground">{(new Blob([skillMdContent]).size / 1024).toFixed(1)} KB</span>
-												</div>
+												</button>
 											)}
 											{skillExtraFiles.map((file, idx) => (
-												<div
-													key={file.path}
-													className={`flex items-center justify-between px-3 py-1.5 text-sm cursor-pointer hover:bg-muted/50 ${selectedFilePath === file.path ? "bg-primary/10" : ""}`}
-													role="button"
-												tabIndex={0}
-												aria-label={`Edit ${file.path}`}
-												onClick={() => setSelectedFilePath(file.path)}
-												onKeyDown={(event) => {
-													if (event.target === event.currentTarget && (event.key === "Enter" || event.key === " ")) {
-														event.preventDefault();
-														setSelectedFilePath(file.path);
-													}
-												}}
-												>
+												<div key={file.path} className={`flex items-center justify-between text-sm ${selectedFilePath === file.path ? "bg-primary/10" : ""}`}>
+													<button type="button" className="flex min-w-0 flex-1 items-center justify-between gap-2 px-3 py-1.5 text-left hover:bg-muted/50"
+														aria-label={`Edit ${file.path}`} onClick={() => setSelectedFilePath(file.path)}>
 													<span className="flex items-center gap-2">
 														<File className="h-4 w-4 text-muted-foreground" />
 														<span className="font-mono text-xs truncate">{file.path}</span>
-														{file.executable && <span className="text-[10px] text-green-600 font-medium">exec</span>}
+														{file.executable && <span className="text-[10px] text-success font-medium">exec</span>}
 													</span>
-													<div className="flex items-center gap-2">
 														<span className="text-xs text-muted-foreground">{((file.encoding === "base64" ? atob(file.content).length : new Blob([file.content]).size) / 1024).toFixed(1)} KB</span>
+													</button>
+													<div className="flex items-center gap-2 px-2">
 														<Button
 															type="button"
 															variant="ghost"
 															size="icon"
 															className="h-5 w-5"
+															aria-label={`Remove ${file.path}`}
 															onClick={(e) => {
 																e.stopPropagation();
 																setSkillExtraFiles(skillExtraFiles.filter((_, i) => i !== idx));

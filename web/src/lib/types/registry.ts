@@ -444,6 +444,24 @@ export interface SkillVersionManifest {
 	files: SkillManifestFile[];
 }
 
+/** Owner-only pointer to the current immutable reviewed release. */
+export interface SkillApprovedBase {
+	listing_id: string;
+	version_id: string;
+	version: string;
+	revision: string;
+	delivery_mode: "registry_direct" | "git_fetch";
+	import_required: boolean;
+}
+
+export interface SkillSuccessorRequest {
+	version: string;
+	description: string;
+	changelog?: string;
+	base_version_id: string;
+	observed_base_revision: string;
+}
+
 /** Request body for creating a folder draft. */
 export interface SkillFolderDraftRequest {
 	name: string;

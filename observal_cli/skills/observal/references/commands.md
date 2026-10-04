@@ -210,6 +210,10 @@ Every command available in the installed CLI. This block is generated from the T
   - `observal registry sandbox transfer-owner`: Transfer ownership to another username.
   - `observal registry sandbox unarchive`: Restore an archived component.
 - `observal registry skill`: Skill registry commands
+  - `observal registry skill backups`: List, restore or explicitly prune verified skill folder backups.
+    - `observal registry skill backups list`: List retained verified backups and their ages.
+    - `observal registry skill backups prune`: Explicitly remove one old backup after verifying its active successor.
+    - `observal registry skill backups restore`: Restore only a byte-verified unmodified active installation.
   - `observal registry skill co-authors`: Manage co-authors for skills
     - `observal registry skill co-authors add`: Add a co-author.
     - `observal registry skill co-authors list`: List co-authors.

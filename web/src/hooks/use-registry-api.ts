@@ -16,7 +16,7 @@ import {
   useQueryClient,
 } from "@tanstack/react-query";
 import { toast } from "sonner";
-import type { SkillFolderDraftRequest, SkillResource } from "@/lib/types";
+import type { SkillFolderDraftRequest, SkillResource, SkillSuccessorRequest } from "@/lib/types";
 import {
   registry,
   type RegistryType,
@@ -174,6 +174,14 @@ export function useComponentVersions(type: RegistryType | undefined, listingId: 
   });
 }
 
+export function useComponentVersionsPage(type: RegistryType | undefined, listingId: string | undefined, page: number) {
+  return useQuery({
+    queryKey: ["component-versions", type, listingId, "page", page],
+    enabled: !!type && !!listingId && page > 1,
+    queryFn: () => registry.listComponentVersions(type!, listingId!, page, 50),
+  });
+}
+
 export function useComponentVersionDetail(type: RegistryType | undefined, listingId: string | undefined, version: string | null) {
   return useQuery({
     queryKey: ["component-version-detail", type, listingId, version],
@@ -207,6 +215,42 @@ export function useComponentVersionSuggestions(type: RegistryType | undefined, l
 }
 
 // ── Skill Folder Version APIs ──────────────────────────────────────
+
+export function useSkillApprovedBase(listingId: string | undefined, enabled: boolean) {
+  return useQuery({
+    queryKey: ["skill-approved-base", listingId],
+    enabled: enabled && !!listingId,
+    staleTime: 0,
+    queryFn: () => registry.getSkillApprovedBase(listingId!),
+  });
+}
+
+export function useImportSkillFolder() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ listingId, body }: {
+      listingId: string; body: SkillSuccessorRequest & { skill_md_content: string; extra_files: SkillResource[] };
+    }) => registry.importSkillFolder(listingId, body),
+    onSuccess: (_data, vars) => {
+      qc.invalidateQueries({ queryKey: ["component-versions", "skills", vars.listingId] });
+      qc.invalidateQueries({ queryKey: ["registry", "skills"] });
+    },
+    onError: (err: Error) => toast.error(err.message || "Could not import the complete folder"),
+  });
+}
+
+export function useCreateSkillSuccessor() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ listingId, body }: { listingId: string; body: SkillSuccessorRequest }) =>
+      registry.forkSkillVersion(listingId, body),
+    onSuccess: (_data, vars) => {
+      qc.invalidateQueries({ queryKey: ["component-versions", "skills", vars.listingId] });
+      qc.invalidateQueries({ queryKey: ["registry", "skills"] });
+    },
+    onError: (err: Error) => toast.error(err.message || "Could not create a folder version"),
+  });
+}
 
 async function verifiedSkillFile(bytes: ArrayBuffer, expectedHash: string): Promise<void> {
   const digest = await crypto.subtle.digest("SHA-256", bytes);

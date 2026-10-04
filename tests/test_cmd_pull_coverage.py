@@ -2617,7 +2617,42 @@ def test_without_a_project_lock_the_installed_version_is_kept(pull_app, registry
     assert result.exit_code == 0, result.output
     assert _sent_version(registry) == "1.0.0"
     assert json.loads(result.output)["agent"]["resolved_from"] == "installed"
-    installed.assert_called_once_with("claude-code", "agent-uuid", scope="project", directory=str(target.resolve()))
+    # Recheck current receipts immediately before the first nonfolder write:
+    # a later legacy pull must not erase ownership of a newly installed folder.
+    assert installed.call_count == 2
+    assert (
+        installed.call_args_list
+        == [
+            call("claude-code", "agent-uuid", scope="project", directory=str(target.resolve())),
+        ]
+        * 2
+    )
+
+
+def test_nonfolder_agent_pull_refuses_managed_receipt_before_config_writes(
+    pull_app_boundary, registry, tmp_path, monkeypatch
+):
+    import observal_cli.lockfile as lockfile
+
+    target = tmp_path / "project"
+    monkeypatch.setattr(
+        lockfile,
+        "installed_agent",
+        MagicMock(
+            return_value={
+                "id": "agent-uuid",
+                "version": "1.0.0",
+                "components": [
+                    {"type": "skill", "id": "skill-1", "folder_receipt": {"target": str(target / ".pi/skills/review")}},
+                ],
+            }
+        ),
+    )
+    result = _invoke(pull_app_boundary, target, "--output", "json")
+    assert result.exit_code == 6, result.output
+    assert "owns verified skill folders" in json.loads(result.stderr)["error"]["message"]
+    assert not (target / "observal.lock").exists()
+    assert not (target / ".claude").exists()
 
 
 def test_upgrade_and_version_cannot_be_combined(pull_app, registry, tmp_path):

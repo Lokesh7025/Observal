@@ -9,12 +9,13 @@
 
 from __future__ import annotations
 
+import hashlib
 import json as _json
 import re
 import subprocess
 import sys
 import tempfile
-from contextlib import nullcontext, redirect_stdout
+from contextlib import contextmanager, nullcontext, redirect_stdout
 from io import StringIO
 from pathlib import Path
 
@@ -68,6 +69,95 @@ skill_app = typer.Typer(
 
 def register_skill(app: typer.Typer):
     app.add_typer(skill_app, name="skill")
+
+
+backups_app = typer.Typer(
+    help=(
+        "List, restore or explicitly prune verified skill folder backups.\n\n"
+        "Examples:\n  observal registry skill backups list"
+    )
+)
+skill_app.add_typer(backups_app, name="backups")
+
+
+@backups_app.command("list")
+def skill_backups_list(
+    backup_root: Path | None = typer.Option(None, "--backup-root"),
+    output: OutputMode = typer.Option("table", "--output", "-o"),
+):
+    """List retained verified backups and their ages.
+
+    Examples:
+        observal registry skill backups list
+    """
+    from observal_cli.managed_skill import backups_list
+
+    items = backups_list(backup_root=backup_root)
+    if output == "json":
+        output_json(items)
+    else:
+        for item in items:
+            rprint(f"{esc(item['id'])}  {esc(item['target'])}  {item['size']:,} bytes  {item['age_seconds']}s old")
+        if sum(item["size"] for item in items) > 100 * 1024 * 1024:
+            rprint("[yellow]Retained backups exceed 100 MiB; review before explicit pruning.[/yellow]")
+
+
+@backups_app.command("restore")
+def skill_backups_restore(
+    backup_id: str,
+    backup_root: Path | None = typer.Option(None, "--backup-root"),
+    output: OutputMode = typer.Option("table", "--output", "-o"),
+):
+    """Restore only a byte-verified unmodified active installation.
+
+    Examples:
+        observal registry skill backups restore BACKUP_ID
+    """
+    from observal_cli.managed_skill import ManagedSkillError, restore_backup
+
+    try:
+        result = restore_backup(backup_id, backup_root=backup_root)
+    except (ManagedSkillError, OSError) as exc:
+        fail(
+            ErrorCategory.CONFLICT,
+            str(exc),
+            operation="Restore skill backup",
+            resource=backup_id,
+            remediation="Inspect the active folder and retained backup before retrying.",
+        )
+    if output == "json":
+        output_json(result)
+    else:
+        rprint(f"[green]Restored backup {esc(backup_id)}[/green]")
+
+
+@backups_app.command("prune")
+def skill_backups_prune(
+    backup_id: str,
+    backup_root: Path | None = typer.Option(None, "--backup-root"),
+    output: OutputMode = typer.Option("table", "--output", "-o"),
+):
+    """Explicitly remove one old backup after verifying its active successor.
+
+    Examples:
+        observal registry skill backups prune BACKUP_ID
+    """
+    from observal_cli.managed_skill import ManagedSkillError, restore_backup
+
+    try:
+        result = restore_backup(backup_id, backup_root=backup_root, prune=True)
+    except (ManagedSkillError, OSError) as exc:
+        fail(
+            ErrorCategory.CONFLICT,
+            str(exc),
+            operation="Prune skill backup",
+            resource=backup_id,
+            remediation="Verify the active folder and receipt before pruning.",
+        )
+    if output == "json":
+        output_json(result)
+    else:
+        rprint(f"[green]Pruned backup {esc(backup_id)}[/green]")
 
 
 # ── Security helpers (port of vercel-labs installer.ts) ─────────────────────
@@ -584,25 +674,59 @@ def skill_my(
 @skill_app.command(name="show")
 def skill_show(
     skill_id: str = typer.Argument(..., help="ID, name, row number, or @alias"),
+    version: str | None = typer.Option(None, "--version", "-V", help="Inspect an exact approved release"),
     output: OutputMode = typer.Option("table", "--output", "-o"),
 ):
     """Show detailed information about a skill.
 
     Displays metadata including validation status, task type, git source,
     slash command, target agents, and timestamps. Accepts a UUID, name,
-    row number from a previous list, or @alias.
+    row number from a previous list, or @alias. Complete direct releases
+    list reviewed paths, sizes and modes, not file contents. Use export for
+    complete local inspection.
 
     Examples:
         observal registry skill show my-skill
         observal registry skill show 1
-        observal registry skill show @refactor-skill --output json
+        observal registry skill show @refactor-skill --version 1.0.0 --output json
     """
     resolved = client.resolve_registry_reference("skill", skill_id)
     fetch_ctx = nullcontext() if output == "json" else spinner()
     with fetch_ctx:
         item = client.get(f"/api/v1/skills/{resolved}")
+        manifest = None
+        selected = None
+        if item.get("delivery_mode") == "registry_direct" and item.get("status") in ("approved", "archived"):
+            requested = version or item.get("version")
+            if requested:
+                page = 1
+                while page <= 10:
+                    versions = client.get(f"/api/v1/skills/{resolved}/versions", {"page": page, "page_size": 50})
+                    selected = next(
+                        (entry for entry in versions.get("items", []) if entry.get("version") == requested), None
+                    )
+                    if selected or page * 50 >= versions.get("total", 0):
+                        break
+                    page += 1
+                if not selected or selected.get("status") != "approved" or selected.get("requires_global_review"):
+                    fail(
+                        ErrorCategory.CONFLICT,
+                        "The selected approved skill version is unavailable.",
+                        operation="Show skill",
+                        resource=skill_id,
+                        remediation="Select a visible reviewed release and retry.",
+                    )
+                manifest = client.get(f"/api/v1/skills/{resolved}/versions/{selected['id']}/manifest")
+                if manifest.get("version_id") != selected["id"]:
+                    fail(
+                        ErrorCategory.CONFLICT,
+                        "The returned file manifest belongs to another release.",
+                        operation="Show skill",
+                        resource=skill_id,
+                        remediation="Refresh the exact approved version before inspecting files.",
+                    )
     if output == "json":
-        output_json(item)
+        output_json({**item, "selected_version": selected, "files": manifest.get("files") if manifest else None})
         return
     console.print(
         kv_panel(
@@ -626,6 +750,18 @@ def skill_show(
             border_style="green",
         )
     )
+    if manifest and selected:
+        table = Table(title=f"Reviewed files in v{esc(selected['version'])}")
+        table.add_column("Path")
+        table.add_column("Bytes", justify="right")
+        table.add_column("Mode")
+        for file in manifest["files"]:
+            table.add_row(esc(file["path"]), str(file["size"]), esc(file["mode"]))
+        console.print(table)
+        rprint(
+            f"[dim]Inspect all bytes: observal registry skill export {esc(str(item['id']))} "
+            f"./skill-export --version-id {esc(selected['id'])}[/dim]"
+        )
 
 
 # ── Install ────────────────────────────────────────────────────────────────────
@@ -693,6 +829,11 @@ def skill_install(
         None, "--version", "-V", help="Install a specific version (e.g. '1.0.0'). Defaults to latest."
     ),
     output: OutputMode = typer.Option("table", "--output", "-o", help="Output format: table or json"),
+    upgrade: bool = typer.Option(False, "--upgrade", help="Update only a verified managed folder"),
+    check_upgrade: bool = typer.Option(
+        False, "--check-upgrade", help="Preview a verified folder update without writing"
+    ),
+    backup_root: Path | None = typer.Option(None, "--backup-root", help="Same-filesystem private ignored backup root"),
 ):
     """Install an approved skill from Git or a complete reviewed registry folder.
 
@@ -709,6 +850,14 @@ def skill_install(
         observal registry skill install alice/review --harness pi --scope project
         observal registry skill install @sk --harness claude-code --no-write
     """
+    if (upgrade or check_upgrade or backup_root) and (raw or no_write or (upgrade and check_upgrade)):
+        fail(
+            ErrorCategory.VALIDATION,
+            "Upgrade flags cannot be combined with raw/no-write or each other.",
+            operation="Install skill",
+            resource=skill_id,
+            remediation="Choose one upgrade action.",
+        )
     if raw and output == "json":
         fail(
             ErrorCategory.VALIDATION,
@@ -764,7 +913,7 @@ def skill_install(
     requested_version = version
     selected_version_id = None
     selected_version_name = version or listing.get("version")
-    if listing.get("delivery_mode") == "registry_direct" and selected_version_name:
+    if selected_version_name and (listing.get("delivery_mode") == "registry_direct" or version):
         selected = client.get(f"/api/v1/skills/{resolved}/versions/{selected_version_name}")
         if selected.get("extra_files"):
             declared_name = _parse_frontmatter(selected.get("skill_md_content") or "").get("name")
@@ -788,6 +937,8 @@ def skill_install(
             # Advertise folder bundle support for complete skill folders
             "supported_features": [SKILL_FOLDER_FEATURE],
         }
+        if check_upgrade or no_write or raw:
+            install_body["preview"] = True
         if version:
             install_body["version"] = version
         result = client.post_public(f"/api/v1/skills/{resolved}/install", install_body)
@@ -816,7 +967,18 @@ def skill_install(
         )
 
     installed_path: Path | None = None
+    managed_result: dict | None = None
     bundle_response = result.get("bundle")
+    if (upgrade or check_upgrade or backup_root) and not (
+        isinstance(bundle_response, dict) and bundle_response.get("files")
+    ):
+        fail(
+            ErrorCategory.VALIDATION,
+            "Managed upgrades require a complete reviewed folder bundle.",
+            operation="Install skill",
+            resource=skill_id,
+            remediation="Git and resource-less installs retain their existing behavior.",
+        )
     if skill_info.get("bundle_version_id") and not (isinstance(bundle_response, dict) and bundle_response.get("files")):
         fail(
             ErrorCategory.CONFLICT,
@@ -833,35 +995,78 @@ def skill_install(
 
             # Complete folder bundle from server (registry_direct with extra files)
             if bundle_response and isinstance(bundle_response, dict) and bundle_response.get("files"):
-                installed_path = _install_complete_folder_bundle(
-                    bundle_response=bundle_response,
-                    result=result,
-                    harness=harness,
-                    scope=scope,
-                    skill_id=skill_id,
-                    output=output,
+                installed_path, managed_result = _install_managed_folder(
+                    bundle_response,
+                    result,
+                    listing,
+                    harness,
+                    scope,
+                    directory,
+                    skill_id,
+                    requested_version,
+                    upgrade=upgrade,
+                    check=check_upgrade,
+                    backup_root=backup_root,
                 )
             elif delivery_mode == "registry_direct":
-                # Legacy single-file registry_direct (SKILL.md + optional script)
-                installed_path = install_skill_registry_direct(
-                    name=skill_info.get("name", "skill"),
-                    skill_md_content=skill_info.get("skill_md_content"),
-                    script_content=skill_info.get("script_content"),
-                    script_filename=skill_info.get("script_filename"),
-                    harness=harness,
-                    scope=scope,
-                )
+                # Preserve historical single-file installs, but never overwrite
+                # an active verified folder or orphan its ownership receipt.
+                try:
+                    with _protect_legacy_skill_install(
+                        listing_id=str(skill_info.get("id", resolved)),
+                        name=skill_info.get("name", "skill"),
+                        harness=harness,
+                        scope=scope,
+                        directory=directory,
+                    ):
+                        installed_path = install_skill_registry_direct(
+                            name=skill_info.get("name", "skill"),
+                            skill_md_content=skill_info.get("skill_md_content"),
+                            script_content=skill_info.get("script_content"),
+                            script_filename=skill_info.get("script_filename"),
+                            harness=harness,
+                            scope=scope,
+                        )
+                except (OSError, RuntimeError) as exc:
+                    fail(
+                        ErrorCategory.CONFLICT,
+                        str(exc),
+                        operation="Install skill",
+                        resource=skill_id,
+                        remediation="Inspect managed folder ownership; choose an explicit safe migration.",
+                    )
             else:
-                # Git-fetch delivery mode
-                installed_path = install_skill_from_git(
-                    name=skill_info.get("name", "skill"),
-                    git_url=skill_info.get("git_url"),
-                    skill_path=skill_info.get("skill_path", "/"),
-                    git_ref=skill_info.get("git_ref", "main"),
-                    harness=harness,
-                    scope=scope,
-                    skill_md_content=skill_info.get("skill_md_content"),
-                )
+                try:
+                    with _protect_legacy_skill_install(
+                        listing_id=str(skill_info.get("id", resolved)),
+                        name=skill_info.get("name", "skill"),
+                        harness=harness,
+                        scope=scope,
+                        directory=directory,
+                    ):
+                        installed_path = install_skill_from_git(
+                            name=skill_info.get("name", "skill"),
+                            git_url=skill_info.get("git_url"),
+                            skill_path=skill_info.get("skill_path", "/"),
+                            git_ref=skill_info.get("git_ref", "main"),
+                            harness=harness,
+                            scope=scope,
+                            skill_md_content=skill_info.get("skill_md_content"),
+                        )
+                except (OSError, RuntimeError) as exc:
+                    fail(
+                        ErrorCategory.CONFLICT,
+                        str(exc),
+                        operation="Install skill",
+                        resource=skill_id,
+                        remediation="Inspect managed folder ownership; choose an explicit safe migration.",
+                    )
+        if check_upgrade:
+            if output == "json":
+                output_json(managed_result)
+            else:
+                rprint(f"[cyan]Verified upgrade preview:[/cyan] {esc(str(managed_result))}")
+            return
         if installed_path is None:
             fail(
                 ErrorCategory.UNAVAILABLE,
@@ -874,21 +1079,22 @@ def skill_install(
         from observal_cli.lockfile import upsert_standalone
 
         try:
-            upsert_standalone(
-                harness,
-                component_type="skill",
-                name=skill_info.get("name", resolved),
-                component_id=str(skill_info.get("id", resolved)),
-                version=result.get("version") or version or skill_info.get("version") or listing.get("version"),
-                scope=scope,
-                directory=directory,
-                namespace=listing.get("namespace"),
-                slug=listing.get("slug"),
-                local_name=local_name,
-                version_id=str(result["version_id"]) if result.get("version_id") else None,
-                digest=result.get("digest"),
-                requested_version=requested_version,
-            )
+            if managed_result is None:
+                upsert_standalone(
+                    harness,
+                    component_type="skill",
+                    name=skill_info.get("name", resolved),
+                    component_id=str(skill_info.get("id", resolved)),
+                    version=result.get("version") or version or skill_info.get("version") or listing.get("version"),
+                    scope=scope,
+                    directory=directory,
+                    namespace=listing.get("namespace"),
+                    slug=listing.get("slug"),
+                    local_name=local_name,
+                    version_id=str(result["version_id"]) if result.get("version_id") else None,
+                    digest=result.get("digest"),
+                    requested_version=requested_version,
+                )
         except PermissionError as error:
             fail(
                 ErrorCategory.PERMISSION,
@@ -916,6 +1122,7 @@ def skill_install(
                 **result,
                 "write_performed": not no_write,
                 "installed_path": str(installed_path) if installed_path else None,
+                "managed_folder": managed_result,
             }
         )
         return
@@ -1077,6 +1284,204 @@ def _submit_folder_draft(
         )
 
 
+@contextmanager
+def _protect_legacy_skill_install(
+    *,
+    listing_id: str,
+    name: str,
+    harness: str,
+    scope: str,
+    directory: str | None,
+):
+    """Do not let a historical installer overwrite or orphan a managed receipt.
+
+    Keep the destination lock through the legacy write. Upsert performs its own
+    atomic lockfile check so a concurrent new managed install also fails closed.
+    """
+    from observal_cli import lockfile
+
+    target = (
+        _user_skill_dest(harness, _sanitize_name(name))
+        if scope == "user"
+        else Path.cwd() / ".agents" / "skills" / _sanitize_name(name)
+    ).absolute()
+    lockfile.CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    key = hashlib.sha256(str(target).encode()).hexdigest()
+    with lockfile._exclusive_lock(lockfile.CONFIG_DIR / f"skill-{key}.lock"):
+        data = lockfile.read_lockfile()
+        registry_url = lockfile.current_registry_url()
+        for url, registry in data.get("registries", {}).items():
+            for section_name, section in registry.get("harnesses", {}).items():
+                for owner in [*section.get("standalone", []), *section.get("agents", [])]:
+                    owned = [owner, *owner.get("components", [])] if "components" in owner else [owner]
+                    for entry in owned:
+                        proof = entry.get("folder_receipt")
+                        if not isinstance(proof, dict):
+                            continue
+                        recorded = Path(proof.get("target", ""))
+                        same_path = recorded == target or (target.exists() and target.resolve() == recorded.resolve())
+                        same_install = (
+                            url == registry_url
+                            and section_name == harness
+                            and proof.get("listing_id") == listing_id
+                            and proof.get("source") == "standalone"
+                            and proof.get("scope") == scope
+                            and (scope == "user" or owner.get("directory") == directory)
+                        )
+                        if same_path or same_install:
+                            raise RuntimeError(
+                                "A verified folder already owns this skill or destination; legacy delivery cannot overwrite it"
+                            )
+        yield
+
+
+def _install_managed_folder(
+    bundle_response: dict,
+    result: dict,
+    listing: dict,
+    harness: str,
+    scope: str,
+    directory: str | None,
+    skill_id: str,
+    requested_version: str | None,
+    *,
+    upgrade: bool,
+    check: bool,
+    backup_root: Path | None,
+) -> tuple[Path | None, dict]:
+    """Install with machine receipt; legacy adoption needs reviewed exact bytes."""
+    from observal_cli import lockfile, managed_skill
+    from observal_shared.harness_registry import HARNESS_REGISTRY
+
+    try:
+        bundle = validate_bundle(
+            bundle_response, expected_version_id=result.get("version_id"), expected_digest=result.get("digest")
+        )
+        template = HARNESS_REGISTRY.get(harness.replace("_", "-"), {}).get("skills", {}).get(scope)
+        if not template or template.format(name=bundle.folder_name) != bundle.skill_file_path:
+            raise managed_skill.ManagedSkillError("Bundle destination differs from harness template")
+        target = (
+            Path(bundle.skill_file_path).expanduser() if scope == "user" else Path.cwd() / bundle.skill_file_path
+        ).parent.absolute()
+        proof = managed_skill.receipt(bundle, target, harness, scope, registry_url=lockfile.current_registry_url())
+        # Fetch an old reviewed version only when an existing, unreceipted
+        # lock entry names it; never infer ownership from the directory name.
+        old_bundle = None
+        if target.exists() and not target.is_symlink():
+            data = lockfile.read_lockfile()
+            entries = (
+                data.get("registries", {})
+                .get(proof["registry_url"], {})
+                .get("harnesses", {})
+                .get(harness, {})
+                .get("standalone", [])
+            )
+            legacy = [
+                e
+                for e in entries
+                if e.get("type") == "skill"
+                and e.get("id") == bundle.listing_id
+                and e.get("scope") == scope
+                and (e.get("directory") or None) == directory
+                and not e.get("folder_receipt")
+                and e.get("version_id")
+                and e.get("digest")
+            ]
+            if len(legacy) == 1 and legacy[0].get("version"):
+                old_response = client.post_public(
+                    f"/api/v1/skills/{bundle.listing_id}/install",
+                    {
+                        "harness": harness,
+                        "scope": scope,
+                        "local_name": bundle.folder_name,
+                        "supported_features": [SKILL_FOLDER_FEATURE],
+                        "version": legacy[0]["version"],
+                    },
+                )
+                old = old_response.get("bundle")
+                if (
+                    isinstance(old, dict)
+                    and old.get("files")
+                    and old_response.get("version_id") == legacy[0]["version_id"]
+                    and old_response.get("digest") == legacy[0]["digest"]
+                ):
+                    old_bundle = validate_bundle(
+                        old, expected_version_id=legacy[0]["version_id"], expected_digest=legacy[0]["digest"]
+                    )
+                    if old_bundle.folder_name != bundle.folder_name:
+                        raise managed_skill.ManagedSkillError("Folder name changed; explicit migration required")
+        if target.exists() and not requested_version:
+            existing = managed_skill._records(lockfile.read_lockfile(), target)
+            if len(existing) == 1 and existing[0][1].get("version") and result.get("version"):
+                try:
+                    if Version(str(result["version"])) < Version(str(existing[0][1]["version"])):
+                        raise managed_skill.ManagedSkillError("Downgrading requires an explicit --version pin")
+                except InvalidVersion as exc:
+                    raise managed_skill.ManagedSkillError(
+                        "Cannot compare installed and selected release versions"
+                    ) from exc
+        if target.exists() and not (upgrade or check):
+            # Same-version no-op is safe; all other replacements require intent.
+            existing = managed_skill._records(lockfile.read_lockfile(), target)
+            if len(existing) != 1 or existing[0][1].get("folder_receipt", {}).get("version_id") != bundle.version_id:
+                raise managed_skill.ManagedSkillError(
+                    "Folder exists; use --upgrade after verifying the selected version"
+                )
+
+        def record(data: dict) -> None:
+            registry = data.setdefault("registries", {}).setdefault(
+                proof["registry_url"], {"server_url": proof["registry_url"], "harnesses": {}}
+            )
+            section = registry["harnesses"].setdefault(harness, {"agents": [], "standalone": []})
+            entries = section.setdefault("standalone", [])
+            matches = [
+                e
+                for e in entries
+                if e.get("type") == "skill"
+                and e.get("id") == bundle.listing_id
+                and e.get("scope") == scope
+                and (e.get("directory") or None) == directory
+            ]
+            if len(matches) > 1:
+                raise managed_skill.ManagedSkillError("Ambiguous standalone lock entries")
+            entry = matches[0] if matches else {}
+            entry.update(
+                {
+                    "type": "skill",
+                    "name": result.get("config_snippet", {}).get("skill", {}).get("name", skill_id),
+                    "id": bundle.listing_id,
+                    "version": result.get("version"),
+                    "scope": scope,
+                    "namespace": listing.get("namespace"),
+                    "slug": listing.get("slug"),
+                    "local_name": bundle.folder_name,
+                    "version_id": bundle.version_id,
+                    "digest": bundle.digest,
+                    "folder_receipt": proof,
+                }
+            )
+            if directory:
+                entry["directory"] = directory
+            if requested_version:
+                entry["requested_version"] = requested_version
+            if not matches:
+                entries.append(entry)
+
+        outcome = managed_skill.transact(
+            bundle, target, proof, record=record, old_bundle=old_bundle, backup_root=backup_root, check=check
+        )
+        return (None if check else target / "SKILL.md"), outcome
+    except (BundleValidationError, managed_skill.ManagedSkillError, OSError, RuntimeError) as exc:
+        fail(
+            ErrorCategory.CONFLICT,
+            str(exc),
+            operation="Install skill",
+            resource=skill_id,
+            remediation="Inspect the retained backup or restore it with registry skill backups restore; do not delete unowned files.",
+        )
+        raise AssertionError("unreachable") from exc
+
+
 def _install_complete_folder_bundle(
     *,
     bundle_response: dict,
@@ -1147,7 +1552,7 @@ def _install_complete_folder_bundle(
             rprint("[yellow]⚠ Destination conflicts detected:[/yellow]")
             for collision in collisions:
                 rprint(f"  • {esc(collision)}")
-            rprint("[dim]Use --force to overwrite (not yet implemented).[/dim]")
+            rprint("[dim]Unowned folders cannot be overwritten; use --upgrade for verified installs.[/dim]")
         # For now, fail on collision - the plan mentions backup/recovery UX needs design
         fail(
             ErrorCategory.CONFLICT,

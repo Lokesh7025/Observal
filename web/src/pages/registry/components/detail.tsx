@@ -17,6 +17,7 @@ import {
   useMyFeedback,
   useRegistryMetrics,
   useComponentVersions,
+  useComponentVersionsPage,
   useComponentVersionDetail,
   useSkillVersionManifest,
   useComponentArchive,
@@ -41,6 +42,7 @@ import { VersionDropdown } from "@/components/registry/version-dropdown";
 import { ComponentEditForm } from "@/components/registry/component-edit-form";
 import { ComponentInstallCommand } from "@/components/registry/component-install-command";
 import { ApprovedSkillFiles } from "@/components/registry/approved-skill-files";
+import { SkillSuccessorDialog } from "@/components/registry/skill-successor-dialog";
 import { RegistryName } from "@/components/registry/registry-name";
 import { ShareLinkButton } from "@/components/registry/share-link-button";
 import {
@@ -145,6 +147,17 @@ export default function ComponentDetailPage({
   const { data: myReview } = useMyFeedback(singularType, id, isAuthenticated);
   const { data: rawMetrics } = useRegistryMetrics(type, id, isAuthenticated);
   const { data: versionsData, isLoading: versionsLoading } = useComponentVersions(type, id);
+  const [versionPage, setVersionPage] = useState(1);
+  const [olderVersions, setOlderVersions] = useState<ComponentVersionSummary[]>([]);
+  const { data: olderPage, isFetching: olderLoading } = useComponentVersionsPage(type, id, versionPage);
+  useEffect(() => { setVersionPage(1); setOlderVersions([]); }, [id, type]);
+  useEffect(() => {
+    if (!olderPage || versionPage <= 1) return;
+    setOlderVersions((current) => {
+      const seen = new Set(current.map((version) => version.id));
+      return [...current, ...olderPage.items.filter((version) => !seen.has(version.id))];
+    });
+  }, [olderPage, versionPage]);
   const [selectedVersion, setSelectedVersion] = useState<string | null>(null);
   // Skill version detail includes stored file bytes. Use the bounded summary
   // and explicit manifest/file endpoints instead of fetching every file on view.
@@ -179,6 +192,7 @@ export default function ComponentDetailPage({
       ];
   const showVisibilityControl = canChangeVisibility && Boolean(item?.team_id || personalTeam);
   const [confirmPublicOpen, setConfirmPublicOpen] = useState(false);
+  const [successorOpen, setSuccessorOpen] = useState(false);
 
   // Co-authors
   const [coAuthors, setCoAuthors] = useState<CoAuthor[]>([]);
@@ -200,7 +214,7 @@ export default function ComponentDetailPage({
     return () => controller.abort();
   }, [type, id, isAuthenticated]);
 
-  const versions = versionsData?.items ?? [];
+  const versions = [...(versionsData?.items ?? []), ...olderVersions.filter((version) => version.listing_id === String(item?.id))];
   // VersionDropdown expects AgentVersionSummary shape; ComponentVersionSummary is compatible
   const versionsForDropdown = versions.filter((v) => v.status === "approved" && !v.requires_global_review) as unknown as import("@/lib/types").AgentVersionSummary[];
   const latestApprovedVersion = versions.find((v) => v.status === "approved" && !v.requires_global_review)?.version;
@@ -406,6 +420,25 @@ export default function ComponentDetailPage({
               )}
             </div>
 
+            {canEdit && singularType === "skill" && item.status === "approved" && (
+              <div className="flex flex-wrap items-center gap-3 rounded-md border border-border bg-card p-4">
+                <div className="flex-1 text-sm">
+                  <strong>Create a new folder version</strong>
+                  <p className="text-xs text-muted-foreground">Approved releases cannot be edited. Fork the reviewed folder or import a complete local folder for a Git or historical direct skill.</p>
+                </div>
+                <Button type="button" variant="outline" onClick={() => setSuccessorOpen(true)}>Create next version</Button>
+              </div>
+            )}
+            {canEdit && singularType === "skill" && item.status === "approved" && (
+              <SkillSuccessorDialog open={successorOpen} onOpenChange={setSuccessorOpen} listingId={String(item.id)}
+                onCreated={(manifest, draftVersion) => {
+                  setSuccessorOpen(false);
+                  navigate({ to: "/components", search: {
+                    type: "skills", folderListingId: String(item.id), folderVersionId: manifest.version_id,
+                    folderVersion: draftVersion,
+                  } });
+                }} />
+            )}
             {isAdmin && (
               <div className="lg:hidden">
                 <RecommendedToggle
@@ -547,6 +580,12 @@ export default function ComponentDetailPage({
                               <p className="text-xs text-muted-foreground/70 italic truncate max-w-xl">{v.changelog}</p>
                             )}
                           </div>
+                          {canEdit && singularType === "skill" && ["draft", "rejected"].includes(v.status) && (
+                            <Link to="/components" search={{ type: "skills", folderListingId: String(item.id),
+                              folderVersionId: v.id, folderVersion: v.version }} className="text-xs underline underline-offset-2">
+                              Edit exact draft
+                            </Link>
+                          )}
                           {v.released_at && (
                             <div className="shrink-0 text-right space-y-0.5">
                               <p className="text-xs text-muted-foreground">
@@ -556,6 +595,11 @@ export default function ComponentDetailPage({
                           )}
                         </div>
                       ))}
+                      {versionsData && versions.length < versionsData.total && (
+                        <Button type="button" variant="outline" disabled={olderLoading} onClick={() => setVersionPage((page) => page + 1)}>
+                          {olderLoading ? "Loading older versions…" : "Show older versions"}
+                        </Button>
+                      )}
                     </div>
                   )}
                 </div>

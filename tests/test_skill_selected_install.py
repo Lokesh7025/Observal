@@ -77,6 +77,16 @@ async def test_opted_in_standalone_bundle_declares_all_files_and_denies_old_clie
             assert wrong_scope.value.status_code == 409
             assert wrong_scope.value.detail == "Harness does not support complete skill folders in this scope"
             assert (await db.get(SkillVersion, version_id)).download_count == 0
+            preview = await skill.install_skill(
+                str(listing_id),
+                SkillInstallRequest(harness="pi", supported_features=["skill_extra_files_v1"], preview=True),
+                MagicMock(),
+                db,
+                owner,
+            )
+            assert preview.bundle is not None and preview.bundle.version_id == version_id
+            assert (await db.get(SkillVersion, version_id)).download_count == 0
+            assert (await db.execute(select(SkillDownload))).scalars().all() == []
             response = await skill.install_skill(
                 str(listing_id),
                 SkillInstallRequest(harness="pi", supported_features=["skill_extra_files_v1"]),

@@ -648,7 +648,26 @@ def test_show_renders_metadata_and_json(monkeypatch):
         created_at="not-a-date",
     )
     resolve = Mock(return_value="resolved")
-    get = Mock(return_value=item)
+    approved = {"id": "version-uuid", "version": "1.2.3", "status": "approved"}
+    manifest = {
+        "version_id": "version-uuid",
+        "files": [
+            {"path": "SKILL.md", "size": 12, "mode": "0644"},
+            {"path": "scripts/run.sh", "size": 8, "mode": "0755"},
+        ],
+    }
+
+    def get_show(url, params=None):
+        if url == "/api/v1/skills/resolved":
+            return item
+        if url.endswith("/versions"):
+            assert params == {"page": 1, "page_size": 50}
+            return {"items": [approved], "total": 1}
+        if url.endswith("/versions/version-uuid/manifest"):
+            return manifest
+        pytest.fail(f"Unexpected show route: {url}")
+
+    get = Mock(side_effect=get_show)
     monkeypatch.setattr(skill.client, "resolve_registry_reference", resolve)
     monkeypatch.setattr(skill.client, "get", get)
 
@@ -665,9 +684,12 @@ def test_show_renders_metadata_and_json(monkeypatch):
     assert "/review" in rendered.output
     assert "claude-code, pi" in rendered.output
     assert "not-a-date" in rendered.output
-    assert json.loads(as_json.output) == item
+    assert "scripts/run.sh" in rendered.output
+    assert "0755" in rendered.output
+    assert "export" in rendered.output
+    assert json.loads(as_json.output) == {**item, "selected_version": approved, "files": manifest["files"]}
     assert resolve.call_args_list == [call("skill", "alice/review-skill"), call("skill", "alice/review-skill")]
-    assert get.call_args_list == [call("/api/v1/skills/resolved"), call("/api/v1/skills/resolved")]
+    assert get.call_count == 6
 
 
 def test_show_surfaces_http_failure(monkeypatch):

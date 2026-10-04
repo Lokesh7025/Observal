@@ -223,6 +223,7 @@ class SkillInstallRequest(BaseModel):
     local_name: str | None = None
     version: str | None = None  # Specific version to install (None = latest)
     supported_features: list[str] = []
+    preview: bool = False  # Do not record a download for read-only CLI previews.
 
 
 class SkillInstallResponse(BaseModel):

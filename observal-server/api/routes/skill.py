@@ -621,7 +621,7 @@ async def install_skill(
         digest=content_digest("skill", installed),
         bundle=bundle,
     )
-    if current_user is not None:
+    if current_user is not None and not req.preview:
         db.add(SkillDownload(listing_id=listing.id, user_id=current_user.id, harness=req.harness))
         installed.download_count = (installed.download_count or 0) + 1
         await commit_or_name_conflict(db, "skill")
