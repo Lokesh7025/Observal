@@ -163,6 +163,7 @@ export interface ComponentVersionSummary {
 	description: string;
 	changelog: string | null;
 	status: string;
+	requires_global_review?: boolean;
 	rejection_reason: string | null;
 	download_count: number;
 	supported_harnesses: string[];
@@ -363,6 +364,10 @@ export interface ReviewItem {
 	slash_command?: string;
 	version_id?: string;
 	base_version_id?: string | null;
+	base_version?: string | null;
+	base_delivery_mode?: "git_fetch" | "registry_direct" | null;
+	base_git_url?: string | null;
+	base_git_ref?: string | null;
 	review_key?: string;
 	revision?: string;
 	files?: SkillManifestFile[];

@@ -108,8 +108,8 @@ export function useSkillVersionReview(id: string | undefined, versionId: string 
 export function useSkillVersionDecision() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (vars: { id: string; versionId: string; revision: string; action: "approve" | "reject"; reason?: string }) =>
-      review.decideSkillVersion(vars.id, vars.versionId, vars.action, vars.revision, vars.reason),
+    mutationFn: (vars: { id: string; versionId: string; revision: string; action: "approve" | "reject"; reason?: string; gitBaseAcknowledged?: boolean }) =>
+      review.decideSkillVersion(vars.id, vars.versionId, vars.action, vars.revision, vars.reason, vars.gitBaseAcknowledged),
     onSuccess: (_data, vars) => {
       qc.invalidateQueries({ queryKey: ["review"] });
       toast.success(vars.action === "approve" ? "Skill version approved" : "Skill version rejected");

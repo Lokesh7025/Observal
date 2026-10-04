@@ -111,6 +111,8 @@ def _version_to_dict(v, component_type: str, *, summary: bool = False) -> dict:
         "released_at": v.released_at,
         "created_at": v.created_at,
     }
+    if component_type == "skill" and hasattr(v, "requires_global_review"):
+        d["requires_global_review"] = bool(v.requires_global_review)
     for attr in ALLOWED_FIELDS.get(component_type, set()):
         if summary and component_type == "skill" and attr in {"extra_files", "skill_md_content", "script_content"}:
             continue
@@ -561,6 +563,15 @@ async def _review_version(
                 raise HTTPException(status_code=409, detail="Approved base is not a valid release") from exc
             if ver.base_revision != base_revision:
                 raise HTTPException(status_code=409, detail="Approved base changed; rebase this draft before review")
+            if (
+                base.delivery_mode == "git_fetch"
+                and ver.delivery_mode == "registry_direct"
+                and not req.git_base_acknowledged
+            ):
+                raise HTTPException(
+                    status_code=409,
+                    detail="Git base files are not stored; explicitly acknowledge the limited comparison before approval",
+                )
         promote_skill = await should_promote_skill_version(db, latest_id, ver)
         # Historical pending prereleases may still clear review and be pinned
         # explicitly; they never replace a newer stable default release.

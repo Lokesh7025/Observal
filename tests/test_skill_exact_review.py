@@ -260,6 +260,58 @@ async def test_exact_decision_refuses_active_editor_and_older_stable_release():
         await engine.dispose()
 
 
+async def test_git_to_direct_review_requires_explicit_missing_base_file_acknowledgment(monkeypatch):
+    engine = ds.make_engine()
+    maker = await ds.create_schema(engine)
+    try:
+        async with maker() as db:
+            author = await ds.user(db)
+            reviewer = await ds.user(db, role=UserRole.reviewer)
+            listing = await ds.skill(db, author, status=ListingStatus.approved)
+            base = await db.get(SkillVersion, listing.latest_version_id)
+            base.delivery_mode = "git_fetch"
+            base.git_url = "https://github.com/example/old-skill.git"
+            base.git_ref = "main"
+            candidate = await ds.add_skill_version(
+                db, listing, author, version="1.3.0", status=ListingStatus.pending, set_latest=False
+            )
+            candidate.delivery_mode = "registry_direct"
+            candidate.skill_md_content = "---\nname: new-skill\ndescription: New folder\n---\n# Skill\n"
+            candidate.base_version_id = base.id
+            candidate.base_revision = skill_content_revision(listing, base)
+            candidate.content_revision = skill_content_revision(listing, candidate)
+            await db.commit()
+            listing_id, candidate_id, revision = listing.id, candidate.id, candidate.content_revision
+        async with maker() as db:
+            detail = await review.get_skill_version_review(str(listing_id), candidate_id, Response(), db, reviewer)
+            assert detail["base_delivery_mode"] == "git_fetch"
+            assert detail["base_git_url"] == "https://github.com/example/old-skill.git"
+            assert detail["base_git_ref"] == "main"
+            assert detail["base_version_id"]
+            with pytest.raises(HTTPException) as blocked:
+                await review.decide_skill_version(
+                    str(listing_id),
+                    candidate_id,
+                    VersionReviewRequest(action="approve", observed_revision=revision),
+                    db,
+                    reviewer,
+                )
+            assert blocked.value.status_code == 409
+            assert "Git base files are not stored" in blocked.value.detail
+            await db.rollback()
+            monkeypatch.setattr("api.routes.component_versions.inbox.on_review_decided", AsyncMock())
+            approved = await review.decide_skill_version(
+                str(listing_id),
+                candidate_id,
+                VersionReviewRequest(action="approve", observed_revision=revision, git_base_acknowledged=True),
+                db,
+                reviewer,
+            )
+            assert approved["new_status"] == "approved"
+    finally:
+        await engine.dispose()
+
+
 async def test_candidate_version_decision_requires_matching_observed_revision(monkeypatch):
     engine = ds.make_engine()
     maker = await ds.create_schema(engine)

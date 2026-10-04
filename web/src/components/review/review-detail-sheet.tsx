@@ -116,9 +116,13 @@ function McpConfigSection({ detail }: { detail: ReviewItem }) {
 	);
 }
 
-export function SkillFilesSection({ listingId, versionId, baseVersionId }: { listingId: string; versionId: string; baseVersionId?: string | null }) {
+export function SkillFilesSection({ listingId, versionId, baseVersionId, baseDeliveryMode }: {
+	listingId: string; versionId: string; baseVersionId?: string | null; baseDeliveryMode?: string | null;
+}) {
 	const { data: manifest, isLoading } = useSkillVersionManifest(listingId, versionId);
-	const { data: baseManifest, isLoading: isLoadingBase, isError: baseError } = useSkillVersionManifest(listingId, baseVersionId ?? undefined);
+	const { data: baseManifest, isLoading: isLoadingBase, isError: baseError } = useSkillVersionManifest(
+		listingId, baseDeliveryMode === "git_fetch" ? undefined : baseVersionId ?? undefined,
+	);
 	const [selectedFile, setSelectedFile] = useState<string | null>(null);
 	const [expandedDirs, setExpandedDirs] = useState<Set<string>>(new Set());
 	const candidateFiles = new Map(manifest?.files.map((file) => [file.path, file]) ?? []);
@@ -239,8 +243,9 @@ export function SkillFilesSection({ listingId, versionId, baseVersionId }: { lis
 	return (
 		<div className="space-y-2">
 			<div className="text-xs font-medium text-muted-foreground">Files ({manifest.files.length})</div>
-			{baseVersionId && isLoadingBase && <p className="text-xs text-muted-foreground">Loading base version comparison…</p>}
-			{baseVersionId && baseError && <p role="alert" className="text-xs text-destructive">Base version unavailable; file changes cannot be verified here.</p>}
+			{baseDeliveryMode === "git_fetch" && <p className="text-xs text-warning">The reviewed Git source has no stored file tree. Inspect the complete candidate below; no file-by-file comparison is possible.</p>}
+			{baseVersionId && baseDeliveryMode !== "git_fetch" && isLoadingBase && <p className="text-xs text-muted-foreground">Loading base version comparison…</p>}
+			{baseVersionId && baseDeliveryMode !== "git_fetch" && baseError && <p role="alert" className="text-xs text-destructive">Base version unavailable; file changes cannot be verified here.</p>}
 			{baseManifest && <p className="text-xs text-muted-foreground">
 				Compared to base: {added.length} added, {modified.length} modified, {removed.length} removed.
 			</p>}
@@ -308,7 +313,8 @@ function SkillConfigSection({ detail }: { detail: ReviewItem }) {
 				<DetailField label="Target Agents" value={detail.target_agents} />
 			</dl>
 			{hasVersionFiles && (
-				<SkillFilesSection listingId={detail.id} versionId={detail.version_id!} baseVersionId={detail.base_version_id} />
+				<SkillFilesSection listingId={detail.id} versionId={detail.version_id!}
+					baseVersionId={detail.base_version_id} baseDeliveryMode={detail.base_delivery_mode} />
 			)}
 		</div>
 	);
@@ -618,6 +624,16 @@ function SheetBody({
 	const approveWithSkills = useApproveWithSkills();
 	const [showRejectInput, setShowRejectInput] = useState(false);
 	const [rejectReason, setRejectReason] = useState("");
+	const [gitBaseAcknowledged, setGitBaseAcknowledged] = useState(false);
+	useEffect(() => setGitBaseAcknowledged(false), [versionId]);
+	const { data: reviewedManifest, isPending: manifestPending, isError: manifestError } = useSkillVersionManifest(
+		selectedReview?.files?.length ? item.id : undefined,
+		selectedReview?.files?.length ? versionId : undefined,
+	);
+	const { data: reviewedBaseManifest, isPending: basePending, isError: baseError } = useSkillVersionManifest(
+		selectedReview?.base_delivery_mode === "registry_direct" ? item.id : undefined,
+		selectedReview?.base_delivery_mode === "registry_direct" ? selectedReview.base_version_id ?? undefined : undefined,
+	);
 
 	const merged = useMemo<ReviewItem>(() => {
 		if (selectedReview) return { ...item, ...selectedReview };
@@ -646,13 +662,13 @@ function SheetBody({
 	const handleApprove = useCallback(() => {
 		if (versionId) {
 			if (!selectedReview?.revision) return;
-			skillDecision.mutate({ id: item.id, versionId, revision: selectedReview.revision, action: "approve" },
+			skillDecision.mutate({ id: item.id, versionId, revision: selectedReview.revision, action: "approve", gitBaseAcknowledged },
 				{ onSuccess: () => onOpenChange(false) });
 			return;
 		}
 		onApprove(merged.id, merged.type);
 		onOpenChange(false);
-	}, [merged, onApprove, onOpenChange, versionId, selectedReview, skillDecision, item.id]);
+	}, [merged, onApprove, onOpenChange, versionId, selectedReview, skillDecision, item.id, gitBaseAcknowledged]);
 
 	const handleApproveWithSkills = useCallback(
 		(mcpId: string, skillIds: string[]) => {
@@ -666,7 +682,10 @@ function SheetBody({
 
 	const disableApprove =
 		(merged.type === "agent" && merged.components_ready === false) ||
-		(merged.type === "skill" && (!!versionId && (isLoadingVersion || !selectedReview?.revision)));
+		(merged.type === "skill" && (!!versionId && (isLoadingVersion || !selectedReview?.revision ||
+			(selectedReview.base_delivery_mode === "git_fetch" && !gitBaseAcknowledged) ||
+			(!!selectedReview.files?.length && (manifestPending || manifestError || reviewedManifest?.revision !== selectedReview.revision)) ||
+			(selectedReview.base_delivery_mode === "registry_direct" && (basePending || baseError || !reviewedBaseManifest)))));
 
 	return (
 		<div className="flex flex-col gap-6">
@@ -825,6 +844,15 @@ function SheetBody({
 				/>
 			)}
 
+			{selectedReview?.base_delivery_mode === "git_fetch" && (
+				<label className="flex items-start gap-2 rounded-md border border-warning/40 bg-warning/5 p-3 text-sm">
+					<input type="checkbox" checked={gitBaseAcknowledged}
+						onChange={(event) => setGitBaseAcknowledged(event.target.checked)} className="mt-1" />
+					<span>I inspected this exact candidate folder. The old Git release's file contents are not stored, so they cannot be compared to it.
+						{selectedReview.base_git_url && <span className="block mt-1 text-xs break-all text-muted-foreground">Old source: {selectedReview.base_git_url} {selectedReview.base_git_ref ? `(${selectedReview.base_git_ref})` : ""}</span>}
+					</span>
+				</label>
+			)}
 			{/* Actions */}
 			<div className="space-y-3 border-t border-border pt-4">
 				<div className="flex items-center justify-between">
@@ -883,7 +911,9 @@ function SheetBody({
 									</span>
 								</TooltipTrigger>
 								<TooltipContent>
-									<p>Cannot approve until all required components are ready</p>
+									<p>{selectedReview?.base_delivery_mode === "git_fetch" && !gitBaseAcknowledged
+										? "Inspect the full candidate and acknowledge that Git base files cannot be compared."
+										: "The exact candidate or reviewed base is unavailable; refresh before approving."}</p>
 								</TooltipContent>
 							</Tooltip>
 						</TooltipProvider>

@@ -34,3 +34,5 @@ class VersionReviewRequest(BaseModel):
     action: Literal["approve", "reject"]
     reason: str | None = None
     observed_revision: SkillRevision | None = None
+    # Only for approving a Git→direct skill conversion with no stored base file tree.
+    git_base_acknowledged: bool = False

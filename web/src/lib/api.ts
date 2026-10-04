@@ -604,8 +604,10 @@ export const review = {
 		get<ReviewItem[]>(`/review?${new URLSearchParams({ ...params, team_id: teamId })}`),
 	get: (id: string) => get<ReviewItem>(`/review/${id}`),
 	getSkillVersion: (id: string, versionId: string) => get<ReviewItem>(`/review/skills/${id}/versions/${versionId}`),
-	decideSkillVersion: (id: string, versionId: string, action: "approve" | "reject", observedRevision: string, reason?: string) =>
-		post(`/review/skills/${id}/versions/${versionId}/decision`, { action, observed_revision: observedRevision, reason }),
+	decideSkillVersion: (id: string, versionId: string, action: "approve" | "reject", observedRevision: string, reason?: string, gitBaseAcknowledged = false) =>
+		post(`/review/skills/${id}/versions/${versionId}/decision`, {
+			action, observed_revision: observedRevision, reason, git_base_acknowledged: gitBaseAcknowledged,
+		}),
 	approve: (id: string) => post(`/review/${id}/approve`),
 	reject: (id: string, body: { reason: string }) =>
 		post(`/review/${id}/reject`, body),
@@ -1032,6 +1034,8 @@ export type PublicConfig = {
 	sso_only: boolean;
 	public_registry_enabled: boolean;
 	self_registration_enabled: boolean;
+	/** Public rollout hint; server install and review endpoints remain authoritative. */
+	skill_folder_delivery_enabled?: boolean;
 	saml_enabled: boolean;
 	exec_dashboard_available: boolean;
 	enabled_features: string[];

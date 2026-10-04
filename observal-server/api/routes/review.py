@@ -637,11 +637,24 @@ async def get_skill_version_review(
     if version.content_revision is not None and revision != version.content_revision:
         raise HTTPException(status_code=409, detail="Skill version changed; refresh before review")
     detail = _serialize_listing_detail("skill", listing, selected=version)
+    base_metadata = None
+    if version.base_version_id:
+        base_metadata = (
+            await db.execute(
+                select(
+                    SkillVersion.version, SkillVersion.delivery_mode, SkillVersion.git_url, SkillVersion.git_ref
+                ).where(SkillVersion.id == version.base_version_id, SkillVersion.listing_id == listing.id)
+            )
+        ).one_or_none()
     detail.update(
         version_id=str(version.id),
         revision=revision,
         files=declarations,
         base_version_id=str(version.base_version_id) if version.base_version_id else None,
+        base_version=base_metadata.version if base_metadata else None,
+        base_delivery_mode=base_metadata.delivery_mode if base_metadata else None,
+        base_git_url=base_metadata.git_url if base_metadata and base_metadata.delivery_mode == "git_fetch" else None,
+        base_git_ref=base_metadata.git_ref if base_metadata and base_metadata.delivery_mode == "git_fetch" else None,
     )
     response.headers["Cache-Control"] = "no-store"
     response.headers["X-Content-Type-Options"] = "nosniff"

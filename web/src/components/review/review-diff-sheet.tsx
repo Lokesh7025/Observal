@@ -44,6 +44,7 @@ import {
 	useComponentVersionDetail,
 	useRegistryItem,
 	useSkillVersionReview,
+	useSkillVersionManifest,
 } from "@/hooks/use-api";
 import { registry } from "@/lib/api";
 import type { RegistryType } from "@/lib/api";
@@ -558,18 +559,18 @@ function DiffDialogBody({
 	const { data: compDetail, isLoading: compDetailLoading } =
 		useComponentVersionDetail(
 			registryType,
-			!isAgent ? item.id : undefined,
-			!isAgent ? (item.version ?? null) : null,
+			!isAgent && item.type !== "skill" ? item.id : undefined,
+			!isAgent && item.type !== "skill" ? (item.version ?? null) : null,
 		);
 
 	// Also fetch previous approved version detail for component diff
 	const { data: compPrevDetail } = useComponentVersionDetail(
 		registryType,
-		!isAgent ? item.id : undefined,
-		!isAgent ? (previousVersion ?? null) : null,
+		!isAgent && item.type !== "skill" ? item.id : undefined,
+		!isAgent && item.type !== "skill" ? (previousVersion ?? null) : null,
 	);
 
-	const detailLoading = isAgent ? agentDetailLoading : compDetailLoading;
+	const detailLoading = isAgent ? agentDetailLoading : item.type === "skill" ? skillReviewLoading : compDetailLoading;
 
 	const bumpType = useMemo(() => {
 		if (!previousVersion || !item.version) return null;
@@ -625,12 +626,26 @@ function DiffDialogBody({
 		onOpenChange(false);
 	}, [rejectReason, item, onReject, onOpenChange]);
 
+	const { data: candidateManifest, isPending: candidatePending, isError: candidateError } = useSkillVersionManifest(
+		item.type === "skill" && item.version_id ? item.id : undefined,
+		skillReview?.files?.length ? item.version_id : undefined,
+	);
+	const { data: directBaseManifest, isPending: basePending, isError: baseError } = useSkillVersionManifest(
+		item.type === "skill" && skillReview?.base_delivery_mode === "registry_direct" ? item.id : undefined,
+		skillReview?.base_delivery_mode === "registry_direct" ? skillReview.base_version_id ?? undefined : undefined,
+	);
 	const disableApprove = item.components_ready === false ||
-		(item.type === "skill" && !!item.version_id && (skillReviewLoading || skillReviewError || !skillReview));
+		(item.type === "skill" && !!item.version_id && (
+			skillReviewLoading || skillReviewError || !skillReview ||
+			skillReview.base_delivery_mode === "git_fetch" ||
+			(!!skillReview.files?.length && (candidatePending || candidateError || candidateManifest?.revision !== skillReview.revision)) ||
+			(skillReview.base_delivery_mode === "registry_direct" &&
+				(basePending || baseError || !directBaseManifest))
+		));
 
 	const isLoading = versionsLoading || detailLoading;
 
-	const detail = (isAgent ? agentDetail : compDetail) as
+	const detail = (isAgent ? agentDetail : item.type === "skill" ? skillReview : compDetail) as
 		| Record<string, unknown>
 		| undefined;
 	// Prefer version detail fields over the sparse review item fields
@@ -818,7 +833,7 @@ function DiffDialogBody({
 									: skillReviewError ? <p role="alert" className="text-xs text-destructive">Exact skill version unavailable; approval is blocked.</p>
 									: skillReview?.files?.length ? (
 										<SkillFilesSection listingId={item.id} versionId={item.version_id}
-											baseVersionId={skillReview.base_version_id} />
+											baseVersionId={skillReview.base_version_id} baseDeliveryMode={skillReview.base_delivery_mode} />
 									) : null}
 							</>
 						)}
@@ -1163,7 +1178,9 @@ function DiffDialogBody({
 									</span>
 								</TooltipTrigger>
 								<TooltipContent>
-									<p>Cannot approve until all required components are ready</p>
+									<p>{skillReview?.base_delivery_mode === "git_fetch"
+									? "Open the exact version review to acknowledge the missing Git base file tree before approval."
+									: "Cannot approve until the exact candidate and base files are available and reviewed."}</p>
 								</TooltipContent>
 							</Tooltip>
 						</TooltipProvider>

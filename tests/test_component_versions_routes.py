@@ -1303,7 +1303,12 @@ async def test_factory_handlers_delegate_every_argument_and_return_exact_payload
         "db": db,
         "current_user": actor,
     }
-    assert review_kwargs["req"].model_dump() == {"action": "reject", "reason": "policy", "observed_revision": None}
+    assert review_kwargs["req"].model_dump() == {
+        "action": "reject",
+        "reason": "policy",
+        "observed_revision": None,
+        "git_base_acknowledged": False,
+    }
     suggestions_call.assert_awaited_once_with(
         listing_id=str(LISTING_ID),
         listing_model=McpListing,
