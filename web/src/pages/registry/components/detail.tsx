@@ -18,6 +18,7 @@ import {
   useRegistryMetrics,
   useComponentVersions,
   useComponentVersionDetail,
+  useSkillVersionManifest,
   useComponentArchive,
   useComponentUnarchive,
   useTeams,
@@ -26,9 +27,10 @@ import {
 } from "@/hooks/use-api";
 import { getUserRole } from "@/lib/api";
 import { useOptionalAuth } from "@/hooks/use-auth";
+import { useDeploymentConfig } from "@/hooks/use-deployment-config";
 import { hasMinRole } from "@/hooks/use-role-guard";
 import type { RegistryType } from "@/lib/api";
-import type { FeedbackItem, RegistryItem, ComponentVersionSummary, RecommendableType } from "@/lib/types";
+import type { FeedbackItem, RegistryItem, ComponentVersionSummary, RecommendableType, SkillVersionManifest } from "@/lib/types";
 import { compactNumber } from "@/lib/utils";
 import { canonicalRouteParts, registryIdentity } from "@/lib/registry-name";
 import { tagColorClasses } from "@/lib/tag-colors";
@@ -38,6 +40,7 @@ import { ReviewForm } from "@/components/registry/review-form";
 import { VersionDropdown } from "@/components/registry/version-dropdown";
 import { ComponentEditForm } from "@/components/registry/component-edit-form";
 import { ComponentInstallCommand } from "@/components/registry/component-install-command";
+import { ApprovedSkillFiles } from "@/components/registry/approved-skill-files";
 import { RegistryName } from "@/components/registry/registry-name";
 import { ShareLinkButton } from "@/components/registry/share-link-button";
 import {
@@ -71,6 +74,17 @@ function readReturnedToReview(payload: unknown): boolean | null {
   if (!payload || typeof payload !== "object") return null;
   const value = (payload as Record<string, unknown>).returned_to_review;
   return typeof value === "boolean" ? value : null;
+}
+
+function requiresFolderDelivery(version: ComponentVersionSummary | null, manifest?: SkillVersionManifest): boolean {
+  if (!version || version.delivery_mode !== "registry_direct") return false;
+  // A missing or invalid manifest is never evidence that a release uses the
+  // older resource-less install path. Historical populated inline scripts
+  // remain installable while a genuinely empty one needs bundle delivery.
+  if (!manifest || manifest.version_id !== version.id) return true;
+  return manifest.files.some((file) => file.path !== "SKILL.md" && (
+    file.path !== `scripts/${version.script_filename}` || file.size === 0
+  ));
 }
 
 function statusVariant(status?: string) {
@@ -124,6 +138,7 @@ export default function ComponentDetailPage({
   const navigate = useNavigate();
   const singularType = type === "sandboxes" ? "sandbox" : type.replace(/s$/, "");
   const { isAuthenticated } = useOptionalAuth();
+  const { skillFolderDeliveryEnabled } = useDeploymentConfig();
   const { data: item, isLoading, isError, error, refetch } = useRegistryItem(type, id);
   const { data: feedbackItems, refetch: refetchFeedback } = useFeedback(singularType, id);
   const { data: feedbackSummary, refetch: refetchSummary } = useFeedbackSummary(id);
@@ -131,7 +146,9 @@ export default function ComponentDetailPage({
   const { data: rawMetrics } = useRegistryMetrics(type, id, isAuthenticated);
   const { data: versionsData, isLoading: versionsLoading } = useComponentVersions(type, id);
   const [selectedVersion, setSelectedVersion] = useState<string | null>(null);
-  const { data: versionDetail } = useComponentVersionDetail(type, id, selectedVersion);
+  // Skill version detail includes stored file bytes. Use the bounded summary
+  // and explicit manifest/file endpoints instead of fetching every file on view.
+  const { data: versionDetail } = useComponentVersionDetail(singularType === "skill" ? undefined : type, id, selectedVersion);
   const { data: whoami } = useWhoami(isAuthenticated);
   const { data: teams = [] } = useTeams(isAuthenticated);
   const updateVisibility = useUpdateRegistryVisibility();
@@ -185,14 +202,29 @@ export default function ComponentDetailPage({
 
   const versions = versionsData?.items ?? [];
   // VersionDropdown expects AgentVersionSummary shape; ComponentVersionSummary is compatible
-  const versionsForDropdown = versions.filter((v) => v.status === "approved") as unknown as import("@/lib/types").AgentVersionSummary[];
-  const latestApprovedVersion = versions.find((v) => v.status === "approved")?.version;
+  const versionsForDropdown = versions.filter((v) => v.status === "approved" && !v.requires_global_review) as unknown as import("@/lib/types").AgentVersionSummary[];
+  const latestApprovedVersion = versions.find((v) => v.status === "approved" && !v.requires_global_review)?.version;
   const effectiveVersion = selectedVersion ?? latestApprovedVersion ?? (item?.version as string | undefined);
+  // Never substitute the listing-level latest release when the viewer selected
+  // an older version that is missing or still loading. Both the command and
+  // resource view must resolve to the exact approved version UUID.
+  const selectedApprovedSkillVersion = singularType === "skill"
+    ? versions.find((version) => version.status === "approved" && !version.requires_global_review && version.version === effectiveVersion) ?? null
+    : null;
+  const latestApprovedSkillVersion = singularType === "skill"
+    ? versions.find((version) => version.status === "approved" && !version.requires_global_review) ?? null
+    : null;
+  const { data: selectedManifest } = useSkillVersionManifest(
+    singularType === "skill" && selectedApprovedSkillVersion?.delivery_mode === "registry_direct" ? String(item?.id) : undefined,
+    selectedApprovedSkillVersion?.delivery_mode === "registry_direct" ? selectedApprovedSkillVersion.id : undefined,
+  );
+  const { data: latestManifest } = useSkillVersionManifest(
+    singularType === "skill" && latestApprovedSkillVersion?.delivery_mode === "registry_direct" ? String(item?.id) : undefined,
+    latestApprovedSkillVersion?.delivery_mode === "registry_direct" ? latestApprovedSkillVersion.id : undefined,
+  );
   // Overlay version-specific description when a version is selected
   const effectiveItem: RegistryItem | undefined = item
-    ? versionDetail
-      ? { ...item, ...(versionDetail as unknown as RegistryItem) }
-      : item
+    ? { ...item, ...((selectedApprovedSkillVersion ?? versionDetail) as unknown as RegistryItem | undefined) }
     : undefined;
 
   // Header/breadcrumb show the bare name; the install command needs the
@@ -412,6 +444,13 @@ export default function ComponentDetailPage({
               <TabsContent value="overview" forceMount className="mt-6 data-[state=inactive]:hidden">
                 <div className="space-y-6 w-full min-h-[400px]">
                   <ComponentMetadata item={effectiveItem ?? item} />
+                  {selectedApprovedSkillVersion?.delivery_mode === "registry_direct" && (
+                    <ApprovedSkillFiles
+                      key={selectedApprovedSkillVersion.id}
+                      listingId={String(item.id)}
+                      versionId={selectedApprovedSkillVersion.id}
+                    />
+                  )}
                 </div>
               </TabsContent>
 
@@ -542,7 +581,15 @@ export default function ComponentDetailPage({
               {/* Install command (MCPs, Skills, Hooks only) */}
               {(item.status === "approved" || item.status === "archived") &&
                 (singularType === "mcp" || singularType === "skill" || singularType === "hook") && (
-                <ComponentInstallCommand componentType={singularType} componentName={componentRef} />
+                <ComponentInstallCommand
+                  componentType={singularType}
+                  componentName={componentRef}
+                  selectedSkillVersion={selectedApprovedSkillVersion}
+                  skillFolderDeliveryEnabled={skillFolderDeliveryEnabled}
+                  selectedVersionRequiresFolderDelivery={requiresFolderDelivery(selectedApprovedSkillVersion, selectedManifest)}
+                  latestMayRequireFolderDelivery={versionsLoading || !latestApprovedSkillVersion ||
+                    requiresFolderDelivery(latestApprovedSkillVersion, latestManifest)}
+                />
               )}
 
               {/* Stats */}

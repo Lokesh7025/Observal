@@ -162,15 +162,43 @@ test("gated reviewer and installer compare exact candidate with reviewed base", 
 	const harnessResponse = await fetch(`${API_BASE}/api/v1/config/harnesses`);
 	const harnessList = await harnessResponse.json();
 	const skillHarnesses = harnessList.harnesses.filter((harness: {capabilities: string[]}) => harness.capabilities.includes("skills"));
-	await install.getByRole("combobox").click();
+	await install.getByRole("combobox", { name: "Harness" }).click();
 	await expect(page.getByRole("option")).toHaveCount(skillHarnesses.length);
 	await page.getByRole("option").first().click();
 	const copy = install.getByRole("button", { name: "Copy command" });
 	await copy.scrollIntoViewIfNeeded();
 	await expect(copy).toBeVisible();
 	await expect(install.locator("code")).toContainText("observal registry skill install");
+	await expect(install.locator("code")).toContainText(/--version \d+\.\d+\.\d+.*--scope user/);
+	await install.getByRole("combobox", { name: "Skill installation scope" }).click();
+	await page.getByRole("option", { name: "Project" }).click();
+	await expect(install.locator("code")).toContainText("--scope project");
+	await expect(install.getByText(/Run from the project root/)).toBeVisible();
+	await install.getByRole("combobox", { name: "Skill release selection" }).click();
+	await page.getByRole("option", { name: "Follow latest" }).click();
+	await expect(install.locator("code")).not.toContainText("--version");
+	await expect(install.getByText(/may install a newer release/)).toBeVisible();
+	await expect(page.getByRole("region", { name: "Reviewed skill files" })).toBeVisible();
 	if (process.env.OBSERVAL_1730_SCREENSHOT_DIR) {
 		await page.screenshot({ path: `${process.env.OBSERVAL_1730_SCREENSHOT_DIR}/skill-install-mobile.png`, fullPage: true, animations: "disabled" });
+	}
+});
+
+test("approved exact version exposes inert reviewed files without a misleading gate-off install command", async ({ page }) => {
+	test.skip(!process.env.OBSERVAL_APPROVED_SKILL_LISTING_ID, "Provide an existing approved isolated-stack listing");
+	const listingId = process.env.OBSERVAL_APPROVED_SKILL_LISTING_ID!;
+	await loginToWebUI(page);
+	await page.goto(`/components/${listingId}?type=skills`);
+	const files = page.getByRole("region", { name: "Reviewed skill files" });
+	await expect(files.getByText("Files in this release")).toBeVisible();
+	await expect(files.getByRole("button", { name: /Select SKILL.md/ })).toBeVisible();
+	await files.getByRole("button", { name: /Select SKILL.md/ }).click();
+	await expect(files.locator("pre")).toContainText("name:");
+	const install = page.locator("aside");
+	await expect(install.getByText("Complete-folder installs are not available on this server yet.")).toBeVisible();
+	await expect(install.getByRole("button", { name: "Copy command" })).toBeDisabled();
+	if (process.env.OBSERVAL_1730_SCREENSHOT_DIR) {
+		await page.screenshot({ path: `${process.env.OBSERVAL_1730_SCREENSHOT_DIR}/approved-skill-consumer.png`, fullPage: true, animations: "disabled" });
 	}
 });
 

@@ -1,4 +1,5 @@
 # SPDX-FileCopyrightText: 2025 Observal Contributors
+# SPDX-FileCopyrightText: 2026 Kaushik <kaushikrjpm10@gmail.com>
 # SPDX-License-Identifier: Apache-2.0
 
 name: E2E Frontend
@@ -9,6 +10,9 @@ on:
     paths:
       - 'web/**'
       - 'tests/e2e/**'
+      - 'observal-server/api/routes/skill_files.py'
+      - 'observal-server/api/routes/component_versions.py'
+      - 'observal-server/api/routes/config.py'
       - '.github/workflows/e2e-frontend.yml'
 
 concurrency:
@@ -87,9 +91,13 @@ jobs:
         working-directory: web
         run: pnpm exec playwright install chromium --with-deps
 
-      - name: Run frontend e2e
+      - name: Run frontend and gate-off folder e2e
         working-directory: web
-        run: pnpm exec playwright test frontend-flows
+        env:
+          # This runner builds a fresh disposable stack; never point this job
+          # at a long-lived server when enabling the draft-creating tests.
+          OBSERVAL_ISOLATED_STACK: 'true'
+        run: pnpm exec playwright test frontend-flows skill-folder
 
       - name: Upload test results
         if: always()

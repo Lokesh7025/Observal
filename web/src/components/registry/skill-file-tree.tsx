@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Shree Harini <shree@observal.dev>
+// SPDX-FileCopyrightText: 2026 Kaushik <kaushikrjpm10@gmail.com>
 // SPDX-License-Identifier: Apache-2.0
 
 /**
@@ -88,6 +89,11 @@ function getFileIcon(name: string, executable?: boolean) {
 	return File;
 }
 
+function authoredSize(file: SkillResource): number {
+	if (file.encoding === "base64") return Math.floor(file.content.length * 3 / 4) - (file.content.endsWith("==") ? 2 : file.content.endsWith("=") ? 1 : 0);
+	return new TextEncoder().encode(file.content).byteLength;
+}
+
 function formatSize(bytes: number): string {
 	if (bytes < 1024) return `${bytes} B`;
 	if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
@@ -130,7 +136,7 @@ function buildFileTree(files: Array<SkillResource | SkillManifestFile>): FileNod
 			path: file.path,
 			type: "file",
 			file,
-			size: "size" in file ? file.size : file.content.length,
+			size: "size" in file ? file.size : authoredSize(file),
 			executable: "executable" in file ? file.executable : ("mode" in file ? file.mode === "0755" : false),
 		};
 		parent.push(fileNode);
@@ -168,25 +174,29 @@ function TreeNode({
 
 	const handleClick = useCallback(() => {
 		if (node.type === "directory") {
-			setExpanded(!expanded);
+			setExpanded((open) => !open);
 		} else {
 			onSelect?.(node.path);
 		}
-	}, [node, expanded, onSelect]);
+	}, [node, onSelect]);
 
 	const FileIcon = node.type === "directory"
 		? (expanded ? FolderOpen : Folder)
 		: getFileIcon(node.name, node.executable);
 
 	const content = (
-		<div
+		<button
+			type="button"
 			className={cn(
-				"flex items-center gap-1.5 py-1 px-2 rounded-sm cursor-pointer text-sm flex-1",
-				"hover:bg-muted/50 transition-colors",
+				"flex items-center gap-1.5 py-1 px-2 rounded-sm text-left text-sm flex-1 min-w-0",
+				"hover:bg-muted/50 focus-visible:outline-2 focus-visible:outline-primary transition-colors",
 				isSelected && "bg-primary/10 text-primary",
 			)}
 			style={{ paddingLeft: `${level * 16 + 8}px` }}
 			onClick={handleClick}
+			aria-label={`${node.type === "directory" ? (expanded ? "Collapse" : "Expand") : "Select"} ${node.path}`}
+			aria-expanded={node.type === "directory" ? expanded : undefined}
+			aria-pressed={node.type === "file" && onSelect ? isSelected : undefined}
 		>
 			{node.type === "directory" && (
 				<span className="w-4 h-4 flex items-center justify-center">
@@ -200,8 +210,8 @@ function TreeNode({
 			{node.type === "file" && <span className="w-4" />}
 			<FileIcon className={cn(
 				"h-4 w-4 shrink-0",
-				node.type === "directory" ? "text-amber-500" : "text-muted-foreground",
-				node.executable && "text-green-600",
+				node.type === "directory" ? "text-warning" : "text-muted-foreground",
+				node.executable && "text-success",
 			)} />
 			<span className="truncate flex-1">{node.name}</span>
 			{node.executable && !isSkillMd && (
@@ -214,7 +224,7 @@ function TreeNode({
 					{formatSize(node.size)}
 				</span>
 			)}
-		</div>
+		</button>
 	);
 
 	// Action menu for files/directories (non-readonly mode)
@@ -224,8 +234,8 @@ function TreeNode({
 				<Button
 					variant="ghost"
 					size="icon"
-					className="h-6 w-6 opacity-0 group-hover:opacity-100"
-					onClick={(e) => e.stopPropagation()}
+					className="h-6 w-6 opacity-0 group-hover:opacity-100 focus-visible:opacity-100"
+					aria-label={`Actions for ${node.path}`}
 				>
 					<MoreVertical className="h-3.5 w-3.5" />
 				</Button>
@@ -306,7 +316,7 @@ export function SkillFileTree({
 
 	const totalSize = useMemo(() => {
 		return allFiles.reduce((sum, f) => {
-			const size = "size" in f ? f.size : f.content.length;
+			const size = "size" in f ? f.size : authoredSize(f);
 			return sum + size;
 		}, 0);
 	}, [allFiles]);
