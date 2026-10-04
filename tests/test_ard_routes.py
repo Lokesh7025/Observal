@@ -549,12 +549,15 @@ async def test_bundled_skill_artifact_is_not_activatable_as_partial_skill(sessio
         assert entry.activatable is False
         assert entry.raw_entry["obs:artifactScope"] == "preview"
         assert availability(entry) == "explicit-install"
-    for viewer in (owner, stranger):
-        async with _client(_app(sessions, viewer)) as client:
-            result = await client.get(f"/api/v1/artifacts/skill/{skill.id}/1.2.0")
-            assert result.status_code == 409
-            assert result.json()["errorCode"] == "COMPLETE_FOLDER_REQUIRED"
-            assert "echo complete" not in result.text
+    async with _client(_app(sessions, owner)) as client:
+        result = await client.get(f"/api/v1/artifacts/skill/{skill.id}/1.2.0")
+        assert result.status_code == 409
+        assert result.json()["errorCode"] == "COMPLETE_FOLDER_REQUIRED"
+        assert "echo complete" not in result.text
+    # ARD now denies strangers outside the owner's teamspace before disclosing
+    # whether this resource-bearing version exists.
+    async with _client(_app(sessions, stranger)) as client:
+        assert (await client.get(f"/api/v1/artifacts/skill/{skill.id}/1.2.0")).status_code == 404
 
 
 @pytest.mark.asyncio

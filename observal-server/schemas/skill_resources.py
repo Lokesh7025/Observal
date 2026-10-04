@@ -6,7 +6,7 @@
 import uuid
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator
 
 
 class SkillResource(BaseModel):
@@ -114,6 +114,11 @@ class SkillDraftRebaseRequest(BaseModel):
     current_version_id: uuid.UUID
     observed_current_revision: SkillRevision
     new_version: str | None = Field(default=None, pattern=r"^\d+\.\d+\.\d+$", max_length=50)
+
+    @field_validator("current_version_id", mode="before")
+    @classmethod
+    def _parse_current_version_id(cls, value: uuid.UUID | str) -> uuid.UUID | str:
+        return uuid.UUID(value) if isinstance(value, str) else value
 
 
 class SkillFileOperations(BaseModel):

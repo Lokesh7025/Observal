@@ -547,7 +547,7 @@ async def install_skill(
         if needs_bundle_delivery(installed):
             import services.dynamic_settings as _ds
 
-            if not _ds.get_sync_bool("registry.skill_folder_delivery_enabled", False):
+            if not await _ds.get_bool("registry.skill_folder_delivery_enabled", False):
                 raise HTTPException(status_code=409, detail="Skill folder delivery is disabled until fleet rollout")
         try:
             validate_skill_bundle(

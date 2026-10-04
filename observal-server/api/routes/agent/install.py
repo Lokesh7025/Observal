@@ -294,7 +294,7 @@ async def install_agent(
     bundled_skills = any(needs_bundle_delivery(row) for row in pins.listings["skill"].values())
     if bundled_skills and SKILL_EXTRA_FILES_FEATURE not in req.supported_features:
         raise HTTPException(status_code=409, detail="Client must support skill_extra_files_v1 to install this agent")
-    if bundled_skills and not _ds.get_sync_bool("registry.skill_folder_delivery_enabled", False):
+    if bundled_skills and not await _ds.get_bool("registry.skill_folder_delivery_enabled", False):
         raise HTTPException(status_code=409, detail="Skill folder delivery is disabled until fleet rollout")
     lock_digest = stored_lock_digest(install_version)
     mcp_listings_map = pins.listings["mcp"]

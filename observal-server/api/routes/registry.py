@@ -235,7 +235,7 @@ async def update_registry_visibility(
             if not membership or membership.role not in (TeamRole.owner, TeamRole.reviewer):
                 raise HTTPException(status_code=403, detail="Team membership changed; refresh before updating")
         if await skill_transition_needs_rollout_gate(db, listing.id):
-            if not _ds.get_sync_bool("registry.skill_folder_delivery_enabled", False):
+            if not await _ds.get_bool("registry.skill_folder_delivery_enabled", False):
                 raise HTTPException(status_code=409, detail="Skill folder visibility requires global version re-review")
             identity_snapshot = await snapshot_skill_identity(db, listing)
 

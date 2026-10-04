@@ -36,7 +36,7 @@ _DRAFT = json.loads((Path(__file__).parent / "fixtures/skill_folder_contract.jso
 async def test_tracked_folder_visibility_rebinds_all_revisions_and_reversal_cannot_replay(monkeypatch):
     engine = ds.make_engine()
     maker = await ds.create_schema(engine)
-    monkeypatch.setattr("services.dynamic_settings.get_sync_bool", lambda _name, _default=False: True)
+    monkeypatch.setattr("services.dynamic_settings.get_bool", AsyncMock(return_value=True))
     monkeypatch.setattr("services.inbox.sources.on_review_requested", AsyncMock(return_value=0))
     monkeypatch.setattr("services.inbox.sources.on_review_withdrawn", AsyncMock(return_value=0))
     try:
@@ -129,7 +129,7 @@ async def test_tracked_folder_visibility_rebinds_all_revisions_and_reversal_cann
 async def test_tracked_public_transfer_rebinds_review_and_revokes_previous_owner(monkeypatch):
     engine = ds.make_engine()
     maker = await ds.create_schema(engine)
-    monkeypatch.setattr("services.dynamic_settings.get_sync_bool", lambda _name, _default=False: True)
+    monkeypatch.setattr("services.dynamic_settings.get_bool", AsyncMock(return_value=True))
     try:
         async with maker() as db:
             owner = await ds.user(db)
@@ -178,7 +178,7 @@ async def test_tracked_public_transfer_rebinds_review_and_revokes_previous_owner
 async def test_public_tracked_release_transfer_requeues_global_review(monkeypatch):
     engine = ds.make_engine()
     maker = await ds.create_schema(engine)
-    monkeypatch.setattr("services.dynamic_settings.get_sync_bool", lambda _name, _default=False: True)
+    monkeypatch.setattr("services.dynamic_settings.get_bool", AsyncMock(return_value=True))
     try:
         async with maker() as db:
             owner = await ds.user(db)
@@ -206,7 +206,7 @@ async def test_public_tracked_release_transfer_requeues_global_review(monkeypatc
 async def test_all_version_rebind_preserves_draft_base_and_private_review_provenance(monkeypatch):
     engine = ds.make_engine()
     maker = await ds.create_schema(engine)
-    monkeypatch.setattr("services.dynamic_settings.get_sync_bool", lambda _name, _default=False: True)
+    monkeypatch.setattr("services.dynamic_settings.get_bool", AsyncMock(return_value=True))
     monkeypatch.setattr("services.inbox.sources.on_review_requested", AsyncMock(return_value=0))
     monkeypatch.setattr("services.inbox.sources.on_review_withdrawn", AsyncMock(return_value=0))
     try:
@@ -284,7 +284,7 @@ async def test_all_version_rebind_preserves_draft_base_and_private_review_proven
 async def test_transferred_public_release_needs_fresh_global_exact_decision(monkeypatch):
     engine = ds.make_engine()
     maker = await ds.create_schema(engine)
-    monkeypatch.setattr("services.dynamic_settings.get_sync_bool", lambda _name, _default=False: True)
+    monkeypatch.setattr("services.dynamic_settings.get_bool", AsyncMock(return_value=True))
     monkeypatch.setattr("services.inbox.sources.on_review_requested", AsyncMock(return_value=0))
     monkeypatch.setattr("api.routes.component_versions.inbox.on_review_decided", AsyncMock(return_value=0))
     try:
@@ -338,7 +338,7 @@ async def test_transferred_public_release_needs_fresh_global_exact_decision(monk
 async def test_team_owned_tracked_release_transfer_reviews_final_public_identity(monkeypatch):
     engine = ds.make_engine()
     maker = await ds.create_schema(engine)
-    monkeypatch.setattr("services.dynamic_settings.get_sync_bool", lambda _name, _default=False: True)
+    monkeypatch.setattr("services.dynamic_settings.get_bool", AsyncMock(return_value=True))
     requested = AsyncMock(return_value=0)
     monkeypatch.setattr("services.inbox.sources.on_review_requested", requested)
     try:
@@ -375,7 +375,7 @@ async def test_team_owned_tracked_release_transfer_reviews_final_public_identity
 async def test_corrupted_tracked_revision_refuses_transition_without_changing_identity(monkeypatch):
     engine = ds.make_engine()
     maker = await ds.create_schema(engine)
-    monkeypatch.setattr("services.dynamic_settings.get_sync_bool", lambda _name, _default=False: True)
+    monkeypatch.setattr("services.dynamic_settings.get_bool", AsyncMock(return_value=True))
     try:
         async with maker() as db:
             owner = await ds.user(db)
@@ -411,7 +411,7 @@ async def test_corrupted_tracked_revision_refuses_transition_without_changing_id
 async def test_transfer_refuses_unbound_resource_bearing_release(monkeypatch):
     engine = ds.make_engine()
     maker = await ds.create_schema(engine)
-    monkeypatch.setattr("services.dynamic_settings.get_sync_bool", lambda _name, _default=False: True)
+    monkeypatch.setattr("services.dynamic_settings.get_bool", AsyncMock(return_value=True))
     try:
         async with maker() as db:
             owner = await ds.user(db)
@@ -451,7 +451,7 @@ async def test_transfer_refuses_unbound_resource_bearing_release(monkeypatch):
 async def test_transfer_refuses_unresolved_old_team_approval_provenance(monkeypatch):
     engine = ds.make_engine()
     maker = await ds.create_schema(engine)
-    monkeypatch.setattr("services.dynamic_settings.get_sync_bool", lambda _name, _default=False: True)
+    monkeypatch.setattr("services.dynamic_settings.get_bool", AsyncMock(return_value=True))
     monkeypatch.setattr("services.inbox.sources.on_review_requested", AsyncMock(return_value=0))
     monkeypatch.setattr("services.inbox.sources.on_review_withdrawn", AsyncMock(return_value=0))
     try:
@@ -501,7 +501,11 @@ async def test_http_visibility_and_transfer_require_gate_and_preserve_manifest(m
     engine = ds.make_engine()
     maker = await ds.create_schema(engine)
     enabled = False
-    monkeypatch.setattr("services.dynamic_settings.get_sync_bool", lambda _name, _default=False: enabled)
+
+    async def current_gate(*_args):
+        return enabled
+
+    monkeypatch.setattr("services.dynamic_settings.get_bool", current_gate)
     try:
         async with maker() as db:
             owner = await ds.user(db)

@@ -769,7 +769,7 @@ function SkillFields({
 	const scriptLanguage = codeLanguageFromFilename(state.script_filename);
 	const scriptLanguageName = codeLanguageLabel(scriptLanguage);
 	const [selectedFilePath, setSelectedFilePath] = useState<string | null>(null);
-	const defaultTab = state.extra_files?.length > 0 ? "upload" : state.git_url ? "git" : "paste";
+	const defaultTab = state.git_url ? "git" : "paste";
 
 	return (
 		<div className="space-y-4">
@@ -799,11 +799,16 @@ function SkillFields({
 				</div>
 			</div>
 
+			{state.extra_files.length > 0 && (
+				<p role="status" className="text-sm text-muted-foreground">
+					This release contains folder files. This editor cannot save changes to them; use a version-bound folder draft instead.
+				</p>
+			)}
 			<Tabs defaultValue={defaultTab} className="w-full">
 				<TabsList className="grid w-full grid-cols-3">
 					<TabsTrigger value="git">Git</TabsTrigger>
 					<TabsTrigger value="paste">Paste</TabsTrigger>
-					<TabsTrigger value="upload">Upload</TabsTrigger>
+					<TabsTrigger value="upload" disabled title="Folder uploads require a version-bound draft editor">Upload (unavailable)</TabsTrigger>
 				</TabsList>
 
 				<TabsContent value="git" className="space-y-4 pt-4">

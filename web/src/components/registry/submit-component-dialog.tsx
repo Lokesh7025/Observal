@@ -255,9 +255,14 @@ export function SubmitComponentDialog({
 	const [skillScriptFilename, setSkillScriptFilename] = useState(
 		(d?.script_filename as string) ?? "",
 	);
-	const [skillMode, setSkillMode] = useState<"git" | "paste" | "upload">("git");
+	const isFolderVersion = type === "skills" && typeof d?.folder_version_id === "string";
+	const [skillMode, setSkillMode] = useState<"git" | "paste" | "upload">(
+		isFolderVersion ? "upload" : d?.delivery_mode === "registry_direct" ? "paste" : "git",
+	);
 	// Folder mode: extra files beyond SKILL.md
-	const [skillExtraFiles, setSkillExtraFiles] = useState<Array<{ path: string; content: string; executable?: boolean; encoding?: "base64" }>>([]);
+	const [skillExtraFiles, setSkillExtraFiles] = useState<Array<{ path: string; content: string; executable?: boolean; encoding?: "base64" }>>(
+		Array.isArray(d?.extra_files) ? d.extra_files as Array<{ path: string; content: string; executable?: boolean; encoding?: "base64" }> : [],
+	);
 	const [pendingSkillUploads, setPendingSkillUploads] = useState(0);
 	const skillUploadGeneration = useRef(0);
 	const [selectedFilePath, setSelectedFilePath] = useState<string | null>(null);
@@ -825,6 +830,7 @@ export function SubmitComponentDialog({
 								value={name}
 								onChange={(e) => setName(e.target.value)}
 								placeholder="my-component"
+								disabled={isFolderVersion}
 							/>
 						</div>
 						<div className="space-y-1.5">
@@ -834,6 +840,7 @@ export function SubmitComponentDialog({
 								value={version}
 								onChange={(e) => setVersion(e.target.value)}
 								placeholder="0.1.0"
+								disabled={isFolderVersion}
 							/>
 						</div>
 					</div>
@@ -855,7 +862,7 @@ export function SubmitComponentDialog({
 							<PickerSelect
 								id="component-publish-to"
 								value={(fixedTeamId ?? teamId) || "personal"}
-								disabled={fixedTeamId !== undefined || fixedVisibility !== undefined}
+								disabled={isFolderVersion || fixedTeamId !== undefined || fixedVisibility !== undefined}
 								onValueChange={(value) => {
 									const next = value === "personal" ? "" : value;
 									setTeamId(next);
@@ -876,7 +883,7 @@ export function SubmitComponentDialog({
 							<PickerSelect
 								id="component-visibility"
 								value={fixedVisibility ?? visibility}
-								disabled={fixedVisibility !== undefined || teamRequiresPrivate}
+								disabled={isFolderVersion || fixedVisibility !== undefined || teamRequiresPrivate}
 								onValueChange={(value) => {
 									if (value === "team" && !(fixedTeamId ?? teamId)) {
 										toast.error("Team visibility requires a teamspace");
@@ -1149,8 +1156,8 @@ export function SubmitComponentDialog({
 
 							<Tabs value={skillMode} onValueChange={(v) => setSkillMode(v as "git" | "paste" | "upload")} className="w-full">
 								<TabsList className="grid w-full grid-cols-3">
-									<TabsTrigger value="git">Git</TabsTrigger>
-									<TabsTrigger value="paste">Paste</TabsTrigger>
+									<TabsTrigger value="git" disabled={isFolderVersion}>Git</TabsTrigger>
+									<TabsTrigger value="paste" disabled={isFolderVersion}>Paste</TabsTrigger>
 									<TabsTrigger value="upload">Upload</TabsTrigger>
 								</TabsList>
 
@@ -1332,7 +1339,16 @@ export function SubmitComponentDialog({
 											{skillMdContent && (
 												<div
 													className={`flex items-center justify-between px-3 py-1.5 text-sm cursor-pointer hover:bg-muted/50 ${selectedFilePath === "SKILL.md" ? "bg-primary/10" : ""}`}
-													onClick={() => setSelectedFilePath("SKILL.md")}
+												role="button"
+												tabIndex={0}
+												aria-label="Edit SKILL.md"
+												onClick={() => setSelectedFilePath("SKILL.md")}
+												onKeyDown={(event) => {
+													if (event.key === "Enter" || event.key === " ") {
+														event.preventDefault();
+														setSelectedFilePath("SKILL.md");
+													}
+												}}
 												>
 													<span className="flex items-center gap-2">
 														<File className="h-4 w-4 text-muted-foreground" />
@@ -1345,7 +1361,16 @@ export function SubmitComponentDialog({
 												<div
 													key={file.path}
 													className={`flex items-center justify-between px-3 py-1.5 text-sm cursor-pointer hover:bg-muted/50 ${selectedFilePath === file.path ? "bg-primary/10" : ""}`}
-													onClick={() => setSelectedFilePath(file.path)}
+													role="button"
+												tabIndex={0}
+												aria-label={`Edit ${file.path}`}
+												onClick={() => setSelectedFilePath(file.path)}
+												onKeyDown={(event) => {
+													if (event.target === event.currentTarget && (event.key === "Enter" || event.key === " ")) {
+														event.preventDefault();
+														setSelectedFilePath(file.path);
+													}
+												}}
 												>
 													<span className="flex items-center gap-2">
 														<File className="h-4 w-4 text-muted-foreground" />
@@ -1617,7 +1642,7 @@ export function SubmitComponentDialog({
 					<div className="space-y-1.5">
 						<Label>Supported harnesses</Label>
 						<div className="flex flex-wrap gap-1.5">
-							{(harnessList ?? []).map((harness) => (
+							{(harnessList ?? []).filter((harness) => type !== "skills" || harness.capabilities.includes("skills") || supportedHarnesses.includes(harness.name)).map((harness) => (
 								<button
 									key={harness.name}
 									type="button"
@@ -1638,7 +1663,19 @@ export function SubmitComponentDialog({
 					<div className="flex justify-end gap-2 pt-2">
 						{isEditMode ? (
 							<>
-								{isPendingEdit ? (
+								{isFolderVersion ? (
+									<Button
+										onClick={() => {
+										const err = validateForSubmit();
+										if (err) { toast.error(err); return; }
+										onUpdateDraft?.(String(d?.id), buildBody());
+									}}
+										disabled={busy || pendingSkillUploads > 0}
+									>
+										{isSavingDraft && <Loader2 className="h-4 w-4 animate-spin mr-1.5" />}
+										Save folder changes
+									</Button>
+								) : isPendingEdit ? (
 									<Button
 										onClick={() => {
 											const err = validateForSubmit();

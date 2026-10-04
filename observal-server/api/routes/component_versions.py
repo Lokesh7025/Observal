@@ -523,7 +523,7 @@ async def _review_version(
         if needs_bundle_delivery(ver):
             if selected_id is None or req.observed_revision is None:
                 raise HTTPException(status_code=409, detail="Review the bundled skill UUID with its observed revision")
-            if not _ds.get_sync_bool("registry.skill_folder_delivery_enabled", False):
+            if not await _ds.get_bool("registry.skill_folder_delivery_enabled", False):
                 raise HTTPException(status_code=409, detail="Skill folder review is disabled until fleet rollout")
         if (ver.base_version_id is not None or ver.content_revision is not None or (ver.review_epoch or 0) > 0) and (
             req.observed_revision is None

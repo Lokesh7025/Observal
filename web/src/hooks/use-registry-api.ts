@@ -16,7 +16,7 @@ import {
   useQueryClient,
 } from "@tanstack/react-query";
 import { toast } from "sonner";
-import type { SkillFolderDraftRequest } from "@/lib/types";
+import type { SkillFolderDraftRequest, SkillResource } from "@/lib/types";
 import {
   registry,
   type RegistryType,
@@ -207,6 +207,94 @@ export function useComponentVersionSuggestions(type: RegistryType | undefined, l
 }
 
 // ── Skill Folder Version APIs ──────────────────────────────────────
+
+async function verifiedSkillFile(bytes: ArrayBuffer, expectedHash: string): Promise<void> {
+  const digest = await crypto.subtle.digest("SHA-256", bytes);
+  const hash = Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+  if (hash !== expectedHash) throw new Error("Saved folder file changed while loading; retry from the latest manifest");
+}
+
+function encodeBinary(bytes: Uint8Array): string {
+  const chunks: string[] = [];
+  for (let offset = 0; offset < bytes.length; offset += 8192) {
+    chunks.push(String.fromCharCode(...bytes.subarray(offset, offset + 8192)));
+  }
+  return btoa(chunks.join(""));
+}
+
+/** Load one exact saved version, verifying every fetched byte before offering an editor. */
+export function useLoadSkillFolderDraft() {
+  return useMutation({
+    mutationFn: async ({ listingId, versionId }: { listingId: string; versionId: string }) => {
+      const manifest = await registry.getSkillVersionManifest(listingId, versionId);
+      const files = await Promise.all(manifest.files.map(async (file) => {
+        const result = await registry.getSkillFileContent(listingId, versionId, file.path);
+        if (result.encoding === "utf-8" && (result.version_id !== versionId || result.revision !== manifest.revision)) {
+          throw new Error("Saved folder changed while loading; retry from the latest manifest");
+        }
+        const bytes = result.encoding === "binary"
+          ? await result.content.arrayBuffer() : new TextEncoder().encode(result.content).buffer;
+        if (bytes.byteLength !== file.size) throw new Error("Saved folder file size changed; retry");
+        await verifiedSkillFile(bytes, file.sha256);
+        return {
+          path: file.path,
+          content: result.encoding === "binary" ? encodeBinary(new Uint8Array(bytes)) : result.content,
+          ...(result.encoding === "binary" ? { encoding: "base64" as const } : {}),
+          executable: file.mode === "0755",
+        } satisfies SkillResource;
+      }));
+      const latest = await registry.getSkillVersionManifest(listingId, versionId);
+      if (manifest.revision !== latest.revision) throw new Error("Saved folder changed while loading; retry");
+      const skillMd = files.find((file) => file.path === "SKILL.md");
+      if (!skillMd || skillMd.encoding === "base64") throw new Error("Saved folder has no text SKILL.md");
+      return {
+        revision: manifest.revision,
+        skill_md_content: skillMd.content,
+        extra_files: files.filter((file) => file.path !== "SKILL.md"),
+      };
+    },
+    onError: (err: Error) => toast.error(err.message || "Failed to open saved folder"),
+  });
+}
+
+export function useUpdateSkillFolderDraft() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ listingId, versionId, observedRevision, body }: {
+      listingId: string; versionId: string; observedRevision: string; body: Record<string, unknown>;
+    }) => registry.updateSkillVersionDraft(listingId, versionId, {
+      observed_revision: observedRevision,
+      description: body.description,
+      task_type: body.task_type,
+      supported_harnesses: body.supported_harnesses,
+      skill_md_content: body.skill_md_content,
+      extra_files: body.extra_files,
+    }),
+    onSuccess: (_data, vars) => {
+      qc.invalidateQueries({ queryKey: ["registry", "skills"] });
+      qc.invalidateQueries({ queryKey: ["component-versions", "skills", vars.listingId] });
+      qc.invalidateQueries({ queryKey: ["skill-version-manifest", vars.listingId, vars.versionId] });
+      toast.success("Saved the same folder version");
+    },
+    onError: (err: Error) => toast.error(err.message || "Failed to save folder version"),
+  });
+}
+
+export function useSubmitSkillFolderDraft() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ listingId, versionId, observedRevision }: {
+      listingId: string; versionId: string; observedRevision: string;
+    }) => registry.submitSkillVersionDraft(listingId, versionId, observedRevision),
+    onSuccess: (_data, vars) => {
+      qc.invalidateQueries({ queryKey: ["registry", "skills"] });
+      qc.invalidateQueries({ queryKey: ["component-versions", "skills", vars.listingId] });
+      qc.invalidateQueries({ queryKey: ["review"] });
+      toast.success("Submitted exact folder version for review");
+    },
+    onError: (err: Error) => toast.error(err.message || "Failed to submit folder version"),
+  });
+}
 
 export function useSkillVersionManifest(listingId: string | undefined, versionId: string | undefined) {
   return useQuery({

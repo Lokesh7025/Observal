@@ -35,7 +35,7 @@ async def test_tracked_visibility_and_manifest_lock_order(monkeypatch, writer_fi
     schema = f"skill_identity_{uuid.uuid4().hex}"
     admin = create_async_engine(url)
     engine = create_async_engine(url, connect_args={"server_settings": {"search_path": f"{schema},public"}})
-    monkeypatch.setattr("services.dynamic_settings.get_sync_bool", lambda _name, _default=False: True)
+    monkeypatch.setattr("services.dynamic_settings.get_bool", AsyncMock(return_value=True))
     monkeypatch.setattr("services.inbox.sources.on_review_requested", AsyncMock(return_value=0))
     monkeypatch.setattr("services.inbox.sources.on_review_withdrawn", AsyncMock(return_value=0))
     try:

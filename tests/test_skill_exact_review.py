@@ -78,7 +78,7 @@ async def test_queue_and_detail_bind_two_pending_skill_versions_by_uuid(monkeypa
             )
             assert reviewed["version"] == "1.3.0"
             assert reviewed["new_status"] == "approved"
-            monkeypatch.setattr("api.routes.component_versions._ds.get_sync_bool", lambda key, default=False: True)
+            monkeypatch.setattr("api.routes.component_versions._ds.get_bool", AsyncMock(return_value=True))
             rejected = await review.decide_skill_version(
                 str(listing_id),
                 second_id,
@@ -192,7 +192,7 @@ async def test_exact_resource_folder_approval_requires_reviewed_bytes(monkeypatc
                     db,
                     reviewer,
                 )
-            monkeypatch.setattr("api.routes.component_versions._ds.get_sync_bool", lambda key, default=False: True)
+            monkeypatch.setattr("api.routes.component_versions._ds.get_bool", AsyncMock(return_value=True))
             approved = await review.decide_skill_version(
                 str(listing_id),
                 version_id,
@@ -279,6 +279,8 @@ async def test_candidate_version_decision_requires_matching_observed_revision(mo
             listing_id, candidate_id, revision = listing.id, candidate.id, candidate.content_revision
 
         async with maker() as db:
+            detail = await review.get_skill_version_review(str(listing_id), candidate_id, Response(), db, reviewer)
+            assert detail["base_version_id"] == str(base_id)
             for legacy_decision in (
                 lambda: review.approve(str(listing_id), db, reviewer),
                 lambda: review.reject(str(listing_id), ReviewActionRequest(reason="stale"), db, reviewer),

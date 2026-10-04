@@ -583,16 +583,13 @@ async def submit_skill_version_draft(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_role(UserRole.user)),
 ):
-    """Submit a saved exact draft; resource-bearing successors require the rollout gate."""
+    """Submit a saved exact draft; every resource-bearing version requires the rollout gate."""
     listing, version = await _editable_version(listing_id, version_id, req.observed_revision, db, current_user)
-    if version.requires_global_review and not _ds.get_sync_bool("registry.skill_folder_delivery_enabled", False):
+    rollout_enabled = await _ds.get_bool("registry.skill_folder_delivery_enabled", False)
+    if version.requires_global_review and not rollout_enabled:
         raise HTTPException(status_code=409, detail="Global public re-review is not yet available")
-    if (
-        version.base_version_id is not None
-        and needs_bundle_delivery(version)
-        and not _ds.get_sync_bool("registry.skill_folder_delivery_enabled", False)
-    ):
-        raise HTTPException(status_code=409, detail="Resource-bearing candidate review is not yet available")
+    if needs_bundle_delivery(version) and not rollout_enabled:
+        raise HTTPException(status_code=409, detail="Resource-bearing skill review is not yet available")
     # _editable_version holds the listing lock, but the relationship may have
     # been loaded before waiting. Re-read the pointer, not its cached object.
     await db.refresh(listing, attribute_names=["latest_version_id"])

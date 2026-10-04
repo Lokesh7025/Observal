@@ -101,15 +101,15 @@ async def _install(db, agent, user, **request):
     rollout_enabled = request.pop("rollout_enabled", False)
     import services.dynamic_settings as settings
 
-    original_setting = settings.get_sync_bool
+    original_setting = settings.get_bool
 
-    def setting(key, default=None):
+    async def setting(key, default=None):
         if key == "registry.skill_folder_delivery_enabled":
             return rollout_enabled
-        return original_setting(key, default)
+        return await original_setting(key, default)
 
     with (
-        patch("api.routes.agent.install._ds.get_sync_bool", side_effect=setting),
+        patch("api.routes.agent.install._ds.get_bool", side_effect=setting),
         patch("api.routes.config.derive_endpoints", AsyncMock(return_value={"api": "http://observal.test"})),
         patch("services.download_tracker.record_agent_download", AsyncMock()),
     ):
@@ -165,13 +165,13 @@ async def test_http_pinned_agent_returns_complete_binary_folder_and_refuses_old_
     settings_key = "registry.skill_folder_delivery_enabled"
     import services.dynamic_settings as settings
 
-    original = settings.get_sync_bool
+    original = settings.get_bool
 
-    def enabled(key, default=None):
-        return True if key == settings_key else original(key, default)
+    async def enabled(key, default=None):
+        return True if key == settings_key else await original(key, default)
 
     with (
-        patch("api.routes.agent.install._ds.get_sync_bool", side_effect=enabled),
+        patch("api.routes.agent.install._ds.get_bool", side_effect=enabled),
         patch("api.routes.config.derive_endpoints", AsyncMock(return_value={"api": "http://observal.test"})),
         patch("services.download_tracker.record_agent_download", AsyncMock()),
     ):

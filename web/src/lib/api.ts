@@ -574,6 +574,10 @@ export const registry = {
 		get<VersionSuggestions>(`/${type}/${listingId}/version-suggestions`),
 	getSkillVersionManifest: (listingId: string, versionId: string) =>
 		get<SkillVersionManifest>(`/skills/${listingId}/versions/${versionId}/manifest`),
+	updateSkillVersionDraft: (listingId: string, versionId: string, body: unknown) =>
+		put<SkillVersionManifest>(`/skills/${listingId}/versions/${versionId}/draft`, body),
+	submitSkillVersionDraft: (listingId: string, versionId: string, observedRevision: string) =>
+		post<SkillVersionManifest>(`/skills/${listingId}/versions/${versionId}/submit`, { observed_revision: observedRevision }),
 	getSkillFileContent: (listingId: string, versionId: string, filePath: string) =>
 		request<SkillFileContents | SkillBinaryContents>(
 			"GET", `/skills/${listingId}/versions/${versionId}/files/${encodeURIComponent(filePath)}`, undefined, true

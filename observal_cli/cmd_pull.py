@@ -2037,6 +2037,7 @@ def register_pull(app: typer.Typer):
             )
 
         snippet = rewrite_observal_interpreter(snippet)
+
         def disclose_telemetry() -> None:
             if output != "json" and not dry_run:
                 server_url = config.load().get("server_url") or "the Observal server"

@@ -182,6 +182,7 @@ export interface ComponentVersionSummary {
 	source_path?: string;
 	requirements?: string[];
 	// Skill fields
+	delivery_mode?: "git_fetch" | "registry_direct";
 	skill_path?: string;
 	git_url?: string;
 	git_ref?: string;
@@ -361,6 +362,7 @@ export interface ReviewItem {
 	task_type?: string;
 	slash_command?: string;
 	version_id?: string;
+	base_version_id?: string | null;
 	review_key?: string;
 	revision?: string;
 	files?: SkillManifestFile[];

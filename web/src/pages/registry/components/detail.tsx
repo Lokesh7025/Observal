@@ -538,9 +538,10 @@ export default function ComponentDetailPage({
             </Tabs>
 
             {/* Sidebar */}
-            <aside className="hidden lg:block space-y-5">
+            <aside className="space-y-5">
               {/* Install command (MCPs, Skills, Hooks only) */}
-              {(singularType === "mcp" || singularType === "skill" || singularType === "hook") && (
+              {(item.status === "approved" || item.status === "archived") &&
+                (singularType === "mcp" || singularType === "skill" || singularType === "hook") && (
                 <ComponentInstallCommand componentType={singularType} componentName={componentRef} />
               )}
 

@@ -247,7 +247,7 @@ async def transfer_ownership(
         if team_id is None and entity.submitted_by != current_user.id and not is_admin(current_user):
             raise HTTPException(status_code=403, detail="Skill ownership changed; refresh before transferring")
         if await skill_transition_needs_rollout_gate(db, entity.id):
-            if not _ds.get_sync_bool("registry.skill_folder_delivery_enabled", False):
+            if not await _ds.get_bool("registry.skill_folder_delivery_enabled", False):
                 raise HTTPException(
                     status_code=409, detail="Tracked skill transfer requires version identity migration"
                 )

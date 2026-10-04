@@ -236,6 +236,39 @@ async def test_tracked_draft_visibility_flip_refuses_without_stranding_manifest(
 
 
 @pytest.mark.asyncio
+async def test_initial_resource_bearing_folder_refuses_submission_before_rollout(monkeypatch):
+    engine = ds.make_engine()
+    maker = await ds.create_schema(engine)
+    try:
+        async with maker() as db:
+            owner = await ds.user(db)
+            data = FIXTURE["author_create"]["body"] | FIXTURE["snapshot"]
+            manifest = await skill.create_skill_folder_draft(SkillFolderDraftRequest.model_validate(data), db, owner)
+            owner_id = owner.id
+        monkeypatch.setattr(skill_files._ds, "get_sync_bool", lambda *_args: True)  # stale process cache must not win
+        monkeypatch.setattr(skill_files._ds, "get_bool", AsyncMock(return_value=False))
+        async with maker() as db:
+            owner = await db.get(User, owner_id)
+            with pytest.raises(HTTPException) as exc:
+                await skill_files.submit_skill_version_draft(
+                    str(manifest.listing_id),
+                    manifest.version_id,
+                    SkillVersionRevisionRequest(observed_revision=manifest.revision),
+                    Response(),
+                    db,
+                    owner,
+                )
+            assert exc.value.status_code == 409
+            await db.rollback()
+        async with maker() as db:
+            version = await db.get(SkillVersion, manifest.version_id)
+            assert version.status == ListingStatus.draft
+            assert version.content_revision == manifest.revision
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_submission_recomputes_revision_after_slash_command_normalization(monkeypatch):
     engine = ds.make_engine()
     maker = await ds.create_schema(engine)
@@ -254,6 +287,7 @@ async def test_submission_recomputes_revision_after_slash_command_normalization(
                 owner,
             )
         monkeypatch.setattr(skill_files.inbox, "on_review_requested", AsyncMock())
+        monkeypatch.setattr(skill_files._ds, "get_bool", AsyncMock(return_value=True))
         async with maker() as db:
             owner = await db.get(User, owner.id)
             version = await db.get(SkillVersion, manifest.version_id)

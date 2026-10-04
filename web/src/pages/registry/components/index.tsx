@@ -4,6 +4,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { Link, useRouter, useSearch } from "@tanstack/react-router";
+import { toast } from "sonner";
 import { useState, useEffect, useRef, useMemo, useCallback } from "react";
 import {
   Search,
@@ -14,6 +15,7 @@ import {
   X,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { PickerSelect } from "@/components/ui/picker-select";
 import { UserSearchInput } from "@/components/shared/user-search-input";
 import {
@@ -25,11 +27,14 @@ import {
   useComponentUpdateDraft,
   useStartEdit,
   useCancelEdit,
+  useLoadSkillFolderDraft,
+  useUpdateSkillFolderDraft,
+  useSubmitSkillFolderDraft,
   useTeams,
 } from "@/hooks/use-api";
 import { useOptionalAuth } from "@/hooks/use-auth";
-import type { RegistryType } from "@/lib/api";
-import type { RegistryItem } from "@/lib/types";
+import { registry, type RegistryType } from "@/lib/api";
+import type { RegistryItem, ComponentVersionSummary } from "@/lib/types";
 import {
   HOOK_EVENTS,
   HOOK_SCOPES,
@@ -262,6 +267,11 @@ export default function ComponentsPage() {
   const [discoveryTab, setDiscoveryTab] = useState<DiscoveryTab>("discover");
   const [submitOpen, setSubmitOpen] = useState(false);
   const [editItem, setEditItem] = useState<RegistryItem | null>(null);
+  const [folderSelection, setFolderSelection] = useState<{
+    item: RegistryItem; action: "edit" | "submit"; versions: ComponentVersionSummary[]; versionId: string;
+  } | null>(null);
+  const [findingFolder, setFindingFolder] = useState(false);
+  const folderConfirmRef = useRef<HTMLButtonElement>(null);
   const timerRef = useRef<ReturnType<typeof setTimeout>>(undefined);
 
   useEffect(() => {
@@ -290,9 +300,9 @@ export default function ComponentsPage() {
   const { data: myItems } = useMyComponents(activeType, isAuthenticated);
   const myDrafts = useMemo(
     () => isAuthenticated
-      ? (myItems ?? []).filter((i) => ["draft", "pending", "rejected", "archived"].includes(i.status ?? ""))
+      ? (myItems ?? []).filter((i) => activeType === "skills" || ["draft", "pending", "rejected", "archived"].includes(i.status ?? ""))
       : [],
-    [isAuthenticated, myItems],
+    [isAuthenticated, myItems, activeType],
   );
   const pendingItems = useMemo(
     () => isAuthenticated ? (myItems ?? []).filter((i) => i.status === "pending") : [],
@@ -305,6 +315,9 @@ export default function ComponentsPage() {
   const updateDraftMutation = useComponentUpdateDraft(activeType);
   const startEditMutation = useStartEdit(activeType);
   const cancelEditMutation = useCancelEdit(activeType);
+  const loadFolderMutation = useLoadSkillFolderDraft();
+  const updateFolderMutation = useUpdateSkillFolderDraft();
+  const submitFolderMutation = useSubmitSkillFolderDraft();
 
   const editItemRef = useRef(editItem);
   editItemRef.current = editItem;
@@ -364,6 +377,77 @@ export default function ComponentsPage() {
     },
     [router, activeType],
   );
+
+  async function openSubmission(item: RegistryItem, action: "edit" | "submit") {
+    if (activeType === "skills") {
+      setFindingFolder(true);
+      try {
+        const versions = await registry.listComponentVersions("skills", item.id, 1, 100);
+        // Never choose an arbitrary version when the list is incomplete.
+        if (versions.total > versions.items.length) {
+          toast.error("Too many skill versions to choose safely; use the exact version UUID in the CLI");
+          return;
+        }
+        const folders = versions.items.filter((version) =>
+          version.delivery_mode === "registry_direct" && ["draft", "rejected"].includes(version.status),
+        );
+        if (folders.length > 0) {
+          setFolderSelection({ item, action, versions: folders, versionId: folders[0].id });
+          return;
+        }
+        if (versions.items.some((version) => version.delivery_mode === "registry_direct" && version.status === "pending")) {
+          toast.error("Withdraw the pending folder version before editing or resubmitting it");
+          return;
+        }
+        if (item.status === "approved") {
+          toast.error("No saved folder draft found for this skill");
+          return;
+        }
+      } catch (error) {
+        toast.error(error instanceof Error ? error.message : "Could not inspect skill versions");
+        return;
+      } finally {
+        setFindingFolder(false);
+      }
+    }
+    if (action === "submit") {
+      submitDraftMutation.mutate(item.id);
+    } else if (item.status === "pending") {
+      startEditMutation.mutate(item.id, {
+        onSuccess: () => { setEditItem(item); setSubmitOpen(true); },
+      });
+    } else {
+      setEditItem(item);
+      setSubmitOpen(true);
+    }
+  }
+
+  async function continueFolderSelection() {
+    if (!folderSelection) return;
+    const { item, action, versionId, versions } = folderSelection;
+    const version = versions.find((entry) => entry.id === versionId);
+    if (!version) return;
+    try {
+      if (action === "submit") {
+        const manifest = await registry.getSkillVersionManifest(item.id, version.id);
+        await submitFolderMutation.mutateAsync({ listingId: item.id, versionId: version.id, observedRevision: manifest.revision });
+      } else {
+        const snapshot = await loadFolderMutation.mutateAsync({ listingId: item.id, versionId: version.id });
+        setEditItem({
+          ...item, version: version.version, description: version.description,
+          task_type: version.task_type ?? item.task_type,
+          supported_harnesses: version.supported_harnesses,
+          delivery_mode: "registry_direct", folder_version_id: version.id,
+          folder_revision: snapshot.revision,
+          skill_md_content: snapshot.skill_md_content, extra_files: snapshot.extra_files,
+        });
+        setSubmitOpen(true);
+      }
+      setFolderSelection(null);
+    } catch {
+      // The mutation displays the server error; keep the version choice available.
+    }
+  }
 
   function updateFilters(next: Partial<typeof searchParams>) {
     router.navigate({
@@ -646,36 +730,28 @@ export default function ComponentsPage() {
                     )}
                   </div>
                   <div className="flex items-center gap-2 shrink-0">
-                    {(item.status === "draft" || item.status === "rejected" || item.status === "pending") && (
+                    {(item.status === "draft" || item.status === "rejected" || item.status === "pending" || (activeType === "skills" && item.status === "approved")) && (
                       <Button
                         variant="outline"
                         size="sm"
                         className="h-7 text-xs"
-                        disabled={startEditMutation.isPending}
-                        onClick={() => {
-                          if (item.status === "pending") {
-                            startEditMutation.mutate(item.id, {
-                              onSuccess: () => { setEditItem(item); setSubmitOpen(true); },
-                            });
-                          } else {
-                            setEditItem(item); setSubmitOpen(true);
-                          }
-                        }}
+                        disabled={findingFolder || startEditMutation.isPending || loadFolderMutation.isPending}
+                        onClick={() => void openSubmission(item, "edit")}
                       >
                         <FileEdit className="h-3 w-3 mr-1" />
-                        Edit
+                        {item.status === "approved" ? "Manage drafts" : "Edit"}
                       </Button>
                     )}
-                    {(item.status === "draft" || item.status === "rejected") && (
+                    {(item.status === "draft" || item.status === "rejected" || (activeType === "skills" && item.status === "approved")) && (
                       <Button
                         variant="outline"
                         size="sm"
                         className="h-7 text-xs"
-                        onClick={() => submitDraftMutation.mutate(item.id)}
-                        disabled={submitDraftMutation.isPending}
+                        onClick={() => void openSubmission(item, "submit")}
+                        disabled={findingFolder || submitDraftMutation.isPending || submitFolderMutation.isPending}
                       >
                         <Send className="h-3 w-3 mr-1" />
-                        {item.status === "rejected" ? "Resubmit" : "Submit"}
+                        {item.status === "rejected" ? "Resubmit" : item.status === "approved" ? "Submit draft" : "Submit"}
                       </Button>
                     )}
                   </div>
@@ -685,6 +761,31 @@ export default function ComponentsPage() {
           </section>
         )}
       </div>
+
+      <Dialog open={!!folderSelection} onOpenChange={(open) => { if (!open) setFolderSelection(null); }}>
+        <DialogContent onOpenAutoFocus={(event) => { event.preventDefault(); folderConfirmRef.current?.focus(); }}>
+          <DialogHeader><DialogTitle>Choose the exact folder version</DialogTitle></DialogHeader>
+          {folderSelection && (
+            <div className="space-y-4">
+              <p className="text-sm text-muted-foreground">{folderSelection.item.name}: select the saved version to {folderSelection.action}. No other version will be changed.</p>
+              <PickerSelect
+                value={folderSelection.versionId}
+                onValueChange={(versionId) => setFolderSelection((current) => current ? { ...current, versionId } : null)}
+                options={folderSelection.versions.map((version) => ({
+                  value: version.id, label: `${version.version} · ${version.status} · ${version.id.slice(0, 8)}`,
+                }))}
+              />
+              <Button
+                ref={folderConfirmRef}
+                onClick={() => void continueFolderSelection()}
+                disabled={loadFolderMutation.isPending || submitFolderMutation.isPending}
+              >
+                {folderSelection.action === "edit" ? "Edit selected version" : "Submit selected version"}
+              </Button>
+            </div>
+          )}
+        </DialogContent>
+      </Dialog>
 
       {isAuthenticated && <SubmitComponentDialog
         key={editItem?.id ?? "new"}
@@ -721,12 +822,19 @@ export default function ComponentsPage() {
           });
         }}
         onUpdateDraft={(id, body) => {
-          updateDraftMutation.mutate({ id, body }, {
-            onSuccess: () => { setSubmitOpen(false); setEditItem(null); },
-          });
+          if (editItem?.folder_version_id && editItem.folder_revision) {
+            updateFolderMutation.mutate({
+              listingId: id, versionId: String(editItem.folder_version_id),
+              observedRevision: String(editItem.folder_revision), body,
+            }, { onSuccess: () => { setSubmitOpen(false); setEditItem(null); } });
+          } else {
+            updateDraftMutation.mutate({ id, body }, {
+              onSuccess: () => { setSubmitOpen(false); setEditItem(null); },
+            });
+          }
         }}
-        isSubmitting={submitMutation.isPending || submitDraftMutation.isPending}
-        isSavingDraft={saveDraftMutation.isPending || updateDraftMutation.isPending}
+        isSubmitting={submitMutation.isPending || submitDraftMutation.isPending || submitFolderMutation.isPending}
+        isSavingDraft={saveDraftMutation.isPending || updateDraftMutation.isPending || updateFolderMutation.isPending}
       />}
     </>
   );

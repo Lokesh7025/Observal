@@ -116,18 +116,29 @@ function McpConfigSection({ detail }: { detail: ReviewItem }) {
 	);
 }
 
-function SkillFilesSection({ listingId, versionId }: { listingId: string; versionId: string }) {
+export function SkillFilesSection({ listingId, versionId, baseVersionId }: { listingId: string; versionId: string; baseVersionId?: string | null }) {
 	const { data: manifest, isLoading } = useSkillVersionManifest(listingId, versionId);
+	const { data: baseManifest, isLoading: isLoadingBase, isError: baseError } = useSkillVersionManifest(listingId, baseVersionId ?? undefined);
 	const [selectedFile, setSelectedFile] = useState<string | null>(null);
 	const [expandedDirs, setExpandedDirs] = useState<Set<string>>(new Set());
+	const candidateFiles = new Map(manifest?.files.map((file) => [file.path, file]) ?? []);
+	const baseFiles = new Map(baseManifest?.files.map((file) => [file.path, file]) ?? []);
 	const { data: fileContent, isLoading: isLoadingContent } = useSkillFileContent(
 		listingId,
 		versionId,
-		selectedFile
+		selectedFile && candidateFiles.has(selectedFile) ? selectedFile : null,
+	);
+	const { data: baseContent, isLoading: isLoadingBaseContent } = useSkillFileContent(
+		listingId,
+		baseVersionId ?? undefined,
+		selectedFile && baseFiles.has(selectedFile) ? selectedFile : null,
 	);
 	const binaryBlob = fileContent?.encoding === "binary" ? fileContent.content : null;
 	const binaryUrl = useMemo(() => binaryBlob ? URL.createObjectURL(binaryBlob) : null, [binaryBlob]);
 	useEffect(() => () => { if (binaryUrl) URL.revokeObjectURL(binaryUrl); }, [binaryUrl]);
+	const baseBlob = baseContent?.encoding === "binary" ? baseContent.content : null;
+	const baseUrl = useMemo(() => baseBlob ? URL.createObjectURL(baseBlob) : null, [baseBlob]);
+	useEffect(() => () => { if (baseUrl) URL.revokeObjectURL(baseUrl); }, [baseUrl]);
 
 	if (isLoading) {
 		return <div className="text-sm text-muted-foreground">Loading files...</div>;
@@ -136,6 +147,14 @@ function SkillFilesSection({ listingId, versionId }: { listingId: string; versio
 	if (!manifest?.files?.length) {
 		return null;
 	}
+
+	// Compare manifest hashes and modes, not file names alone. Deleted paths are shown below the candidate tree.
+	const added = manifest.files.filter((file) => !baseFiles.has(file.path));
+	const modified = manifest.files.filter((file) => {
+		const old = baseFiles.get(file.path);
+		return old && (old.sha256 !== file.sha256 || old.mode !== file.mode);
+	});
+	const removed = (baseManifest?.files ?? []).filter((file) => !candidateFiles.has(file.path));
 
 	// Build tree structure from flat file paths
 	type TreeNode = { name: string; path: string; isDir: boolean; size?: number; mode?: string; children: TreeNode[] };
@@ -180,13 +199,20 @@ function SkillFilesSection({ listingId, versionId }: { listingId: string; versio
 		}
 		const isExpanded = expandedDirs.has(node.path);
 		const isSelected = selectedFile === node.path;
+		const change = !node.isDir && baseManifest
+			? added.some((file) => file.path === node.path) ? "Added"
+				: modified.some((file) => file.path === node.path) ? "Modified" : null
+			: null;
 
 		return (
 			<div key={node.path}>
-				<div
-					className={`flex items-center gap-1 py-0.5 px-1 rounded text-sm cursor-pointer hover:bg-muted/50 ${isSelected ? "bg-primary/10" : ""}`}
+				<button
+					type="button"
+					className={`flex w-full items-center gap-1 py-0.5 px-1 rounded text-left text-sm cursor-pointer hover:bg-muted/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${isSelected ? "bg-primary/10" : ""}`}
 					style={{ paddingLeft: `${depth * 12 + 4}px` }}
 					onClick={() => node.isDir ? toggleDir(node.path) : setSelectedFile(node.path)}
+					aria-expanded={node.isDir ? isExpanded : undefined}
+					aria-pressed={node.isDir ? undefined : isSelected}
 				>
 					{node.isDir ? (
 						isExpanded ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />
@@ -195,9 +221,10 @@ function SkillFilesSection({ listingId, versionId }: { listingId: string; versio
 					)}
 					{node.isDir && <Folder className="h-3 w-3 text-blue-500" />}
 					<span className="truncate">{node.name}</span>
-					{node.mode === "0755" && <span className="text-[10px] text-green-600 ml-1">exec</span>}
+					{node.mode === "0755" && <span className="text-[10px] text-muted-foreground ml-1">exec</span>}
+					{change && <span className="ml-1 text-[10px] font-medium text-primary">{change}</span>}
 					{node.size !== undefined && <span className="text-[10px] text-muted-foreground ml-auto">{formatBytes(node.size)}</span>}
-				</div>
+				</button>
 				{node.isDir && isExpanded && node.children.map((c) => renderNode(c, depth + 1))}
 			</div>
 		);
@@ -212,8 +239,20 @@ function SkillFilesSection({ listingId, versionId }: { listingId: string; versio
 	return (
 		<div className="space-y-2">
 			<div className="text-xs font-medium text-muted-foreground">Files ({manifest.files.length})</div>
+			{baseVersionId && isLoadingBase && <p className="text-xs text-muted-foreground">Loading base version comparison…</p>}
+			{baseVersionId && baseError && <p role="alert" className="text-xs text-destructive">Base version unavailable; file changes cannot be verified here.</p>}
+			{baseManifest && <p className="text-xs text-muted-foreground">
+				Compared to base: {added.length} added, {modified.length} modified, {removed.length} removed.
+			</p>}
 			<div className="border rounded-md p-2 max-h-48 overflow-auto">
 				{renderNode(root, 0)}
+				{removed.map((file) => (
+					<button key={file.path} type="button" onClick={() => setSelectedFile(file.path)}
+						aria-pressed={selectedFile === file.path}
+						className="flex w-full items-center gap-2 rounded px-1 text-left text-sm text-destructive hover:bg-muted/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+						<File className="h-3 w-3" />{file.path} <span className="text-[10px]">Removed</span>
+					</button>
+				))}
 			</div>
 			{selectedFile && (
 				<div className="space-y-1">
@@ -223,14 +262,29 @@ function SkillFilesSection({ listingId, versionId }: { listingId: string; versio
 							<X className="h-3 w-3" />
 						</Button>
 					</div>
-					{isLoadingContent ? (
-						<div className="text-sm text-muted-foreground">Loading...</div>
-					) : binaryUrl ? (
-						<a href={binaryUrl} download={selectedFile.split("/").at(-1)} className="text-sm underline">Download binary file ({binaryBlob?.size} bytes)</a>
-					) : (
-						<pre className="max-h-60 overflow-auto rounded bg-muted p-2 text-xs font-mono whitespace-pre-wrap">
-							{fileContent?.encoding === "utf-8" ? fileContent.content : "File preview unavailable"}
-						</pre>
+					{candidateFiles.has(selectedFile) && (
+						<div>
+							<p className="text-xs font-medium">Candidate</p>
+							{isLoadingContent ? <p className="text-xs">Loading...</p> : binaryUrl ? (
+								<a href={binaryUrl} download={selectedFile.split("/").at(-1)} className="text-sm underline">Download candidate binary ({binaryBlob?.size} bytes)</a>
+							) : (
+								<pre className="max-h-60 overflow-auto rounded bg-muted p-2 text-xs font-mono whitespace-pre-wrap">
+									{fileContent?.encoding === "utf-8" ? fileContent.content : "File preview unavailable"}
+								</pre>
+							)}
+						</div>
+					)}
+					{baseFiles.has(selectedFile) && (
+						<div>
+							<p className="text-xs font-medium">Reviewed base</p>
+							{isLoadingBaseContent ? <p className="text-xs">Loading...</p> : baseUrl ? (
+								<a href={baseUrl} download={selectedFile.split("/").at(-1)} className="text-sm underline">Download base binary ({baseBlob?.size} bytes)</a>
+							) : (
+								<pre className="max-h-60 overflow-auto rounded bg-muted p-2 text-xs font-mono whitespace-pre-wrap">
+									{baseContent?.encoding === "utf-8" ? baseContent.content : "Base preview unavailable"}
+								</pre>
+							)}
+						</div>
 					)}
 				</div>
 			)}
@@ -254,7 +308,7 @@ function SkillConfigSection({ detail }: { detail: ReviewItem }) {
 				<DetailField label="Target Agents" value={detail.target_agents} />
 			</dl>
 			{hasVersionFiles && (
-				<SkillFilesSection listingId={detail.id} versionId={detail.version_id!} />
+				<SkillFilesSection listingId={detail.id} versionId={detail.version_id!} baseVersionId={detail.base_version_id} />
 			)}
 		</div>
 	);

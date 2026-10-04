@@ -5,21 +5,68 @@
 
 import base64
 import json
+import uuid
 from pathlib import Path
 from unittest.mock import AsyncMock
 
 import pytest
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
+from pydantic import ValidationError
 from sqlalchemy import select
 
 from api.deps import get_db, get_registry_user
 from api.routes import skill
 from models.skill import SkillDownload, SkillVersion
+from schemas.skill import SkillCandidateDraftRequest, SkillFolderDraftRequest
+from schemas.skill_resources import SkillDraftRebaseRequest
 from services.skill_revisions import skill_content_revision
 from tests import discovery_support as ds
 
 CONTRACT = json.loads((Path(__file__).parent / "fixtures" / "skill_folder_install_contract.json").read_text())
+
+
+def test_strict_folder_authoring_uuid_fields_accept_json_strings_not_invalid_types():
+    identity = str(uuid.uuid4())
+    revision = "a" * 64
+    candidate = SkillCandidateDraftRequest.model_validate(
+        {
+            "base_version_id": identity,
+            "observed_base_revision": revision,
+            "version": "1.1.0",
+            "description": "Change",
+        }
+    )
+    assert str(candidate.base_version_id) == identity
+    rebase = SkillDraftRebaseRequest.model_validate(
+        {
+            "observed_revision": revision,
+            "current_version_id": identity,
+            "observed_current_revision": revision,
+        }
+    )
+    assert str(rebase.current_version_id) == identity
+    request = SkillFolderDraftRequest.model_validate(
+        {
+            "name": "folder",
+            "owner": "author",
+            "version": "1.0.0",
+            "description": "Folder",
+            "skill_md_content": "---\nname: folder\ndescription: Folder\n---\n",
+            "extra_files": [],
+            "team_id": identity,
+        }
+    )
+    assert str(request.team_id) == identity
+    with pytest.raises(ValidationError):
+        SkillCandidateDraftRequest.model_validate(
+            {
+                "base_version_id": 123,
+                "observed_base_revision": revision,
+                "version": "1.1.0",
+                "description": "Change",
+            }
+        )
 
 
 @pytest.mark.asyncio
@@ -61,10 +108,11 @@ async def test_http_selected_skill_needs_capability_and_deliberate_rollout(monke
             assert old.status_code == 409
             assert old.json() == {"detail": CONTRACT["refusals"]["old_client_standalone"]["detail"]}
             opted = {"harness": "pi", "version": "1.2.0", "supported_features": ["skill_extra_files_v1"]}
+            monkeypatch.setattr("services.dynamic_settings.get_sync_bool", lambda *_args: True)
             before_rollout = await client.post(url, json=opted)
             assert before_rollout.status_code == 409
             assert before_rollout.json() == {"detail": CONTRACT["refusals"]["not_rolled_out_standalone"]["detail"]}
-            monkeypatch.setattr("services.dynamic_settings.get_sync_bool", lambda key, default=False: True)
+            monkeypatch.setattr("services.dynamic_settings.get_bool", AsyncMock(return_value=True))
             unsupported = await client.post(url, json={**opted, "harness": "kiro"})
             assert unsupported.status_code == 409
             assert unsupported.json() == {"detail": CONTRACT["refusals"]["unsupported_skills_harness"]["detail"]}

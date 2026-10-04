@@ -637,7 +637,12 @@ async def get_skill_version_review(
     if version.content_revision is not None and revision != version.content_revision:
         raise HTTPException(status_code=409, detail="Skill version changed; refresh before review")
     detail = _serialize_listing_detail("skill", listing, selected=version)
-    detail.update(version_id=str(version.id), revision=revision, files=declarations)
+    detail.update(
+        version_id=str(version.id),
+        revision=revision,
+        files=declarations,
+        base_version_id=str(version.base_version_id) if version.base_version_id else None,
+    )
     response.headers["Cache-Control"] = "no-store"
     response.headers["X-Content-Type-Options"] = "nosniff"
     return detail

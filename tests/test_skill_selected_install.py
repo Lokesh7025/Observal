@@ -65,7 +65,7 @@ async def test_opted_in_standalone_bundle_declares_all_files_and_denies_old_clie
                 )
             version = await db.get(SkillVersion, version_id)
             assert version.download_count == 0
-            monkeypatch.setattr("services.dynamic_settings.get_sync_bool", lambda key, default=False: True)
+            monkeypatch.setattr("services.dynamic_settings.get_bool", AsyncMock(return_value=True))
             with pytest.raises(HTTPException) as wrong_scope:
                 await skill.install_skill(
                     str(listing_id),
@@ -123,7 +123,7 @@ async def test_complete_standalone_folder_uses_frontmatter_name_not_slug_or_alia
             await db.commit()
             listing_id, version_id, owner_id = listing.id, version.id, owner.id
         monkeypatch.setattr("api.routes.config.derive_endpoints", AsyncMock(return_value={"api": "https://api.test"}))
-        monkeypatch.setattr("services.dynamic_settings.get_sync_bool", lambda key, default=False: True)
+        monkeypatch.setattr("services.dynamic_settings.get_bool", AsyncMock(return_value=True))
         async with maker() as db:
             owner = await db.get(type(owner), owner_id)
             with pytest.raises(HTTPException) as alias:
@@ -197,7 +197,7 @@ async def test_sixty_file_server_response_is_complete_and_selected(monkeypatch):
             version.content_revision = skill_content_revision(listing, version)
             await db.commit()
             listing_id, version_id, owner_id = listing.id, version.id, owner.id
-        monkeypatch.setattr("services.dynamic_settings.get_sync_bool", lambda key, default=False: True)
+        monkeypatch.setattr("services.dynamic_settings.get_bool", AsyncMock(return_value=True))
         with patch("api.routes.config.derive_endpoints", AsyncMock(return_value={"api": "https://api.test"})):
             async with maker() as db:
                 owner = await db.get(type(owner), owner_id)

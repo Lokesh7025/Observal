@@ -127,6 +127,11 @@ class SkillFolderDraftRequest(SkillFolderSnapshot):
     _validate_task_type = field_validator("task_type")(make_option_validator("task_type", VALID_SKILL_TASK_TYPES))
     _validate_ides = field_validator("supported_harnesses")(make_harness_list_validator())
 
+    @field_validator("team_id", mode="before")
+    @classmethod
+    def _parse_team_id(cls, value: uuid.UUID | str | None) -> uuid.UUID | str | None:
+        return uuid.UUID(value) if isinstance(value, str) else value
+
 
 class SkillCandidateDraftRequest(BaseModel):
     """Fork exactly one approved direct release into a saved candidate draft."""
@@ -138,6 +143,11 @@ class SkillCandidateDraftRequest(BaseModel):
     version: str = Field(pattern=r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$", max_length=50)
     description: str = Field(min_length=1, max_length=10_000)
     changelog: str | None = Field(default=None, max_length=10_000)
+
+    @field_validator("base_version_id", mode="before")
+    @classmethod
+    def _parse_base_version_id(cls, value: uuid.UUID | str) -> uuid.UUID | str:
+        return uuid.UUID(value) if isinstance(value, str) else value
 
 
 class SkillListingResponse(BaseModel):

@@ -35,7 +35,7 @@ async def test_unreviewed_approved_extra_files_refuse_bundle_and_manifest_withou
     maker = await ds.create_schema(engine)
     async with engine.begin() as conn:
         await conn.run_sync(SkillDownload.__table__.create)
-    monkeypatch.setattr("services.dynamic_settings.get_sync_bool", lambda _key, _default=False: True)
+    monkeypatch.setattr("services.dynamic_settings.get_bool", AsyncMock(return_value=True))
     monkeypatch.setattr("api.routes.config.derive_endpoints", AsyncMock(return_value={"api": "https://api.test"}))
     try:
         async with maker() as db:
@@ -216,7 +216,7 @@ async def test_unbound_saved_folder_cannot_be_edited_or_withdrawn_into_valid_dra
 async def test_reviewer_cannot_approve_unbound_folder_with_self_computed_observation(monkeypatch):
     engine = ds.make_engine()
     maker = await ds.create_schema(engine)
-    monkeypatch.setattr("api.routes.component_versions._ds.get_sync_bool", lambda _key, _default=False: True)
+    monkeypatch.setattr("api.routes.component_versions._ds.get_bool", AsyncMock(return_value=True))
     monkeypatch.setattr("api.routes.component_versions.inbox.on_review_decided", AsyncMock())
     try:
         async with maker() as db:

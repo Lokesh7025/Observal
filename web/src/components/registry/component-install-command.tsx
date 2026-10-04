@@ -1,7 +1,8 @@
 // SPDX-FileCopyrightText: 2026 Hari Srinivasan <harisrini21@gmail.com>
+// SPDX-FileCopyrightText: 2026 Kaushik <kaushikrjpm10@gmail.com>
 // SPDX-License-Identifier: Apache-2.0
 
-import { useState, useCallback, useEffect } from "react";
+import { useState, useCallback, useEffect, useMemo } from "react";
 import { Check, Copy, Terminal } from "lucide-react";
 import { toast } from "sonner";
 import { copyToClipboard } from "@/lib/utils";
@@ -15,21 +16,29 @@ interface ComponentInstallCommandProps {
 }
 
 export function ComponentInstallCommand({ componentType, componentName }: ComponentInstallCommandProps) {
-  const { data: harnesses } = useHarnesses();
+  const { data: harnesses, defaultHarness } = useHarnesses();
+  const requiredCapability = componentType === "mcp" ? "mcp_servers" : `${componentType}s`;
+  const supportedHarnesses = useMemo(
+    () => (harnesses ?? []).filter((entry) => entry.capabilities.includes(requiredCapability)),
+    [harnesses, requiredCapability],
+  );
   const [harness, setHarness] = useState("");
   useEffect(() => {
-    if (!harnesses || harnesses.length === 0) return;
-    const hasCurrent = harnesses.some((i) => i.name === harness);
-    if (!harness || !hasCurrent) {
-      setHarness(harnesses[0].name);
+    if (supportedHarnesses.length === 0) return;
+    if (!supportedHarnesses.some((entry) => entry.name === harness)) {
+      setHarness(supportedHarnesses.find((entry) => entry.name === defaultHarness)?.name ?? supportedHarnesses[0].name);
     }
-  }, [harnesses, harness]);
+  }, [supportedHarnesses, defaultHarness, harness]);
   const [copied, setCopied] = useState(false);
 
-  const effectiveHarness = harness || harnesses?.[0]?.name || "cursor";
-  const command = `observal registry ${componentType} install ${componentName} --harness ${effectiveHarness}`;
+  const effectiveHarness = supportedHarnesses.some((entry) => entry.name === harness)
+    ? harness : (supportedHarnesses.find((entry) => entry.name === defaultHarness)?.name ?? supportedHarnesses[0]?.name);
+  const command = effectiveHarness
+    ? `observal registry ${componentType} install ${componentName} --harness ${effectiveHarness}`
+    : null;
 
   const handleCopy = useCallback(async () => {
+    if (!command) return;
     try {
       await copyToClipboard(command);
       setCopied(true);
@@ -47,23 +56,24 @@ export function ComponentInstallCommand({ componentType, componentName }: Compon
         <span className="text-xs font-medium text-muted-foreground">Install</span>
         <div className="ml-auto">
           <PickerSelect
-            value={effectiveHarness}
+            value={effectiveHarness ?? ""}
             onValueChange={setHarness}
             className="w-[130px]"
             inputClassName="h-7 border-border text-xs"
-            options={(harnesses ?? []).map((i) => ({ value: i.name, label: i.display_name }))}
+            options={supportedHarnesses.map((entry) => ({ value: entry.name, label: entry.display_name }))}
           />
         </div>
       </div>
       <div className="flex items-center gap-2 p-3">
-        <code className="flex-1 text-sm font-mono select-all text-foreground leading-relaxed">
-          <span className="text-muted-foreground">$</span> {command}
+        <code className="min-w-0 flex-1 break-all text-sm font-mono select-all text-foreground leading-relaxed">
+          {command ? <><span className="text-muted-foreground">$</span> {command}</> : "No supported harness available"}
         </code>
         <Button
           variant="ghost"
           size="icon"
           className="h-8 w-8 shrink-0 hover:bg-accent"
           onClick={handleCopy}
+          disabled={!command}
           aria-label="Copy command"
         >
           {copied ? (

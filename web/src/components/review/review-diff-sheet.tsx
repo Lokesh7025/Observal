@@ -1,5 +1,6 @@
 // SPDX-FileCopyrightText: 2026 Aryan Iyappan <aryaniyappan2006@gmail.com>
 // SPDX-FileCopyrightText: 2026 Hari Srinivasan <harisrini21@gmail.com>
+// SPDX-FileCopyrightText: 2026 Kaushik <kaushikrjpm10@gmail.com>
 // SPDX-License-Identifier: Apache-2.0
 
 import { useState, useCallback, useMemo, useEffect } from "react";
@@ -34,6 +35,7 @@ import { Link } from "@tanstack/react-router";
 import { useQueryClient } from "@tanstack/react-query";
 import yaml from "js-yaml";
 import { componentBlockers } from "./validation-badges";
+import { SkillFilesSection } from "./review-detail-sheet";
 import { YamlDiffView, YamlSnapshot } from "./yaml-diff-view";
 import {
 	useAgentVersions,
@@ -41,6 +43,7 @@ import {
 	useComponentVersions,
 	useComponentVersionDetail,
 	useRegistryItem,
+	useSkillVersionReview,
 } from "@/hooks/use-api";
 import { registry } from "@/lib/api";
 import type { RegistryType } from "@/lib/api";
@@ -266,10 +269,15 @@ const COMPONENT_SNAPSHOT_META = new Set([
 ]);
 
 function buildComponentYaml(detail: Record<string, unknown>): string {
+	// Version-bound file previews carry exact bytes; a second multi-megabyte YAML
+	// dump of every base64 asset is both misleading and expensive to render.
+	const hasFolderResources = detail.delivery_mode === "registry_direct" &&
+		Array.isArray(detail.extra_files) && detail.extra_files.length > 0;
 	const obj = Object.fromEntries(
 		Object.entries(detail).filter(
 			([k, v]) =>
 				!COMPONENT_SNAPSHOT_META.has(k) &&
+				!(hasFolderResources && ["extra_files", "skill_md_content", "script_content"].includes(k)) &&
 				v !== null &&
 				v !== undefined &&
 				v !== "" &&
@@ -503,6 +511,10 @@ function DiffDialogBody({
 	const [approveCategory, setApproveCategory] = useState("");
 
 	const isAgent = item.type === "agent";
+	const { data: skillReview, isLoading: skillReviewLoading, isError: skillReviewError } = useSkillVersionReview(
+		item.type === "skill" ? item.id : undefined,
+		item.type === "skill" ? item.version_id : undefined,
+	);
 	const registryType =
 		!isAgent && item.type
 			? (pluralizeType(item.type) as RegistryType)
@@ -613,7 +625,8 @@ function DiffDialogBody({
 		onOpenChange(false);
 	}, [rejectReason, item, onReject, onOpenChange]);
 
-	const disableApprove = item.components_ready === false;
+	const disableApprove = item.components_ready === false ||
+		(item.type === "skill" && !!item.version_id && (skillReviewLoading || skillReviewError || !skillReview));
 
 	const isLoading = versionsLoading || detailLoading;
 
@@ -796,6 +809,19 @@ function DiffDialogBody({
 								)}
 							</dl>
 						</div>
+
+						{/* Review the exact version's declared file tree, not a listing-level YAML snapshot. */}
+						{item.type === "skill" && item.version_id && (
+							<>
+								<Separator />
+								{skillReviewLoading ? <p className="text-xs text-muted-foreground">Loading verified files…</p>
+									: skillReviewError ? <p role="alert" className="text-xs text-destructive">Exact skill version unavailable; approval is blocked.</p>
+									: skillReview?.files?.length ? (
+										<SkillFilesSection listingId={item.id} versionId={item.version_id}
+											baseVersionId={skillReview.base_version_id} />
+									) : null}
+							</>
+						)}
 
 						{/* Model */}
 						{(modelName || modelsByHarnessEntries.length > 0) && (
