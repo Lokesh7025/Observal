@@ -12,6 +12,7 @@ from __future__ import annotations
 import json as _json
 import re
 import subprocess
+import sys
 import tempfile
 from contextlib import nullcontext, redirect_stdout
 from io import StringIO
@@ -24,7 +25,7 @@ from rich.table import Table
 
 from observal_cli import client, config
 from observal_cli.constants import HARNESS_CAPABILITIES, VALID_HARNESSES, VALID_SKILL_TASK_TYPES
-from observal_cli.errors import ErrorCategory, fail
+from observal_cli.errors import CliError, ErrorCategory, fail
 from observal_cli.prompts import select_one, text_input
 from observal_cli.render import (
     OutputMode,
@@ -693,20 +694,20 @@ def skill_install(
     ),
     output: OutputMode = typer.Option("table", "--output", "-o", help="Output format: table or json"),
 ):
-    """Install a skill by fetching the full skill directory from git.
+    """Install an approved skill from Git or a complete reviewed registry folder.
 
-    Clones the skill directory (sparse checkout) from the configured git_url
-    and writes it to the appropriate harness skill path.
+    Git-backed skills use sparse checkout; direct skills with resources use a
+    verified versioned folder bundle. Neither path overwrites an existing
+    skill directory. Select a skill-capable harness from server configuration.
 
     Scopes:
-      --scope user (default): writes to the harness's global skills directory.
-      --scope project: writes to .agents/skills/<name>/ in cwd, then
-        symlinks into each harness config dir found in the project.
+      --scope user (default): install for this user's harness.
+      --scope project: install relative to the current project directory.
 
     Examples:
-        observal registry skill install my-skill --harness claude-code
-        observal registry skill install @sk --harness kiro --scope project
-        observal registry skill install 2 --harness cursor --raw > config.json
+        observal registry skill install alice/review --harness claude-code --version 1.1.0
+        observal registry skill install alice/review --harness pi --scope project
+        observal registry skill install @sk --harness claude-code --no-write
     """
     if raw and output == "json":
         fail(
@@ -1424,6 +1425,167 @@ def skill_edit(
 # ── Version lifecycle commands ──────────────────────────────────────────────
 
 
+def _uncertain_skill_draft(resolved: str, version: str, skill_id: str, operation: str) -> None:
+    """A timed-out create is not safe to retry without a lookup by version."""
+    try:
+        found = client.get(f"/api/v1/skills/{resolved}/versions/{version}", operation=operation, resource=skill_id)
+    except CliError:
+        found = None
+    if found and found.get("status") in {"draft", "rejected"}:
+        detail = f"The draft exists: version UUID {found['id']}. Resume it instead of creating a duplicate."
+    else:
+        detail = f"The create outcome is uncertain. Check {skill_id} v{version} before retrying."
+    fail(ErrorCategory.UNAVAILABLE, detail, operation=operation, resource=skill_id)
+
+
+@skill_app.command(name="fork")
+def skill_fork(
+    skill_id: str = typer.Argument(..., help="Existing reviewed direct skill ID or namespace/slug"),
+    version: str = typer.Option(..., "--version", "-v", help="New stable version (X.Y.Z)"),
+    description: str = typer.Option(..., "--description", "-d", help="Description of this successor"),
+    changelog: str | None = typer.Option(None, "--changelog", help="What changed since the reviewed release"),
+    from_dir: str | None = typer.Option(None, "--from-dir", help="Optionally replace cloned files from this folder"),
+    exclude: list[str] | None = typer.Option(None, "--exclude", help="Paths to exclude (repeatable)"),
+    allow_excluded: bool = typer.Option(False, "--allow-excluded", help="Acknowledge excluded source paths"),
+    allow_sensitive: bool = typer.Option(False, "--allow-sensitive", help="Acknowledge sensitive source paths"),
+    output: OutputMode = typer.Option("table", "--output", "-o", help="Output format: table or json"),
+):
+    """Create an editable successor to the currently reviewed direct release.
+
+    If a file replacement fails, the new draft remains saved; use its printed
+    version UUID to resume editing instead of creating another release.
+
+    Examples:
+        observal registry skill fork alice/review --version 1.1.0 --description 'New templates' --from-dir ./review
+    """
+    if not re.fullmatch(r"(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)", version):
+        fail(ErrorCategory.VALIDATION, "Version must be X.Y.Z.", operation="Fork skill", resource=version)
+    snapshot_body = None
+    if from_dir:
+        snapshot_body = _capture_skill_snapshot(
+            Path(from_dir).resolve(), exclude or [], allow_excluded, allow_sensitive, output, "Fork skill"
+        )
+    elif exclude or allow_excluded or allow_sensitive:
+        fail(ErrorCategory.USAGE, "Upload options require --from-dir.", operation="Fork skill", resource=skill_id)
+    resolved = client.resolve_registry_reference("skill", skill_id)
+    base = client.get(f"/api/v1/skills/{resolved}/approved-base", operation="Fork skill", resource=skill_id)
+    if base.get("delivery_mode") != "registry_direct":
+        fail(
+            ErrorCategory.VALIDATION,
+            "The reviewed release is Git-backed; use import-folder instead.",
+            operation="Fork skill",
+            resource=skill_id,
+        )
+    body = {
+        "base_version_id": base["version_id"],
+        "observed_base_revision": base["revision"],
+        "version": version,
+        "description": description,
+        "changelog": changelog,
+    }
+    try:
+        draft = client.post(f"/api/v1/skills/{resolved}/drafts", body, operation="Fork skill", resource=skill_id)
+    except CliError as error:
+        if error.category != ErrorCategory.UNAVAILABLE:
+            raise
+        _uncertain_skill_draft(resolved, version, skill_id, "Fork skill")
+    if snapshot_body is not None:
+        try:
+            saved = client.put(
+                f"/api/v1/skills/{resolved}/versions/{draft['version_id']}/files",
+                {"observed_revision": draft["revision"], **snapshot_body},
+                operation="Replace fork files",
+                resource=skill_id,
+            )
+        except CliError:
+            rprint(
+                f"[yellow]Draft {esc(draft['version_id'])} was created but its file replacement failed. "
+                "Resume that same draft; do not fork again.[/yellow]",
+                file=sys.stderr,
+            )
+            raise
+        draft = saved
+    result = {
+        "listing_id": str(resolved),
+        "version_id": draft["version_id"],
+        "base_version_id": base["version_id"],
+        "revision": draft["revision"],
+        "version": version,
+    }
+    if output == "json":
+        output_json(result)
+    else:
+        rprint(f"[green]✓ Saved editable v{esc(version)} folder draft[/green]")
+        rprint(f"  Version ID: {esc(result['version_id'])}")
+        rprint(f"  Revision: {esc(result['revision'])}")
+        rprint(
+            f"  Next: observal registry skill replace-files {esc(skill_id)} --version-id {esc(result['version_id'])} --from-dir DIR --revision {esc(result['revision'])}"
+        )
+        rprint("  Submit this exact version for review when ready; the approved release is unchanged.")
+
+
+@skill_app.command(name="import-folder")
+def skill_import_folder(
+    skill_id: str = typer.Argument(..., help="Existing approved Git or legacy direct skill ID or namespace/slug"),
+    from_dir: str = typer.Option(..., "--from-dir", help="Complete locally supplied skill folder"),
+    version: str = typer.Option(..., "--version", "-v", help="New stable version (X.Y.Z)"),
+    description: str = typer.Option(..., "--description", "-d", help="Description of this successor"),
+    changelog: str | None = typer.Option(None, "--changelog", help="What changed since the reviewed release"),
+    exclude: list[str] | None = typer.Option(None, "--exclude", help="Paths to exclude (repeatable)"),
+    allow_excluded: bool = typer.Option(False, "--allow-excluded", help="Acknowledge excluded source paths"),
+    allow_sensitive: bool = typer.Option(False, "--allow-sensitive", help="Acknowledge sensitive source paths"),
+    output: OutputMode = typer.Option("table", "--output", "-o", help="Output format: table or json"),
+):
+    """Create one complete direct-folder draft under a reviewed Git or legacy listing.
+
+    This does not download Git bytes or alter the approved release. Review must
+    explicitly acknowledge that the old Git file tree cannot be compared.
+
+    Examples:
+        observal registry skill import-folder alice/review --from-dir ./review --version 1.1.0 --description 'Direct folder'
+    """
+    if not re.fullmatch(r"(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)", version):
+        fail(ErrorCategory.VALIDATION, "Version must be X.Y.Z.", operation="Import skill folder", resource=version)
+    snapshot = _capture_skill_snapshot(
+        Path(from_dir).resolve(), exclude or [], allow_excluded, allow_sensitive, output, "Import skill folder"
+    )
+    resolved = client.resolve_registry_reference("skill", skill_id)
+    base = client.get(f"/api/v1/skills/{resolved}/approved-base", operation="Import skill folder", resource=skill_id)
+    body = {
+        "base_version_id": base["version_id"],
+        "observed_base_revision": base["revision"],
+        "version": version,
+        "description": description,
+        "changelog": changelog,
+        **snapshot,
+    }
+    try:
+        draft = client.post(
+            f"/api/v1/skills/{resolved}/folder-import-drafts",
+            body,
+            operation="Import skill folder",
+            resource=skill_id,
+        )
+    except CliError as error:
+        if error.category != ErrorCategory.UNAVAILABLE:
+            raise
+        _uncertain_skill_draft(resolved, version, skill_id, "Import skill folder")
+    result = {
+        "listing_id": str(resolved),
+        "version_id": draft["version_id"],
+        "base_version_id": base["version_id"],
+        "revision": draft["revision"],
+        "version": version,
+    }
+    if output == "json":
+        output_json(result)
+    else:
+        rprint(f"[green]✓ Saved imported folder as editable v{esc(version)} draft[/green]")
+        rprint(f"  Version ID: {esc(result['version_id'])}")
+        rprint(f"  Revision: {esc(result['revision'])}")
+        rprint("  Review the complete candidate folder before submitting; the old release is unchanged.")
+
+
 @skill_app.command(name="withdraw")
 def skill_withdraw(
     skill_id: str = typer.Argument(..., help="Skill ID, name, or @alias"),
@@ -1672,6 +1834,60 @@ def skill_export(
             rprint(f"  • {esc(f)}")
 
 
+def _capture_skill_snapshot(
+    source_dir: Path,
+    exclude: list[str],
+    allow_excluded: bool,
+    allow_sensitive: bool,
+    output: OutputMode,
+    operation: str,
+) -> dict:
+    capture_context = nullcontext() if output == "json" else spinner("Capturing directory...")
+    with capture_context:
+        try:
+            snapshot = capture_directory(source_dir, exclude=exclude)
+        except DirectoryCaptureError as error:
+            fail(
+                ErrorCategory.VALIDATION,
+                f"Cannot capture directory: {error}",
+                operation=operation,
+                resource=str(source_dir),
+                remediation="Fix the reported issue and retry.",
+            )
+    if output != "json":
+        for excluded in snapshot.excluded_paths[:15]:
+            rprint(f"[yellow]Excluded:[/yellow] {esc(excluded)}")
+        if len(snapshot.excluded_paths) > 15:
+            rprint(f"  ... and {len(snapshot.excluded_paths) - 15} more")
+        for warning in snapshot.warnings:
+            rprint(f"[yellow]Warning:[/yellow] {esc(warning)}")
+    if snapshot.excluded_paths and not allow_excluded:
+        fail(
+            ErrorCategory.VALIDATION,
+            "Source folder contains excluded paths; complete replacement may delete files.",
+            operation=operation,
+            resource=str(source_dir),
+            remediation="Inspect excluded paths and explicitly use --allow-excluded if deletion is intended.",
+        )
+    if snapshot.warnings and not allow_sensitive:
+        if output == "json":
+            fail(
+                ErrorCategory.VALIDATION,
+                "Source folder contains likely-sensitive files.",
+                operation=operation,
+                resource=str(source_dir),
+                remediation="Inspect the files, then use --allow-sensitive explicitly if intended.",
+            )
+        from observal_cli.prompts import confirm
+
+        if not confirm("Continue uploading potentially sensitive files?", default=False):
+            fail(ErrorCategory.VALIDATION, "Upload cancelled.", operation=operation, resource=str(source_dir))
+    return {
+        "skill_md_content": snapshot.skill_md_content,
+        "extra_files": snapshot_to_extra_files(snapshot),
+    }
+
+
 @skill_app.command(name="replace-files")
 def skill_replace_files(
     skill_id: str = typer.Argument(..., help="Skill ID, name, or @alias"),
@@ -1696,61 +1912,11 @@ def skill_replace_files(
         observal registry skill replace-files my-skill --version-id abc123 \\
             --from-dir ./my-skill --revision def456
     """
-    source_dir = Path(from_dir).resolve()
-
-    # Capture directory
-    capture_context = nullcontext() if output == "json" else spinner("Capturing directory...")
-    with capture_context:
-        try:
-            snapshot = capture_directory(source_dir, exclude=exclude or [])
-        except DirectoryCaptureError as e:
-            fail(
-                ErrorCategory.VALIDATION,
-                f"Cannot capture directory: {e}",
-                operation="Replace skill files",
-                resource=str(source_dir),
-                remediation="Fix the reported issue and retry.",
-            )
-
-    # This is a *complete* replacement. Excluded local files would be deleted
-    # remotely; never treat the defaults (.git, hidden files, etc.) as silent
-    # consent to remove a file from an existing draft.
-    if output != "json":
-        for excluded in snapshot.excluded_paths[:15]:
-            rprint(f"[yellow]Excluded:[/yellow] {esc(excluded)}")
-        if len(snapshot.excluded_paths) > 15:
-            rprint(f"  ... and {len(snapshot.excluded_paths) - 15} more")
-        for warning in snapshot.warnings:
-            rprint(f"[yellow]Warning:[/yellow] {esc(warning)}")
-    if snapshot.excluded_paths and not allow_excluded:
-        fail(
-            ErrorCategory.VALIDATION,
-            "Source folder contains excluded paths; complete replacement may delete files.",
-            operation="Replace skill files",
-            resource=str(source_dir),
-            remediation="Inspect excluded paths and explicitly use --allow-excluded if deletion is intended.",
-        )
-    if snapshot.warnings and not allow_sensitive:
-        if output == "json":
-            fail(
-                ErrorCategory.VALIDATION,
-                "Source folder contains likely-sensitive files.",
-                operation="Replace skill files",
-                resource=str(source_dir),
-                remediation="Inspect the files, then use --allow-sensitive explicitly if intended.",
-            )
-        from observal_cli.prompts import confirm
-
-        if not confirm("Continue uploading potentially sensitive files?", default=False):
-            rprint("[yellow]Aborted.[/yellow]")
-            return
-
+    snapshot_body = _capture_skill_snapshot(
+        Path(from_dir).resolve(), exclude or [], allow_excluded, allow_sensitive, output, "Replace skill files"
+    )
     resolved = client.resolve_registry_reference("skill", skill_id)
-    body = {
-        "observed_revision": revision,
-        "skill_md_content": snapshot.skill_md_content,
-        "extra_files": snapshot_to_extra_files(snapshot),
-    }
+    body = {"observed_revision": revision, **snapshot_body}
 
     replace_context = nullcontext() if output == "json" else spinner("Replacing files...")
     with replace_context:
@@ -1760,7 +1926,5 @@ def skill_replace_files(
         output_json(result)
     else:
         rprint("[green]✓ Files replaced[/green]")
-        rprint(f"  Files: {len(snapshot.extra_files) + 1}")
+        rprint(f"  Files: {len(snapshot_body['extra_files']) + 1}")
         rprint(f"  New revision: {esc(result.get('revision', 'unknown'))}")
-        if snapshot.excluded_paths:
-            rprint(f"  Excluded: {len(snapshot.excluded_paths)} paths")

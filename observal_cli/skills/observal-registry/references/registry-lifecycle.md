@@ -73,6 +73,20 @@ The response contains `listing_id`, `version_id` and `revision`, not a reviewed 
 observal registry skill submit --submit LISTING_ID --version-id VERSION_UUID --output json
 ```
 
+### Fork the current approved direct release
+
+```bash
+observal registry skill fork NAMESPACE/SLUG --version 1.1.0 --description 'New resources' --from-dir ./my-skill --output json
+```
+
+This creates an **editable new version** of the same listing; the approved files never change. Omit `--from-dir` to start from the reviewed folder, or provide the complete new folder to replace the draft's files. The response names the exact draft UUID and revision. If upload fails after creation, resume that UUID instead of blindly forking again. A Git-backed or nonconforming historical direct release cannot be cloned with `fork`. Explicitly import one complete local folder into the **same listing** instead:
+
+```bash
+observal registry skill import-folder NAMESPACE/SLUG --from-dir ./my-skill --version 1.1.0 --description 'Conformant folder' --output json
+```
+
+This does not fetch the old Git files or overwrite its approved release. A reviewer must inspect the full candidate and acknowledge that the old Git file tree cannot be compared. Resource-bearing review stays disabled until the rollout gate is deliberately enabled.
+
 ### Replace all files in a version
 
 ```bash

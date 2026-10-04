@@ -56,6 +56,132 @@ def _skill_item(**overrides):
     return item
 
 
+def test_skill_fork_pins_observed_approved_base_and_reports_exact_draft(monkeypatch):
+    monkeypatch.setattr(skill.client, "resolve_registry_reference", Mock(return_value="listing-uuid"))
+    base = {
+        "version_id": "base-uuid",
+        "revision": "a" * 64,
+        "delivery_mode": "registry_direct",
+        "version": "1.0.0",
+    }
+    get = Mock(return_value=base)
+    post = Mock(return_value={"version_id": "draft-uuid", "revision": "b" * 64})
+    monkeypatch.setattr(skill.client, "get", get)
+    monkeypatch.setattr(skill.client, "post", post)
+    result = runner.invoke(
+        app,
+        [
+            "registry",
+            "skill",
+            "fork",
+            "alice/example",
+            "--version",
+            "1.1.0",
+            "--description",
+            "Add templates",
+            "--output",
+            "json",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output)["version_id"] == "draft-uuid"
+    get.assert_called_once_with(
+        "/api/v1/skills/listing-uuid/approved-base", operation="Fork skill", resource="alice/example"
+    )
+    assert post.call_args.args[1] == {
+        "base_version_id": "base-uuid",
+        "observed_base_revision": "a" * 64,
+        "version": "1.1.0",
+        "description": "Add templates",
+        "changelog": None,
+    }
+
+
+def test_skill_import_folder_sends_complete_snapshot_with_reviewed_base(monkeypatch, tmp_path):
+    monkeypatch.setattr(skill.client, "resolve_registry_reference", Mock(return_value="listing-uuid"))
+    monkeypatch.setattr(
+        skill.client,
+        "get",
+        Mock(return_value={"version_id": "git-base-uuid", "revision": "a" * 64, "delivery_mode": "git_fetch"}),
+    )
+    monkeypatch.setattr(
+        skill,
+        "_capture_skill_snapshot",
+        Mock(
+            return_value={
+                "skill_md_content": "---\nname: example\ndescription: Example\n---\n",
+                "extra_files": [{"path": "scripts/run.sh", "content": "echo ok", "executable": True}],
+            }
+        ),
+    )
+    post = Mock(return_value={"version_id": "draft-uuid", "revision": "b" * 64})
+    monkeypatch.setattr(skill.client, "post", post)
+    result = runner.invoke(
+        app,
+        [
+            "registry",
+            "skill",
+            "import-folder",
+            "alice/example",
+            "--from-dir",
+            str(tmp_path),
+            "--version",
+            "1.3.0",
+            "--description",
+            "A complete folder",
+            "--output",
+            "json",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output)["version_id"] == "draft-uuid"
+    assert post.call_args.args[0] == "/api/v1/skills/listing-uuid/folder-import-drafts"
+    assert post.call_args.args[1]["extra_files"][0]["path"] == "scripts/run.sh"
+    assert post.call_args.args[1]["observed_base_revision"] == "a" * 64
+
+
+def test_skill_fork_validates_folder_before_creation_and_recovers_failed_replacement(monkeypatch, tmp_path):
+    monkeypatch.setattr(skill.client, "resolve_registry_reference", Mock(return_value="listing-uuid"))
+    monkeypatch.setattr(
+        skill.client,
+        "get",
+        Mock(return_value={"version_id": "base-uuid", "revision": "a" * 64, "delivery_mode": "registry_direct"}),
+    )
+    post = Mock(return_value={"version_id": "draft-uuid", "revision": "b" * 64})
+    monkeypatch.setattr(skill.client, "post", post)
+    source = tmp_path / "skill"
+    source.mkdir()
+    capture = Mock(
+        side_effect=CliError(category=ErrorCategory.VALIDATION, message="Invalid folder", operation="Fork skill")
+    )
+    monkeypatch.setattr(skill, "_capture_skill_snapshot", capture)
+    argv = [
+        "registry",
+        "skill",
+        "fork",
+        "alice/example",
+        "--version",
+        "1.1.0",
+        "--description",
+        "Add templates",
+        "--from-dir",
+        str(source),
+    ]
+    assert runner.invoke(app, argv).exit_code != 0
+    post.assert_not_called()
+    capture.side_effect = None
+    capture.return_value = {"skill_md_content": "---\nname: example\n---", "extra_files": []}
+    monkeypatch.setattr(
+        skill.client,
+        "put",
+        Mock(side_effect=CliError(category=ErrorCategory.CONFLICT, message="stale", operation="Replace fork files")),
+    )
+    result = runner.invoke(app, argv)
+    assert result.exit_code != 0
+    assert "draft-uuid" in result.output
+    post.assert_called_once()
+
+
 def test_registration_path_safety_and_user_destinations(tmp_path):
     parent = Mock()
     skill.register_skill(parent)

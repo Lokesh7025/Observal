@@ -150,6 +150,10 @@ class SkillCandidateDraftRequest(BaseModel):
         return uuid.UUID(value) if isinstance(value, str) else value
 
 
+class SkillFolderImportDraftRequest(SkillCandidateDraftRequest, SkillFolderSnapshot):
+    """Atomic full-folder successor of an approved Git or historical direct release."""
+
+
 class SkillListingResponse(BaseModel):
     id: uuid.UUID
     name: str

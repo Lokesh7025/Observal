@@ -217,7 +217,9 @@ Every command available in the installed CLI. This block is generated from the T
   - `observal registry skill archive`: Archive this component.
   - `observal registry skill edit`: Edit a draft, rejected, or pending skill submission.
   - `observal registry skill export`: Export a skill version to a local directory.
-  - `observal registry skill install`: Install a skill by fetching the full skill directory from git.
+  - `observal registry skill fork`: Create an editable successor to the currently reviewed direct release.
+  - `observal registry skill import-folder`: Create one complete direct-folder draft under a reviewed Git or legacy listing.
+  - `observal registry skill install`: Install an approved skill from Git or a complete reviewed registry folder.
   - `observal registry skill list`: List approved skills in the registry.
   - `observal registry skill my`: List your own skills across all statuses.
   - `observal registry skill rebase`: Rebase a draft skill version on the current approved version.

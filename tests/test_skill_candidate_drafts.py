@@ -18,12 +18,139 @@ from models.mcp import ListingStatus
 from models.skill import SkillListing, SkillVersion
 from models.user import User, UserRole
 from schemas.component_version import VersionPublishRequest
-from schemas.skill import SkillCandidateDraftRequest, SkillUpdateRequest
+from schemas.skill import SkillCandidateDraftRequest, SkillFolderImportDraftRequest, SkillUpdateRequest
 from schemas.skill_resources import SkillFileOperations, SkillVersionRevisionRequest
 from services.skill_revisions import skill_content_revision
 from tests import discovery_support as ds
 
 FIXTURE = json.loads((Path(__file__).parent / "fixtures/skill_folder_contract.json").read_text())
+
+
+@pytest.mark.asyncio
+async def test_version_summary_does_not_load_or_expose_stored_resources():
+    engine = ds.make_engine()
+    maker = await ds.create_schema(engine)
+    try:
+        async with maker() as db:
+            owner = await ds.user(db)
+            listing = await ds.skill(
+                db, owner, status=ListingStatus.approved, content=FIXTURE["snapshot"]["skill_md_content"]
+            )
+            approved = await db.get(SkillVersion, listing.latest_version_id)
+            approved.extra_files = FIXTURE["snapshot"]["extra_files"]
+            await db.commit()
+            listing_id, owner_id = listing.id, owner.id
+        async with maker() as db:
+            owner = await db.get(User, owner_id)
+            data = await component_versions._list_versions(
+                str(listing_id), 1, 50, SkillListing, SkillVersion, "skill", db, owner
+            )
+            assert data["total"] == 1
+            assert "extra_files" not in data["items"][0]
+            assert "skill_md_content" not in data["items"][0]
+            assert "script_content" not in data["items"][0]
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_authoritative_approved_base_is_owner_only_and_ignores_pending_pointer():
+    engine = ds.make_engine()
+    maker = await ds.create_schema(engine)
+    try:
+        async with maker() as db:
+            owner = await ds.user(db)
+            stranger = await ds.user(db)
+            listing = await ds.skill(
+                db, owner, status=ListingStatus.approved, content=FIXTURE["snapshot"]["skill_md_content"]
+            )
+            approved_id = listing.latest_version_id
+            await ds.add_skill_version(
+                db, listing, owner, version="1.1.0", status=ListingStatus.pending, set_latest=True
+            )
+            await db.commit()
+            listing_id, owner_id, stranger_id = listing.id, owner.id, stranger.id
+
+        async with maker() as db:
+            stranger = await db.get(User, stranger_id)
+            with pytest.raises(HTTPException) as forbidden:
+                await skill_files.get_skill_approved_base(str(listing_id), Response(), db, stranger)
+            assert forbidden.value.status_code == 403
+            owner = await db.get(User, owner_id)
+            response = Response()
+            base = await skill_files.get_skill_approved_base(str(listing_id), response, db, owner)
+            assert base["version_id"] == str(approved_id)
+            assert base["delivery_mode"] == "registry_direct"
+            assert len(base["revision"]) == 64
+            assert response.headers["cache-control"] == "no-store"
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("source", ["git_fetch", "legacy_direct"])
+async def test_atomic_folder_import_preserves_old_release_and_refuses_stale_base(source):
+    engine = ds.make_engine()
+    maker = await ds.create_schema(engine)
+    try:
+        async with maker() as db:
+            owner = await ds.user(db)
+            stranger = await ds.user(db)
+            listing = await ds.skill(db, owner, status=ListingStatus.approved)
+            old = await db.get(SkillVersion, listing.latest_version_id)
+            if source == "git_fetch":
+                old.delivery_mode = "git_fetch"
+                old.git_url = "https://github.com/example/old-skill.git"
+                old.git_ref = "main"
+            else:
+                old.skill_md_content = "# Old skill without conforming frontmatter\n"
+            await db.commit()
+            listing_id, old_id, owner_id, stranger_id = listing.id, old.id, owner.id, stranger.id
+
+        async with maker() as db:
+            owner = await db.get(User, owner_id)
+            stranger = await db.get(User, stranger_id)
+            base = await skill_files.get_skill_approved_base(str(listing_id), Response(), db, owner)
+            req = SkillFolderImportDraftRequest(
+                base_version_id=old_id,
+                observed_base_revision=base["revision"],
+                version="1.3.0",
+                description="Full local folder",
+                **FIXTURE["snapshot"],
+            )
+            with pytest.raises(HTTPException) as forbidden:
+                await skill_files.import_skill_folder_candidate(str(listing_id), req, Response(), db, stranger)
+            assert forbidden.value.status_code == 403
+            with pytest.raises(HTTPException) as stale:
+                await skill_files.import_skill_folder_candidate(
+                    str(listing_id),
+                    req.model_copy(update={"observed_base_revision": "0" * 64}),
+                    Response(),
+                    db,
+                    owner,
+                )
+            assert stale.value.status_code == 409
+            result = await skill_files.import_skill_folder_candidate(str(listing_id), req, Response(), db, owner)
+            await db.refresh(await db.get(SkillListing, listing_id))
+            assert (await db.get(SkillListing, listing_id)).latest_version_id == old_id
+            original = await db.get(SkillVersion, old_id)
+            await db.refresh(original, attribute_names=["skill_md_content"])
+            assert original.delivery_mode == ("git_fetch" if source == "git_fetch" else "registry_direct")
+            if source == "git_fetch":
+                assert original.git_url == "https://github.com/example/old-skill.git"
+            else:
+                assert original.skill_md_content == "# Old skill without conforming frontmatter\n"
+            candidate = await db.get(SkillVersion, result.version_id)
+            await db.refresh(candidate, attribute_names=["extra_files"])
+            assert candidate.base_version_id == old_id
+            assert candidate.base_revision == base["revision"]
+            assert candidate.status == ListingStatus.draft
+            assert candidate.delivery_mode == "registry_direct"
+            assert candidate.git_url is None
+            assert candidate.extra_files == [resource.model_dump() for resource in req.extra_files]
+            assert len(result.files) == len(req.extra_files) + 1
+    finally:
+        await engine.dispose()
 
 
 @pytest.mark.asyncio

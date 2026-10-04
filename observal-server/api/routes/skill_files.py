@@ -26,7 +26,7 @@ from api.routes._skill_lock import approved_skill_base_id, lock_skill_version, s
 from models.mcp import ListingStatus
 from models.skill import SkillListing, SkillVersion
 from models.user import User, UserRole
-from schemas.skill import SkillCandidateDraftRequest, SkillUpdateRequest
+from schemas.skill import SkillCandidateDraftRequest, SkillFolderImportDraftRequest, SkillUpdateRequest
 from schemas.skill_resources import (
     SkillDraftRebaseRequest,
     SkillFileContents,
@@ -209,6 +209,59 @@ async def _save_file_edit(listing, version, edit, db: AsyncSession, *, replace: 
     )
 
 
+@router.get("/{listing_id}/approved-base")
+async def get_skill_approved_base(
+    listing_id: str,
+    response: Response,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_role(UserRole.user)),
+):
+    """One authoritative base for successor authoring, even after 100+ releases."""
+    listing = await resolve_listing(
+        SkillListing, listing_id, db, current_user=current_user, load_options=_BODY_FREE_LISTING
+    )
+    if listing is None:
+        raise HTTPException(status_code=404, detail="Skill listing not found")
+    if get_effective_component_permission(listing, current_user) != "owner":
+        raise HTTPException(status_code=403, detail="Not the listing owner")
+    if listing.latest_version_id is None:
+        raise HTTPException(status_code=409, detail="Skill has no reviewed release")
+    _, latest = await lock_skill_version(db, listing.id, listing.latest_version_id)
+    await db.refresh(
+        listing,
+        attribute_names=["submitted_by", "co_authors", "team_id", "is_private", "name", "namespace", "slug", "owner"],
+    )
+    if not await check_listing_visibility_async(listing, current_user, db) or (
+        get_effective_component_permission(listing, current_user) != "owner"
+    ):
+        raise HTTPException(status_code=403, detail="Not the listing owner")
+    approved_id = await approved_skill_base_id(db, listing.id, latest)
+    if approved_id is None:
+        raise HTTPException(status_code=409, detail="Skill has no reviewed release")
+    base = (
+        await db.execute(
+            select(SkillVersion)
+            .where(SkillVersion.id == approved_id, SkillVersion.listing_id == listing.id)
+            .execution_options(populate_existing=True)
+            .with_for_update(read=True)
+        )
+    ).scalar_one()
+    if base.status not in INSTALLABLE_STATUSES or base.requires_global_review:
+        raise HTTPException(status_code=409, detail="Skill has no reviewed release")
+    try:
+        revision = verified_skill_revision(listing, base)
+    except SkillValidationError as exc:
+        raise HTTPException(status_code=409, detail="Approved skill base is invalid") from exc
+    response.headers["Cache-Control"] = "no-store"
+    return {
+        "listing_id": str(listing.id),
+        "version_id": str(base.id),
+        "version": base.version,
+        "revision": revision,
+        "delivery_mode": base.delivery_mode,
+    }
+
+
 @router.post("/{listing_id}/drafts", response_model=SkillVersionManifest)
 async def create_skill_candidate_draft(
     listing_id: str,
@@ -313,6 +366,94 @@ async def create_skill_candidate_draft(
         version_id=draft.id,
         revision=draft.content_revision,
         files=[file.declaration for file in files],
+    )
+
+
+@router.post("/{listing_id}/folder-import-drafts", response_model=SkillVersionManifest)
+async def import_skill_folder_candidate(
+    listing_id: str,
+    req: SkillFolderImportDraftRequest,
+    response: Response,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_role(UserRole.user)),
+):
+    """Convert a reviewed Git or historically invalid direct release atomically.
+
+    The entire folder is supplied locally; Git bytes are never fetched or
+    represented as a stored review base. Neither the listing's approved pointer
+    nor its old approved version changes.
+    """
+    observed = await get_skill_approved_base(listing_id, Response(), db, current_user)
+    if observed["version_id"] != str(req.base_version_id) or observed["revision"] != req.observed_base_revision:
+        raise HTTPException(status_code=409, detail="Approved skill base changed; refresh before importing")
+    listing = await db.get(SkillListing, uuid.UUID(observed["listing_id"]))
+    base = (
+        await db.execute(
+            select(SkillVersion)
+            .where(SkillVersion.id == req.base_version_id, SkillVersion.listing_id == listing.id)
+            .execution_options(populate_existing=True)
+            .with_for_update()
+        )
+    ).scalar_one()
+    if base.delivery_mode == "registry_direct":
+        try:
+            _validate_new_md(base.skill_md_content)
+        except SkillValidationError:
+            pass  # Historic frontmatter requires an authored full-folder snapshot.
+        else:
+            raise HTTPException(status_code=422, detail="Use fork for an existing reviewed direct folder")
+    elif base.delivery_mode != "git_fetch":
+        raise HTTPException(status_code=422, detail="Only reviewed Git or historical direct skills can be imported")
+    try:
+        edit = replace_folder(req, authored=True)
+    except SkillValidationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    versions = (
+        (await db.execute(select(SkillVersion.version).where(SkillVersion.listing_id == listing.id))).scalars().all()
+    )
+    if any(
+        release_key(value) is None and not re.fullmatch(r"\d+\.\d+\.\d+-[0-9A-Za-z.-]+", value) for value in versions
+    ):
+        raise HTTPException(
+            status_code=409, detail="Malformed historical skill version; request a reviewed base repair"
+        )
+    stable = [key for value in versions if (key := release_key(value)) is not None]
+    candidate_key = release_key(req.version)
+    if req.version in versions or (stable and candidate_key <= max(stable)):
+        raise HTTPException(status_code=409, detail="Draft release number must be new and newer than approved releases")
+    draft = SkillVersion(
+        listing_id=listing.id,
+        version=req.version,
+        description=req.description,
+        changelog=req.changelog,
+        status=ListingStatus.draft,
+        released_by=current_user.id,
+        released_at=datetime.now(UTC),
+        base_version_id=base.id,
+        base_revision=observed["revision"],
+        delivery_mode="registry_direct",
+        skill_path="/",
+        skill_md_content=edit.skill_md_content,
+        script_filename=None,
+        script_content=None,
+        extra_files=edit.extra_files,
+        target_agents=deepcopy(base.target_agents or []),
+        supported_harnesses=deepcopy(base.supported_harnesses or []),
+        task_type=base.task_type,
+        slash_command=validate_skill_md_content_frontmatter(edit.skill_md_content).slash_command,
+        validated=True,
+    )
+    db.add(draft)
+    await db.flush()
+    draft.content_revision = skill_content_revision(listing, draft)
+    await db.commit()
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    return SkillVersionManifest(
+        listing_id=listing.id,
+        version_id=draft.id,
+        revision=draft.content_revision,
+        files=[file.declaration for file in edit.files],
     )
 
 
