@@ -267,17 +267,17 @@ def skill_submit(
 ):
     """Submit a new skill for review.
 
-    Skills are reusable SKILL.md files that provide agents with task-specific
-    instructions. Preferred: provide --git-url (with optional --git-ref) and
-    let the server fetch SKILL.md automatically.
+    Skills provide agents with task-specific SKILL.md instructions. For a
+    Git-backed skill, provide --git-url (with optional --git-ref) so the server
+    fetches SKILL.md automatically.
 
     Shortcut: provide --skill-md PATH to paste the SKILL.md content directly
     (fields are auto-filled from frontmatter; --git-url is still required
     for install unless using --delivery-mode registry_direct).
 
     Registry direct: use --delivery-mode registry_direct with --skill-md and
-    optionally --script to submit a skill with inline content (no git repo
-    needed). On install, the SKILL.md and script are written directly.
+    optionally --script for historical single-file delivery (no git repo
+    needed). For a complete versioned folder, use --from-dir instead.
 
     Complete folders: use --from-dir PATH to save a versioned folder draft
     containing SKILL.md and additional files (scripts, templates, assets).

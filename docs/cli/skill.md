@@ -1,9 +1,10 @@
 <!-- SPDX-FileCopyrightText: 2026 Nithin-Bhargav-07 <gaddamnithinbhargav@gmail.com> -->
+<!-- SPDX-FileCopyrightText: 2026 Kaushik <kaushikrjpm10@gmail.com> -->
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 
 # `observal registry skill`
 
-Submit, browse, install, edit, archive, restore, transfer, and manage co-authors for portable skill packages.
+Submit, browse, review, install, and safely update versioned skill folders, as well as Git-backed and historical single-file skills. See the [complete skill folder workflow](../skill-folder-workflow.md) for the owner-to-reviewer-to-consumer journey and rollout requirements.
 
 ## Commands
 
@@ -15,6 +16,12 @@ Submit, browse, install, edit, archive, restore, transfer, and manage co-authors
 | `show` | Show one skill |
 | `install` | Write a skill into a supported harness |
 | `edit` | Edit a draft, pending, or rejected skill |
+| `fork` | Create a new draft from the exact reviewed direct release |
+| `import-folder` | Import a complete local folder as a successor to a reviewed Git or historical direct release |
+| `replace-files` | Replace a draft's complete file tree, binding to its version UUID and observed revision |
+| `withdraw` / `rebase` | Withdraw a pending version or rebase a saved draft against a newer reviewed version |
+| `export` | Export an exact version to a new local directory |
+| `backups list` / `restore` / `prune` | Inspect, restore, or explicitly prune verified managed-folder backups |
 | `archive` | Archive an approved skill |
 | `unarchive` | Restore an archived skill |
 | `transfer-owner` | Transfer ownership |
@@ -24,7 +31,7 @@ Every command that returns structured data supports table and JSON output. Archi
 
 ## Submit
 
-Git-backed skills require a Git URL. Registry-direct skills store SKILL.md and an optional script in Observal.
+Git-backed skills require a Git URL. Registry-direct skills can store `SKILL.md`, optional script resources, or a complete bounded folder with scripts, templates, binary assets and executable modes. Folder drafts are versioned; saving a draft does **not** submit it for review. Use an explicit `fork` or `import-folder` to create a successor to an approved release; never use `submit --from-dir` to silently overwrite one.
 
 ```bash
 observal registry skill submit \
@@ -44,7 +51,7 @@ observal registry skill submit \
   --output json
 ```
 
-JSON mode never prompts. Supply the name, description, task type, delivery mode, and required source inputs explicitly.
+For a new complete folder, use `observal registry skill submit --from-dir ./my-skill --name my-skill --description "My skill"`. To advance an approved listing, use `fork` (reviewed direct base) or `import-folder` (reviewed Git/historical direct base), then `replace-files --version-id UUID --from-dir ./my-skill --revision OBSERVED_REVISION` as needed. The [folder workflow](../skill-folder-workflow.md) covers exact-base selection, sensitive/excluded file acknowledgments, review, and immutable releases. JSON mode never prompts; supply all required inputs explicitly.
 
 Valid task types are `code-review`, `code-generation`, `testing`, `documentation`, `debugging`, `refactoring`, `deployment`, `security-audit`, `performance`, and `general`.
 
@@ -68,9 +75,9 @@ observal registry skill install acme/review-skill --harness pi --no-write --outp
 observal registry skill install acme/review-skill --harness pi --raw
 ```
 
-JSON output performs the installation unless no-write is selected. It reports `write_performed` and `installed_path`. Raw mode emits only the generated config and performs no write. Lockfile state is recorded only after the skill content is written successfully.
+JSON output performs the installation unless no-write is selected. It reports `write_performed` and `installed_path`. Raw mode emits only the generated config and performs no write. Lockfile state is recorded only after the skill content is written successfully. A complete folder install requires the server's default-off delivery gate and a compatible client. Pin an approved `--version` for reproducible installs; omitting it follows the latest release. A managed folder is never replaced silently: first use `--check-upgrade` for a no-write preview, then `--upgrade` to verify every installed byte and mode, retain a private backup and update its receipt. `--backup-root DIR` must be private, ignored by Git when inside a worktree, outside skill discovery roots, and on the target filesystem. Cross-mode Git/single-file installs cannot erase existing folder receipts.
 
-The command fails if the harness lacks skill support, the source cannot be installed, a project symlink cannot be created, or installed state cannot be recorded.
+The command fails if the harness lacks skill support, the source cannot be installed, the destination is unowned or locally edited, or installed state cannot be recorded. See [verified updates and recovery](../skill-folder-workflow.md#verified-managed-update-and-recovery) before restoring a backup.
 
 ## Edit
 

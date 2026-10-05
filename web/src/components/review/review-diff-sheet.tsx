@@ -825,18 +825,6 @@ function DiffDialogBody({
 							</dl>
 						</div>
 
-						{/* Review the exact version's declared file tree, not a listing-level YAML snapshot. */}
-						{item.type === "skill" && item.version_id && (
-							<>
-								<Separator />
-								{skillReviewLoading ? <p className="text-xs text-muted-foreground">Loading verified files…</p>
-									: skillReviewError ? <p role="alert" className="text-xs text-destructive">Exact skill version unavailable; approval is blocked.</p>
-									: skillReview?.files?.length ? (
-										<SkillFilesSection listingId={item.id} versionId={item.version_id}
-											baseVersionId={skillReview.base_version_id} baseDeliveryMode={skillReview.base_delivery_mode} />
-									) : null}
-							</>
-						)}
 
 						{/* Model */}
 						{(modelName || modelsByHarnessEntries.length > 0) && (
@@ -1062,9 +1050,19 @@ function DiffDialogBody({
 					</div>
 				</ScrollArea>
 
-				{/* Right pane: diff or YAML snapshot (~60%) */}
+				{/* Primary pane: exact skill file comparison or other component YAML diff. */}
 				<div className="flex-1 min-w-0 flex flex-col min-h-0">
-					{isLoading ? (
+					{item.type === "skill" && item.version_id ? (
+						<div className="flex-1 min-h-0 overflow-y-auto p-4 space-y-3">
+							<h4 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">Exact reviewed files</h4>
+							{skillReviewLoading ? <p className="text-xs text-muted-foreground">Loading verified files…</p>
+								: skillReviewError || !skillReview ? <p role="alert" className="text-xs text-destructive">Exact skill version unavailable; approval is blocked.</p>
+								: skillReview.files?.length ? (
+									<SkillFilesSection listingId={item.id} versionId={item.version_id}
+										baseVersionId={skillReview.base_version_id} baseDeliveryMode={skillReview.base_delivery_mode} />
+								) : <p className="text-xs text-muted-foreground">No reviewed folder files for this version.</p>}
+						</div>
+					) : isLoading ? (
 						<div className="flex-1 p-4 space-y-2">
 							<Skeleton className="h-4 w-full" />
 							<Skeleton className="h-4 w-5/6" />
