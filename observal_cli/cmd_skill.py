@@ -1444,6 +1444,19 @@ def _install_managed_folder(
             ]
             if len(matches) > 1:
                 raise managed_skill.ManagedSkillError("Ambiguous standalone lock entries")
+            # The destination preflight and this lockfile update are separate
+            # locks. A concurrent first install of this listing may have won
+            # under a different folder name while our folder was staged.
+            for existing in matches:
+                receipt = existing.get("folder_receipt")
+                if (
+                    receipt
+                    and receipt.get("target") != str(target)
+                    and Path(receipt.get("target", "")).parent == target.parent
+                ):
+                    raise managed_skill.ManagedSkillError(
+                        "This listing already owns a different folder name in this skill root"
+                    )
             entry = matches[0] if matches else {}
             entry.update(
                 {

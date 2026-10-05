@@ -68,7 +68,9 @@ async def test_real_postgres_repairs_only_highest_cleared_stable_release():
             newer = await ds.add_skill_version(db, first, author, version="2.0.0", status=ListingStatus.approved)
             newer.released_at = datetime.now(UTC) - timedelta(days=10)
             archived = await ds.add_skill_version(db, first, author, version="3.0.0", status=ListingStatus.archived)
-            archived.released_at = datetime.now(UTC) - timedelta(days=20)
+            archived.released_at = datetime.now(UTC) - timedelta(
+                days=1
+            )  # Newer than approved: old 030 incorrectly hid it.
             marked = await ds.add_skill_version(db, first, author, version="4.0.0", status=ListingStatus.approved)
             marked.requires_global_review = True
             candidate = await ds.add_skill_version(db, first, author, version="5.0.0", status=ListingStatus.pending)
@@ -76,16 +78,63 @@ async def test_real_postgres_repairs_only_highest_cleared_stable_release():
 
             only_prerelease = await ds.skill(db, author, name="Preview Only", version="2.0.0-rc.1")
             only_prerelease_id, original_preview_id = only_prerelease.id, only_prerelease.latest_version_id
+            archived_only = await ds.skill(
+                db, author, name="Archived Stable", version="1.0.0", status=ListingStatus.archived
+            )
+            archived_stable_id = archived_only.latest_version_id
+            await ds.add_skill_version(db, archived_only, author, version="2.0.0-rc.1", status=ListingStatus.approved)
+            await ds.add_skill_version(db, archived_only, author, version="3.0.0", status=ListingStatus.pending)
+            archived_listing_id = archived_only.id
+            preview_pending = await ds.skill(db, author, name="Preview Pending", version="2.0.0-rc.1")
+            only_pending = await ds.add_skill_version(
+                db, preview_pending, author, version="3.0.0", status=ListingStatus.pending
+            )
+            only_pending_listing_id = preview_pending.id
             await db.commit()
             archived_id, approved_newest_id = archived.id, newer.id
         migration = _migration()
+        lifecycle_path = PATH.with_name("030_skill_release_lifecycle.py")
+        lifecycle_spec = importlib.util.spec_from_file_location("skill_lifecycle_sql_test", lifecycle_path)
+        lifecycle = importlib.util.module_from_spec(lifecycle_spec)
+        lifecycle_spec.loader.exec_module(lifecycle)
+        lifecycle.op = Mock()
+        lifecycle.upgrade()
+        lifecycle_repair_sql = lifecycle.op.execute.call_args.args[0]
 
         def run_repair(sync_conn):
             migration.op = Operations(MigrationContext.configure(sync_conn))
             migration.upgrade()
 
         async with engine.begin() as conn:
+            # The fresh test schema already has 030's columns; run its actual
+            # data repair statement followed by 032, as historical upgrades do.
+            await conn.execute(text(lifecycle_repair_sql))
+            after_030 = await conn.scalar(
+                text("SELECT latest_version_id FROM skill_listings WHERE id = CAST(:id AS uuid)"), {"id": str(first_id)}
+            )
+            assert after_030 == approved_newest_id
+            assert (
+                await conn.scalar(
+                    text("SELECT latest_version_id FROM skill_listings WHERE id = CAST(:id AS uuid)"),
+                    {"id": str(archived_listing_id)},
+                )
+                == archived_stable_id
+            )  # A newer approved prerelease stays pin-only.
+            assert (
+                await conn.scalar(
+                    text("SELECT latest_version_id FROM skill_listings WHERE id = CAST(:id AS uuid)"),
+                    {"id": str(only_pending_listing_id)},
+                )
+                == only_pending.id
+            )  # No stable release exists; retain stale pointer.
             await conn.run_sync(run_repair)
+            assert (
+                await conn.scalar(
+                    text("SELECT latest_version_id FROM skill_listings WHERE id = CAST(:id AS uuid)"),
+                    {"id": str(archived_listing_id)},
+                )
+                == archived_stable_id
+            )
             repaired = await conn.scalar(
                 text("SELECT latest_version_id FROM skill_listings WHERE id = CAST(:id AS uuid)"), {"id": str(first_id)}
             )

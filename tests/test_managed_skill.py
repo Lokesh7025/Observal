@@ -10,6 +10,7 @@ import json
 import os
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 
@@ -63,6 +64,13 @@ def install(b, target, root, *, check=False, old=None, fail=False):
             .setdefault("https://example.org", {"harnesses": {}})["harnesses"]
             .setdefault("pi", {"standalone": []})["standalone"]
         )
+        if any(
+            item.get("id") == b.listing_id
+            and Path(item.get("folder_receipt", {}).get("target", "")).parent == target.parent
+            and item.get("folder_receipt", {}).get("target") != str(target)
+            for item in entries
+        ):
+            raise managed_skill.ManagedSkillError("Listing already owns another folder in this root")
         entry = next((item for item in entries if item.get("folder_receipt", {}).get("target") == str(target)), None)
         if entry is None:
             entry = {"id": b.listing_id, "type": "skill"}
@@ -98,6 +106,32 @@ def test_initial_upgrade_preview_restore_and_prune(store):
     restored = managed_skill.restore_backup(done["backup_id"], backup_root=root)
     assert (target / "SKILL.md").read_bytes() == b"skill"
     assert managed_skill.restore_backup(restored["current_backup"], backup_root=root, prune=True)
+
+
+def test_upgrade_refuses_tree_changed_between_verification_and_rename(store, monkeypatch):
+    target, root = store
+    first, second = bundle("v1"), bundle("v2", content=b"changed")
+    install(first, target, root)
+    original_verify = managed_skill.verify_tree
+    checks = 0
+
+    def verify_then_replace(path, proof):
+        nonlocal checks
+        original_verify(path, proof)
+        if path == target and proof["version_id"] == first.version_id:
+            checks += 1
+            if checks == 2:
+                (target / "SKILL.md").write_bytes(b"local replacement")
+
+    monkeypatch.setattr(managed_skill, "verify_tree", verify_then_replace)
+    with pytest.raises(managed_skill.ManagedSkillError, match="manual recovery"):
+        install(second, target, root)
+    assert (
+        lockfile.read_lockfile()["registries"]["https://example.org"]["harnesses"]["pi"]["standalone"][0]["version_id"]
+        == "v1"
+    )
+    assert next(root.glob("*/old/SKILL.md")).read_bytes() == b"local replacement"
+    assert list(root.glob("*/marker.json")), "retain marker for human recovery"
 
 
 def test_interrupted_restore_preserves_both_versions_and_prior_receipt(store):
@@ -339,16 +373,23 @@ def test_wide_existing_lockfile_is_narrowed(store):
     assert lockfile.LOCKFILE_PATH.stat().st_mode & 0o777 == 0o600
 
 
-def test_different_targets_do_not_lose_receipts(store):
+def test_different_targets_cannot_orphan_listing_receipt(store):
     target, root = store
     second = target.parent / "second"
     b = bundle("v1")
     with ThreadPoolExecutor(max_workers=2) as pool:
         futures = [pool.submit(install, b, place, root) for place in (target, second)]
+        results = []
         for future in futures:
-            future.result()
-    # Both records are serialized by the lockfile transaction, even when
-    # callers hold different per-target locks.
-    data = lockfile.read_lockfile()
-    entries = data["registries"]["https://example.org"]["harnesses"]["pi"]["standalone"]
-    assert {e["folder_receipt"]["target"] for e in entries} == {str(target), str(second)}
+            try:
+                results.append(future.result())
+            except managed_skill.ManagedSkillError as error:
+                results.append(error)
+    # Per-target locks do not serialize different names. The lockfile callback
+    # must refuse the second destination and transactionally remove its stage.
+    assert sum(isinstance(result, managed_skill.ManagedSkillError) for result in results) == 1
+    entries = lockfile.read_lockfile()["registries"]["https://example.org"]["harnesses"]["pi"]["standalone"]
+    assert len(entries) == 1
+    owned = entries[0]["folder_receipt"]["target"]
+    assert owned in {str(target), str(second)}
+    assert {str(path) for path in (target, second) if path.exists()} == {owned}

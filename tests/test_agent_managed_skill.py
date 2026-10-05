@@ -325,6 +325,54 @@ def test_failed_project_pin_write_restores_old_agent_entry_and_folder(machine: P
     assert lockfile.installed_agent("pi", "agent-1", scope="project", directory=str(project)) == previous
 
 
+@pytest.mark.parametrize("change", ["removed", "relocated"])
+def test_agent_upgrade_cannot_orphan_managed_skill_receipt(machine: Path, tmp_path: Path, change: str) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    proofs = [
+        {
+            "listing_id": listing_id,
+            "target": str(project / ".pi" / "skills" / folder),
+            "registry_url": lockfile.current_registry_url(),
+        }
+        for listing_id, folder in (("listing-1", "demo"), ("listing-2", "other"))
+    ]
+    for proof in proofs:
+        lockfile.update_lockfile(
+            lambda data, proof=proof: cmd_pull._record_managed_agent_component(
+                data,
+                harness="pi",
+                scope="project",
+                directory=project,
+                agent_id="agent-1",
+                agent_version="1.0.0",
+                component={"id": proof["listing_id"], "type": "skill"},
+                proof=proof,
+            )
+        )
+    before = lockfile.installed_agent("pi", "agent-1", scope="project", directory=str(project))
+    incoming = (
+        [proofs[0]]
+        if change == "removed"
+        else [
+            proofs[0],
+            {**proofs[1], "target": str(project / "another-root" / "other")},
+        ]
+    )
+    with pytest.raises(RuntimeError, match="without its ownership receipt"):
+        cmd_pull._sync_managed_agent_lock(
+            harness="pi",
+            scope="project",
+            directory=project,
+            agent_id="agent-1",
+            agent_version="2.0.0",
+            metadata={"id": "agent-1", "version": "2.0.0", "scope": "project", "directory": str(project)},
+            components=[{"id": proof["listing_id"], "type": "skill"} for proof in incoming],
+            proofs=incoming,
+        )
+    assert lockfile.installed_agent("pi", "agent-1", scope="project", directory=str(project)) == before
+
+
 def test_failed_initial_pull_removes_agent_tracking_as_well_as_folder(machine: Path, tmp_path: Path) -> None:
     project = tmp_path / "project"
     project.mkdir()

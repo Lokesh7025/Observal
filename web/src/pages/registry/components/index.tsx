@@ -31,11 +31,14 @@ import {
   useLoadSkillFolderDraft,
   useUpdateSkillFolderDraft,
   useSubmitSkillFolderDraft,
+  useSkillVersionManifest,
   useTeams,
   useRegistryItem,
   useComponentVersionDetail,
 } from "@/hooks/use-api";
 import { useOptionalAuth } from "@/hooks/use-auth";
+import { useDeploymentConfig } from "@/hooks/use-deployment-config";
+import { requiresFolderDelivery } from "@/lib/skill-folder-delivery";
 import { registry, type RegistryType } from "@/lib/api";
 import type { RegistryItem, ComponentVersionSummary } from "@/lib/types";
 import {
@@ -274,6 +277,14 @@ export default function ComponentsPage(): React.JSX.Element {
     item: RegistryItem; action: "edit" | "submit"; versions: ComponentVersionSummary[]; versionId: string;
   } | null>(null);
   const [findingFolder, setFindingFolder] = useState(false);
+  const { skillFolderDeliveryEnabled } = useDeploymentConfig();
+  const selectedFolderVersion = folderSelection?.versions.find((version) => version.id === folderSelection.versionId) ?? null;
+  const selectedFolderManifest = useSkillVersionManifest(
+    folderSelection?.action === "submit" ? folderSelection.item.id : undefined,
+    folderSelection?.action === "submit" ? folderSelection.versionId : undefined,
+  );
+  const folderSubmitBlocked = folderSelection?.action === "submit" && !skillFolderDeliveryEnabled &&
+    !!selectedFolderManifest.data && requiresFolderDelivery(selectedFolderVersion, selectedFolderManifest.data);
   const folderConfirmRef = useRef<HTMLButtonElement>(null);
   const timerRef = useRef<ReturnType<typeof setTimeout>>(undefined);
   const attemptedFolderLink = useRef<string | null>(null);
@@ -829,10 +840,19 @@ export default function ComponentsPage(): React.JSX.Element {
                   value: version.id, label: `${version.version} · ${version.status} · ${version.id.slice(0, 8)}`,
                 }))}
               />
+              {folderSubmitBlocked && <p role="status" className="text-sm text-muted-foreground">
+                Complete-folder review is not enabled on this server. This draft is saved; you can continue editing it.
+              </p>}
+              {folderSelection.action === "submit" && selectedFolderManifest.isError &&
+                <div role="alert" className="flex items-center gap-2 text-sm text-destructive">
+                  Could not load this exact version.
+                  <Button variant="outline" size="sm" onClick={() => void selectedFolderManifest.refetch()}>Retry</Button>
+                </div>}
               <Button
                 ref={folderConfirmRef}
                 onClick={() => void continueFolderSelection()}
-                disabled={loadFolderMutation.isPending || submitFolderMutation.isPending}
+                disabled={loadFolderMutation.isPending || submitFolderMutation.isPending ||
+                  (folderSelection.action === "submit" && (!selectedFolderManifest.data || folderSubmitBlocked))}
               >
                 {folderSelection.action === "edit" ? "Edit selected version" : "Submit selected version"}
               </Button>

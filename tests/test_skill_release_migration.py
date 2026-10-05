@@ -42,7 +42,8 @@ def test_additive_columns_and_deterministic_approved_pointer_repair(monkeypatch)
     assert columns["requires_global_review"].server_default is not None
     op.create_foreign_key.assert_called_once()
     query = op.execute.call_args.args[0]
-    assert "ORDER BY approved.released_at DESC, approved.id DESC" in query
+    assert "ORDER BY (approved.status = 'approved') DESC" in query
+    assert "approved.released_at DESC, approved.id DESC" in query
     assert "approved.status IN ('approved', 'archived')" in query
     assert "stale.status IN ('pending', 'draft', 'rejected')" in query
     assert all(field in inspect(SkillVersion).columns for field in columns)

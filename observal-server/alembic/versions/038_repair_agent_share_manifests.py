@@ -9,7 +9,8 @@ Revises: 037_recommended_compat
 Fresh installations run upstream 030_agent_share_manifests before the skill
 revisions. Older installations already stamped past that new ancestor never
 replay it; install both missing share tables without modifying any share data.
-Refuse a partial schema rather than silently completing an ambiguous state.
+Refuse a partial schema rather than silently completing an ambiguous state,
+including when both table names exist but their upstream definitions do not.
 """
 
 import sqlalchemy as sa
@@ -23,6 +24,101 @@ branch_labels = None
 depends_on = None
 
 
+# The existing-table path must establish the same contract as upstream 030,
+# not merely the presence of two table names (which would let Alembic stamp head).
+_COLUMNS = {
+    "agent_share_manifests": {
+        "id": (postgresql.UUID, None, False),
+        "token_hash": (sa.String, 64, False),
+        "created_by": (postgresql.UUID, None, False),
+        "title": (sa.String, 120, True),
+        "created_at": (sa.DateTime, None, False),
+        "expires_at": (sa.DateTime, None, False),
+        "revoked_at": (sa.DateTime, None, True),
+    },
+    "agent_share_items": {
+        "id": (postgresql.UUID, None, False),
+        "manifest_id": (postgresql.UUID, None, False),
+        "agent_id": (postgresql.UUID, None, False),
+        "agent_version_id": (postgresql.UUID, None, False),
+        "position": (sa.Integer, None, False),
+    },
+}
+_UNIQUES = {
+    "agent_share_manifests": {("token_hash",): None},
+    "agent_share_items": {
+        ("manifest_id", "agent_id", "agent_version_id"): "uq_agent_share_item_version",
+        ("manifest_id", "position"): "uq_agent_share_item_position",
+    },
+}
+_FOREIGN_KEYS = {
+    "agent_share_manifests": {("created_by",): ("users", ("id",))},
+    "agent_share_items": {
+        ("agent_id",): ("agents", ("id",)),
+        ("agent_version_id",): ("agent_versions", ("id",)),
+        ("manifest_id",): ("agent_share_manifests", ("id",)),
+    },
+}
+_INDEXES = {
+    "agent_share_manifests": {
+        "ix_agent_share_manifests_created_by": ("created_by",),
+        "ix_agent_share_manifests_expires_at": ("expires_at",),
+    },
+    "agent_share_items": {"ix_agent_share_items_agent_id": ("agent_id",)},
+}
+
+
+def _validate_existing(inspector: sa.Inspector) -> None:
+    for table, expected_columns in _COLUMNS.items():
+        columns = {column["name"]: column for column in inspector.get_columns(table)}
+        for name, (kind, length, nullable) in expected_columns.items():
+            column = columns.get(name)
+            if column is None:
+                raise RuntimeError(f"Partial agent share schema: missing {table}.{name}; repair manually")
+            actual = column["type"]
+            if (
+                not isinstance(actual, kind)
+                or (length is not None and actual.length != length)
+                or (kind is sa.DateTime and not actual.timezone)
+                or column["nullable"] != nullable
+            ):
+                raise RuntimeError(f"Partial agent share schema: incompatible {table}.{name}; repair manually")
+
+        pk = inspector.get_pk_constraint(table)
+        if set(pk["constrained_columns"]) != {"id"}:
+            raise RuntimeError(f"Partial agent share schema: incompatible {table} primary key; repair manually")
+
+        uniques = {tuple(item["column_names"]): item["name"] for item in inspector.get_unique_constraints(table)}
+        for columns_key, constraint_name in _UNIQUES[table].items():
+            if columns_key not in uniques or (constraint_name is not None and uniques[columns_key] != constraint_name):
+                raise RuntimeError(f"Partial agent share schema: missing {table} unique {columns_key}; repair manually")
+
+        foreign_keys = {tuple(item["constrained_columns"]): item for item in inspector.get_foreign_keys(table)}
+        for columns_key, (referent, referred_columns) in _FOREIGN_KEYS[table].items():
+            fk = foreign_keys.get(columns_key)
+            if (
+                fk is None
+                or fk["referred_table"] != referent
+                or tuple(fk["referred_columns"]) != referred_columns
+                or fk.get("options", {}).get("ondelete", "").upper() != "CASCADE"
+            ):
+                raise RuntimeError(
+                    f"Partial agent share schema: missing {table} foreign key {columns_key}; repair manually"
+                )
+
+        indexes = {item["name"]: item for item in inspector.get_indexes(table)}
+        for name, index_columns in _INDEXES[table].items():
+            index = indexes.get(name)
+            if (
+                index is None
+                or tuple(index["column_names"]) != index_columns
+                or index["unique"]
+                or index.get("dialect_options", {}).get("postgresql_where") is not None
+                or index.get("dialect_options", {}).get("postgresql_using", "btree") != "btree"
+            ):
+                raise RuntimeError(f"Partial agent share schema: missing {table} index {name}; repair manually")
+
+
 def upgrade() -> None:
     inspector = sa.inspect(op.get_bind())
     manifests = inspector.has_table("agent_share_manifests")
@@ -30,7 +126,8 @@ def upgrade() -> None:
     if manifests != items:
         raise RuntimeError("Partial agent share schema; repair manually before upgrading")
     if manifests:
-        return  # The upstream 030 revision already created both tables.
+        _validate_existing(inspector)
+        return  # Verified upstream tables and their data are left unchanged.
 
     op.create_table(
         "agent_share_manifests",

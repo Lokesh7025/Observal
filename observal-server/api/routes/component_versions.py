@@ -47,7 +47,7 @@ from services.component_version_extras import ALLOWED_FIELDS, REQUIRED_FIELDS, v
 from services.editing_lock import is_actively_editing
 from services.inbox import sources as inbox
 from services.skill_bundle import needs_bundle_delivery, validate_skill_bundle
-from services.skill_revisions import verified_skill_revision
+from services.skill_revisions import skill_content_revision, verified_skill_revision
 from services.skill_validator import SkillValidationError
 from services.teamspace import can_review, review_scope
 from services.versioning import parse_semver
@@ -375,6 +375,11 @@ async def _publish_version(
 
     if component_type == "skill":
         ver.base_version_id = approved_base.id if approved_base is not None else None
+        if approved_base is not None:
+            try:
+                ver.base_revision = verified_skill_revision(listing, approved_base)
+            except SkillValidationError as exc:
+                raise HTTPException(status_code=409, detail="Approved skill base is not a valid release") from exc
         # Historical git rows can have one orphaned script field. A new version
         # may inherit that inert metadata, but an explicit script/mode override
         # must satisfy the current coherent-field contract.
@@ -400,6 +405,14 @@ async def _publish_version(
 
     db.add(ver)
     await db.flush()
+    if component_type == "skill":
+        # A generic publish must owe the same exact revision-bound review as
+        # a folder draft. Without this, approved-base successors become stuck
+        # pending: listing review refuses them and exact review has no bound base.
+        try:
+            ver.content_revision = skill_content_revision(listing, ver)
+        except SkillValidationError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
     # This route always creates a pending version, so a review is always owed.
     await inbox.on_publish(
         db,

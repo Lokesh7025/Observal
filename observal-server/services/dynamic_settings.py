@@ -425,6 +425,11 @@ SENSITIVE_KEYS: set[str] = {
 SETTING_FEATURES: dict[str, str] = {}
 
 SETTING_SUBTITLES: dict[str, str] = {
+    "registry.skill_folder_delivery_enabled": (
+        "Enable complete-folder skill review and installation only after upgrading and draining all API/worker processes, "
+        "migrating a restored database through the current head, and confirming supported CLI clients. "
+        "Keep off during mixed-version rollout; see docs/skill-folder-rollout.md."
+    ),
     "deployment.public_registry_enabled": (
         "Allow signed-out visitors to browse and install approved public registry content. "
         "Publishing, private data, telemetry, and administration still require authentication."

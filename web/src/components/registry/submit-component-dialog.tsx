@@ -28,6 +28,7 @@ import { toast } from "sonner";
 import type { RegistryType } from "@/lib/api";
 import { useTeams, useWhoami } from "@/hooks/use-api";
 import { useHarnesses } from "@/hooks/use-harnesses";
+import { useDeploymentConfig } from "@/hooks/use-deployment-config";
 import { parseMcpConfigJson, applyParsedConfig } from "@/lib/mcp-parser";
 import type { EnvVar } from "@/lib/mcp-parser";
 import { useHelp } from "@/components/wiki/help-context";
@@ -175,6 +176,7 @@ export function SubmitComponentDialog({
 	const { data: whoami } = useWhoami();
 	const { data: teams = [] } = useTeams();
 	const { data: harnessList } = useHarnesses();
+	const { skillFolderDeliveryEnabled, loading: folderConfigLoading, configError: folderConfigError } = useDeploymentConfig();
 	const defaultOwner =
 		(d?.owner as string) ||
 		whoami?.username ||
@@ -183,7 +185,10 @@ export function SubmitComponentDialog({
 
 	// ── Common ──────────────────────────────────────────────
 	const [name, setName] = useState((d?.name as string) ?? "");
-	const [version, setVersion] = useState((d?.version as string) ?? "0.1.0");
+	const [version, setVersion] = useState((d?.version as string) ?? (type === "skills" ? "1.0.0" : "0.1.0"));
+	useEffect(() => {
+		if (!open && !editItem) setVersion(type === "skills" ? "1.0.0" : "0.1.0");
+	}, [type, open, editItem]);
 	const [description, setDescription] = useState(
 		(d?.description as string) ?? "",
 	);
@@ -526,7 +531,7 @@ export function SubmitComponentDialog({
 
 	function reset() {
 		setName("");
-		setVersion("0.1.0");
+		setVersion(type === "skills" ? "1.0.0" : "0.1.0");
 		setDescription("");
 		// The publication target has to reset with everything else. Leaving it means
 		// the next submission silently inherits the previous teamspace and
@@ -801,7 +806,9 @@ export function SubmitComponentDialog({
 			}}
 		>
 			<DialogContent
-				className="max-w-lg max-h-[85vh] overflow-y-auto"
+				className={type === "skills" && skillMode === "upload"
+					? "sm:max-w-3xl max-h-[90vh] overflow-y-auto"
+					: "max-w-lg max-h-[85vh] overflow-y-auto"}
 				onPointerDownOutside={(event) => {
 					const target = event.target;
 					if (target instanceof Node && document.querySelector('[data-help-panel="true"]')?.contains(target)) {
@@ -859,7 +866,7 @@ export function SubmitComponentDialog({
 								id="comp-version"
 								value={version}
 								onChange={(e) => setVersion(e.target.value)}
-								placeholder="0.1.0"
+								placeholder={type === "skills" ? "1.0.0" : "0.1.0"}
 								disabled={isFolderVersion}
 							/>
 						</div>
@@ -1293,6 +1300,14 @@ export function SubmitComponentDialog({
 								</TabsContent>
 
 								<TabsContent value="upload" className="space-y-3 pt-3">
+									{!folderConfigLoading && !skillFolderDeliveryEnabled && (
+										<p role="status" className="rounded-md border border-border bg-muted/40 p-3 text-sm text-foreground">
+											{folderConfigError
+												? "Could not verify whether complete-folder review is available. You can save a draft, but confirm deployment readiness with your administrator before planning a review."
+												: "Complete-folder review and installation are not enabled on this deployment. You can save and edit a draft, but an administrator must finish the rollout before it can be submitted or installed."}
+										</p>
+									)}
+									<p className="text-xs text-muted-foreground">Save a complete folder draft; it will not be submitted for review yet. Choose Folder preserves nested paths (your browser will ask for permission). Add Files places files at the root. Browser uploads cannot read executable permissions: select each runnable file and enable its executable switch before saving.</p>
 									{/* Hidden file inputs */}
 									<input
 										type="file"
@@ -1334,7 +1349,7 @@ export function SubmitComponentDialog({
 											onClick={() => document.getElementById("skill-folder-upload")?.click()}
 										>
 											<FolderUp className="h-4 w-4 mr-1" />
-											Replace Whole Folder
+											{skillMdContent || skillExtraFiles.length > 0 ? "Replace Whole Folder" : "Choose Folder"}
 										</Button>
 										{(skillMdContent || skillExtraFiles.length > 0) && (
 											<Button
@@ -1355,7 +1370,7 @@ export function SubmitComponentDialog({
 
 									{/* File tree */}
 									{(skillMdContent || skillExtraFiles.length > 0) && (
-										<div className="border rounded-md divide-y max-h-40 overflow-auto">
+										<div className="border rounded-md divide-y max-h-72 overflow-auto" aria-label="Skill folder files">
 											{skillMdContent && (
 												<button type="button"
 												className={`flex w-full items-center justify-between px-3 py-1.5 text-sm text-left hover:bg-muted/50 ${selectedFilePath === "SKILL.md" ? "bg-primary/10" : ""}`}
@@ -1663,6 +1678,9 @@ export function SubmitComponentDialog({
 					</div>
 
 					{/* ── Actions ───────────────────────────────────── */}
+					{type === "skills" && skillMode === "upload" && submitError && (
+						<p role="status" className="text-xs text-muted-foreground">{submitError}</p>
+					)}
 					<div className="flex justify-end gap-2 pt-2">
 						{isEditMode ? (
 							<>
@@ -1746,7 +1764,7 @@ export function SubmitComponentDialog({
 							</>
 						) : (
 							<>
-								<Button
+								{!(type === "skills" && skillMode === "upload") && <Button
 									variant="outline"
 									onClick={handleDraft}
 									disabled={busy || !name || pendingSkillUploads > 0}
@@ -1755,7 +1773,7 @@ export function SubmitComponentDialog({
 										<Loader2 className="h-4 w-4 animate-spin mr-1.5" />
 									)}
 									Save Draft
-								</Button>
+								</Button>}
 								<Button
 									onClick={handleSubmit}
 									disabled={busy || !!submitError || pendingSkillUploads > 0}

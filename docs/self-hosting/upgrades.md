@@ -1,10 +1,14 @@
 <!-- SPDX-FileCopyrightText: 2026 Apoorv Garg <apoorvgarg.21@gmail.com> -->
 <!-- SPDX-FileCopyrightText: 2026 Hari Srinivasan <harisrini21@gmail.com> -->
+<!-- SPDX-FileCopyrightText: 2026 Kaushik <kaushikrjpm10@gmail.com> -->
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 
 # Upgrades
 
 Safe upgrade flow for the Observal server stack.
+
+> [!IMPORTANT]
+> When upgrading into the release that introduces complete-folder skill delivery, follow the [skill-folder rollout procedure](../skill-folder-rollout.md) instead of using the quick, standard, or blue/green instructions below unchanged. Those paths do not guarantee that old API and worker processes have stopped before the new init container runs PostgreSQL migrations. Keep folder delivery off, back up and rehearse the historical upgrade, and schedule a maintenance window to drain old processes **before** migration; enable delivery only after a homogeneous rollout and separate approval.
 
 ## Quick upgrade (recommended)
 

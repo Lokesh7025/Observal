@@ -20,6 +20,8 @@ import {
   useComponentVersionsPage,
   useComponentVersionDetail,
   useSkillVersionManifest,
+  useSubmitSkillFolderDraft,
+  useWithdrawSkillFolderVersion,
   useComponentArchive,
   useComponentUnarchive,
   useTeams,
@@ -31,7 +33,8 @@ import { useOptionalAuth } from "@/hooks/use-auth";
 import { useDeploymentConfig } from "@/hooks/use-deployment-config";
 import { hasMinRole } from "@/hooks/use-role-guard";
 import type { RegistryType } from "@/lib/api";
-import type { FeedbackItem, RegistryItem, ComponentVersionSummary, RecommendableType, SkillVersionManifest } from "@/lib/types";
+import type { FeedbackItem, RegistryItem, ComponentVersionSummary, RecommendableType } from "@/lib/types";
+import { requiresFolderDelivery } from "@/lib/skill-folder-delivery";
 import { compactNumber } from "@/lib/utils";
 import { canonicalRouteParts, registryIdentity } from "@/lib/registry-name";
 import { tagColorClasses } from "@/lib/tag-colors";
@@ -41,7 +44,7 @@ import { ReviewForm } from "@/components/registry/review-form";
 import { VersionDropdown } from "@/components/registry/version-dropdown";
 import { ComponentEditForm } from "@/components/registry/component-edit-form";
 import { ComponentInstallCommand } from "@/components/registry/component-install-command";
-import { ApprovedSkillFiles } from "@/components/registry/approved-skill-files";
+import { SkillVersionFiles } from "@/components/registry/skill-version-files";
 import { SkillSuccessorDialog } from "@/components/registry/skill-successor-dialog";
 import { RegistryName } from "@/components/registry/registry-name";
 import { ShareLinkButton } from "@/components/registry/share-link-button";
@@ -78,21 +81,30 @@ function readReturnedToReview(payload: unknown): boolean | null {
   return typeof value === "boolean" ? value : null;
 }
 
-function requiresFolderDelivery(version: ComponentVersionSummary | null, manifest?: SkillVersionManifest): boolean {
-  if (!version || version.delivery_mode !== "registry_direct") return false;
-  // A missing or invalid manifest is never evidence that a release uses the
-  // older resource-less install path. Historical populated inline scripts
-  // remain installable while a genuinely empty one needs bundle delivery.
-  if (!manifest || manifest.version_id !== version.id) return true;
-  return manifest.files.some((file) => file.path !== "SKILL.md" && (
-    file.path !== `scripts/${version.script_filename}` || file.size === 0
-  ));
-}
-
 function statusVariant(status?: string) {
   if (status === "approved") return "default" as const;
   if (status === "rejected") return "destructive" as const;
   return "secondary" as const;
+}
+
+function SkillDraftReviewAction({ listingId, version, enabled, onSubmitted }: {
+  listingId: string; version: ComponentVersionSummary; enabled: boolean; onSubmitted: () => void;
+}) {
+  const manifest = useSkillVersionManifest(listingId, version.id);
+  const submit = useSubmitSkillFolderDraft();
+  const blocked = !enabled && !!manifest.data && requiresFolderDelivery(version, manifest.data);
+  return <div className="flex flex-col items-start gap-1">
+    <Button type="button" size="sm" variant="outline"
+      disabled={!manifest.data || manifest.isError || blocked || submit.isPending}
+      onClick={() => submit.mutate({ listingId, versionId: version.id, observedRevision: manifest.data!.revision },
+        { onSuccess: onSubmitted })}>
+      Submit v{version.version} for review
+    </Button>
+    {blocked && <span role="status" className="text-xs text-muted-foreground">Complete-folder review is not enabled on this server.</span>}
+    {manifest.isError && <Button type="button" variant="ghost" size="sm" onClick={() => void manifest.refetch()}>
+      Could not load v{version.version} files. Retry
+    </Button>}
+  </div>;
 }
 
 function formatArchiveDate(item: RegistryItem) {
@@ -165,6 +177,8 @@ export default function ComponentDetailPage({
   const { data: whoami } = useWhoami(isAuthenticated);
   const { data: teams = [] } = useTeams(isAuthenticated);
   const updateVisibility = useUpdateRegistryVisibility();
+  const withdrawFolderVersion = useWithdrawSkillFolderVersion();
+  const submitFolderDraft = useSubmitSkillFolderDraft();
   const canEdit = isAuthenticated && (item?.user_permission === "owner");
   const isAdmin = isAuthenticated && hasMinRole(getUserRole(), "admin");
   const owningTeam = item?.team_id ? teams.find((team) => team.id === String(item.team_id)) : undefined;
@@ -228,6 +242,28 @@ export default function ComponentDetailPage({
   const latestApprovedSkillVersion = singularType === "skill"
     ? versions.find((version) => version.status === "approved" && !version.requires_global_review) ?? null
     : null;
+  const successorDrafts = canEdit && singularType === "skill" && item?.status === "approved"
+    ? versions.filter((version) => ["draft", "rejected"].includes(version.status) && version.delivery_mode === "registry_direct")
+    : [];
+  const existingSuccessorDraft = successorDrafts[0] ?? null;
+  // Never show an unapproved tree to other viewers. The manifest/file APIs
+  // enforce authorization as well; this avoids even attempting their fetch.
+  const ownerSkillFolderVersion = canEdit && singularType === "skill"
+    ? (item?.status === "approved"
+      ? versions.find((version) => version.status === "pending" && version.delivery_mode === "registry_direct") ?? existingSuccessorDraft
+      : ["draft", "pending", "rejected"].includes(String(item?.status))
+        ? versions.find((version) => version.version === effectiveVersion && ["draft", "pending", "rejected"].includes(version.status)
+          && version.delivery_mode === "registry_direct") ?? null : null)
+    : null;
+  const editableSkillFolderDraft = existingSuccessorDraft ?? (
+    ownerSkillFolderVersion && ["draft", "rejected"].includes(ownerSkillFolderVersion.status)
+      ? ownerSkillFolderVersion : null
+  );
+  const ownerDraftManifest = useSkillVersionManifest(
+    editableSkillFolderDraft ? String(item?.id) : undefined, editableSkillFolderDraft?.id,
+  );
+  const ownerDraftReviewBlocked = !skillFolderDeliveryEnabled && !!ownerDraftManifest.data &&
+    requiresFolderDelivery(editableSkillFolderDraft, ownerDraftManifest.data);
   const { data: selectedManifest } = useSkillVersionManifest(
     singularType === "skill" && selectedApprovedSkillVersion?.delivery_mode === "registry_direct" ? String(item?.id) : undefined,
     selectedApprovedSkillVersion?.delivery_mode === "registry_direct" ? selectedApprovedSkillVersion.id : undefined,
@@ -238,7 +274,10 @@ export default function ComponentDetailPage({
   );
   // Overlay version-specific description when a version is selected
   const effectiveItem: RegistryItem | undefined = item
-    ? { ...item, ...((selectedApprovedSkillVersion ?? versionDetail) as unknown as RegistryItem | undefined) }
+    ? { ...item, ...((selectedApprovedSkillVersion ?? versionDetail) as unknown as RegistryItem | undefined),
+        // The listing contains the newest SKILL.md, not necessarily the selected
+        // approved release. Show folder prose only from its exact file preview.
+        ...(selectedApprovedSkillVersion?.delivery_mode === "registry_direct" ? { skill_md_content: undefined } : {}) }
     : undefined;
 
   // Header/breadcrumb show the bare name; the install command needs the
@@ -306,6 +345,7 @@ export default function ComponentDetailPage({
 
   const avgRating = feedbackSummary?.average_rating;
   const totalReviews = feedbackSummary?.total_reviews ?? 0;
+  const showSkillFeedback = singularType !== "skill" || item?.status === "approved" || item?.status === "archived";
   const metricsEntries: [string, string][] = isAuthenticated && rawMetrics && typeof rawMetrics === "object"
     ? Object.entries(rawMetrics as Record<string, unknown>).map(([k, v]) => [k, typeof v === "number" ? v.toLocaleString() : String(v ?? "")])
     : [];
@@ -335,7 +375,7 @@ export default function ComponentDetailPage({
           ) : undefined
         }
       />
-      <div className="page-body w-full mx-auto space-y-5">
+      <div className="page-body w-full max-w-[1440px] mx-auto space-y-5">
         {isLoading ? (
           <DetailSkeleton />
         ) : isError ? (
@@ -368,7 +408,7 @@ export default function ComponentDetailPage({
                     {item.status}
                   </Badge>
                 )}
-                {item.is_recommended && <RecommendedBadge />}
+                {item.is_recommended && showSkillFeedback && <RecommendedBadge />}
                 {showVisibilityControl && (
                   <PickerSelect
                     value={currentVisibility}
@@ -405,7 +445,7 @@ export default function ComponentDetailPage({
               {effectiveItem?.description && (
                 <p className="text-sm text-foreground/80 leading-relaxed max-w-2xl">{effectiveItem.description as string}</p>
               )}
-              {avgRating != null && (
+              {showSkillFeedback && avgRating != null && (
                 <div className="flex items-center gap-2 text-sm text-muted-foreground">
                   <div className="flex items-center gap-0.5">
                     {Array.from({ length: 5 }).map((_, i) => (
@@ -420,12 +460,38 @@ export default function ComponentDetailPage({
               )}
             </div>
 
+            {editableSkillFolderDraft && successorDrafts.length <= 1 && (
+              <div className="flex flex-wrap items-center gap-3 rounded-md border border-border bg-card p-4">
+                <div className="flex-1 space-y-1 text-sm">
+                  <strong>Draft v{editableSkillFolderDraft.version}</strong>
+                  <p className="text-muted-foreground">Keep editing your saved files, or submit this exact version for review.</p>
+                  {ownerDraftReviewBlocked && <p role="status" className="text-muted-foreground">
+                    Complete-folder review is not enabled on this server. Your draft remains saved.
+                  </p>}
+                  {ownerDraftManifest.isError && <div role="alert" className="text-destructive">
+                    Could not load the saved version. <Button variant="outline" size="sm" onClick={() => void ownerDraftManifest.refetch()}>Retry</Button>
+                  </div>}
+                </div>
+                <Button type="button" disabled={!ownerDraftManifest.data || ownerDraftReviewBlocked || submitFolderDraft.isPending}
+                  onClick={() => submitFolderDraft.mutate({ listingId: String(item.id), versionId: editableSkillFolderDraft.id,
+                    observedRevision: ownerDraftManifest.data!.revision }, { onSuccess: () => void refetch() })}>
+                  {submitFolderDraft.isPending ? "Submitting…" : "Submit for review"}
+                </Button>
+              </div>
+            )}
             {canEdit && singularType === "skill" && item.status === "approved" && (
               <div className="flex flex-wrap items-center gap-3 rounded-md border border-border bg-card p-4">
                 <div className="flex-1 text-sm">
-                  <strong>Create a new folder version</strong>
-                  <p className="text-xs text-muted-foreground">Approved releases cannot be edited. Fork the reviewed folder or import a complete local folder for a Git or historical direct skill.</p>
+                  <strong>{existingSuccessorDraft ? "Continue your saved successor" : "Create a new folder version"}</strong>
+                  <p className="text-xs text-muted-foreground">Approved releases cannot be edited. {successorDrafts.length > 1
+                    ? "Multiple saved drafts exist. Use Versions to inspect and submit the exact one you choose."
+                    : existingSuccessorDraft ? "Resume the existing draft, or create a different next version."
+                    : "Fork the reviewed folder or import a complete local folder for a Git or historical direct skill."}</p>
                 </div>
+                {existingSuccessorDraft && <Button asChild><Link to="/components" search={{ type: "skills", folderListingId: String(item.id),
+                  folderVersionId: existingSuccessorDraft.id, folderVersion: existingSuccessorDraft.version }}>
+                  Edit saved draft v{existingSuccessorDraft.version}
+                </Link></Button>}
                 <Button type="button" variant="outline" onClick={() => setSuccessorOpen(true)}>Create next version</Button>
               </div>
             )}
@@ -439,7 +505,7 @@ export default function ComponentDetailPage({
                   } });
                 }} />
             )}
-            {isAdmin && (
+            {isAdmin && showSkillFeedback && (
               <div className="lg:hidden">
                 <RecommendedToggle
                   entityType={singularType as RecommendableType}
@@ -455,14 +521,14 @@ export default function ComponentDetailPage({
             <Tabs defaultValue="overview" className="min-w-0">
               <TabsList>
                 <TabsTrigger value="overview">Overview</TabsTrigger>
-                <TabsTrigger value="reviews">
+                {showSkillFeedback && <TabsTrigger value="reviews">
                   Reviews
                   {totalReviews > 0 && (
                     <span className="ml-1.5 text-[10px] bg-muted px-1.5 py-0.5 rounded-full">
                       {totalReviews}
                     </span>
                   )}
-                </TabsTrigger>
+                </TabsTrigger>}
                 <TabsTrigger value="versions">
                   Versions
                   {versions.length > 0 && (
@@ -477,17 +543,25 @@ export default function ComponentDetailPage({
               <TabsContent value="overview" forceMount className="mt-6 data-[state=inactive]:hidden">
                 <div className="space-y-6 w-full min-h-[400px]">
                   <ComponentMetadata item={effectiveItem ?? item} />
-                  {selectedApprovedSkillVersion?.delivery_mode === "registry_direct" && (
-                    <ApprovedSkillFiles
-                      key={selectedApprovedSkillVersion.id}
+                  {(selectedApprovedSkillVersion?.delivery_mode === "registry_direct" || ownerSkillFolderVersion) && (
+                    <SkillVersionFiles
+                      key={(selectedApprovedSkillVersion ?? ownerSkillFolderVersion)?.id}
                       listingId={String(item.id)}
-                      versionId={selectedApprovedSkillVersion.id}
+                      versionId={(selectedApprovedSkillVersion ?? ownerSkillFolderVersion)!.id}
+                      status={selectedApprovedSkillVersion ? "approved" : ownerSkillFolderVersion!.status}
                     />
+                  )}
+                  {selectedApprovedSkillVersion && ownerSkillFolderVersion && (
+                    <div className="space-y-2">
+                      <p className="text-sm font-medium">Your separate {ownerSkillFolderVersion.status === "pending" ? "submission" : "draft"} v{ownerSkillFolderVersion.version} (not part of the selected approved release)</p>
+                      <SkillVersionFiles key={ownerSkillFolderVersion.id} listingId={String(item.id)}
+                        versionId={ownerSkillFolderVersion.id} status={ownerSkillFolderVersion.status} />
+                    </div>
                   )}
                 </div>
               </TabsContent>
 
-              <TabsContent value="reviews" forceMount className="mt-6 data-[state=inactive]:hidden">
+              {showSkillFeedback && <TabsContent value="reviews" forceMount className="mt-6 data-[state=inactive]:hidden">
                 <div className="space-y-6 w-full min-h-[400px]">
                 {isAuthenticated && (
                   <>
@@ -545,7 +619,7 @@ export default function ComponentDetailPage({
                   </div>
                 )}
                 </div>
-              </TabsContent>
+              </TabsContent>}
 
               <TabsContent value="versions" forceMount className="mt-6 data-[state=inactive]:hidden">
                 <div className="space-y-4 w-full min-h-[400px]">
@@ -581,10 +655,21 @@ export default function ComponentDetailPage({
                             )}
                           </div>
                           {canEdit && singularType === "skill" && ["draft", "rejected"].includes(v.status) && (
-                            <Link to="/components" search={{ type: "skills", folderListingId: String(item.id),
-                              folderVersionId: v.id, folderVersion: v.version }} className="text-xs underline underline-offset-2">
-                              Edit exact draft
-                            </Link>
+                            <div className="flex flex-wrap items-center gap-3">
+                              <Link to="/components" search={{ type: "skills", folderListingId: String(item.id),
+                                folderVersionId: v.id, folderVersion: v.version }} className="text-xs underline underline-offset-2">
+                                Edit exact draft
+                              </Link>
+                              {successorDrafts.length > 1 && <SkillDraftReviewAction listingId={String(item.id)} version={v}
+                                enabled={skillFolderDeliveryEnabled} onSubmitted={() => void refetch()} />}
+                            </div>
+                          )}
+                          {canEdit && singularType === "skill" && v.status === "pending" &&
+                            v.delivery_mode === "registry_direct" && !v.requires_global_review && (
+                            <Button type="button" variant="outline" size="sm" disabled={withdrawFolderVersion.isPending}
+                              onClick={() => withdrawFolderVersion.mutate({ listingId: String(item.id), versionId: v.id })}>
+                              Withdraw to draft
+                            </Button>
                           )}
                           {v.released_at && (
                             <div className="shrink-0 text-right space-y-0.5">
@@ -608,13 +693,34 @@ export default function ComponentDetailPage({
               {canEdit && (
                 <TabsContent value="edit" forceMount className="mt-6 data-[state=inactive]:hidden">
                   <div className="w-full min-h-[400px]">
-                    <ComponentEditForm
+                    {item.status === "approved" && singularType === "skill" && selectedApprovedSkillVersion?.delivery_mode === "registry_direct" ? (
+                      <div className="rounded-md border border-border bg-card p-5 space-y-3">
+                        <h2 className="font-semibold">Approved skill releases are immutable</h2>
+                        <p className="text-sm text-muted-foreground">The approved release stays available. {existingSuccessorDraft
+                          ? "Continue editing your saved successor, or create a different version."
+                          : "Create a new folder version to change its files or metadata."}</p>
+                        {existingSuccessorDraft && <Button asChild><Link to="/components" search={{ type: "skills", folderListingId: String(item.id),
+                          folderVersionId: existingSuccessorDraft.id, folderVersion: existingSuccessorDraft.version }}>
+                          Edit saved draft v{existingSuccessorDraft.version}
+                        </Link></Button>}
+                        <Button type="button" variant="outline" onClick={() => setSuccessorOpen(true)}>Create next version</Button>
+                      </div>
+                    ) : editableSkillFolderDraft ? (
+                      <div className="rounded-md border border-border bg-card p-5 space-y-3">
+                        <h2 className="font-semibold">Edit the exact folder draft</h2>
+                        <p className="text-sm text-muted-foreground">This skill has a saved file tree. Open its version-bound editor to update the folder and its metadata together.</p>
+                        <Button asChild><Link to="/components" search={{ type: "skills", folderListingId: String(item.id),
+                          folderVersionId: editableSkillFolderDraft.id, folderVersion: editableSkillFolderDraft.version }}>
+                          Edit draft v{editableSkillFolderDraft.version}
+                        </Link></Button>
+                      </div>
+                    ) : <ComponentEditForm
                       listingId={id}
                       type={type}
                       currentVersion={effectiveVersion ?? "1.0.0"}
                       item={effectiveItem ?? item}
                       onSuccess={() => refetch()}
-                    />
+                    />}
                   </div>
                 </TabsContent>
               )}
@@ -671,7 +777,7 @@ export default function ComponentDetailPage({
                       <span className="font-mono font-medium">{val}</span>
                     </div>
                   ))}
-                  {avgRating != null && (
+                  {showSkillFeedback && avgRating != null && (
                     <div className="flex items-center justify-between text-sm">
                       <span className="inline-flex items-center gap-2 text-muted-foreground">
                         <Star className="h-3.5 w-3.5" />
@@ -706,7 +812,7 @@ export default function ComponentDetailPage({
                 </div>
               )}
 
-              {isAdmin && (
+              {isAdmin && showSkillFeedback && (
                 <RecommendedToggle
                   entityType={singularType as RecommendableType}
                   entityId={String(item.id)}
@@ -730,7 +836,7 @@ export default function ComponentDetailPage({
                     onTransferOwnership={() => refetch()}
                   />
 
-                  {canEdit && (
+                  {canEdit && (item.status === "approved" || item.status === "archived") && (
                     <div className="border-t border-border pt-3 space-y-2">
                       <p className="text-sm font-medium">Lifecycle</p>
                       <ComponentArchiveButton type={type} item={item} onSuccess={() => refetch()} />
@@ -864,7 +970,10 @@ function ComponentMetadata({ item }: { item: RegistryItem }) {
   const skillMd = "skill_md_content" in item && item.skill_md_content ? String(item.skill_md_content) : null;
   const promptTemplate = "template" in item && item.template ? String(item.template) : null;
   const promptText = "prompt_text" in item && item.prompt_text ? String(item.prompt_text) : null;
-  const markdownContent = skillMd || promptTemplate || promptText;
+  // Frontmatter is metadata, not prose. Keep the stored/reviewed bytes intact;
+  // the exact file viewer below remains available for byte-for-byte inspection.
+  const frontmatter = skillMd?.match(/^---\r?\n[\s\S]*?\r?\n---(?:\r?\n|$)/);
+  const markdownContent = (skillMd ? skillMd.slice(frontmatter?.[0].length ?? 0) : null) || promptTemplate || promptText;
   const envVars = "environment_variables" in item && Array.isArray(item.environment_variables) ? item.environment_variables as { name: string; description?: string; required?: boolean }[] : [];
   const resourceLimits = "resource_limits" in item && item.resource_limits ? JSON.stringify(item.resource_limits, null, 2) : null;
   const runtimeConfig = "runtime_config" in item && item.runtime_config ? JSON.stringify(item.runtime_config, null, 2) : null;
@@ -939,7 +1048,7 @@ function ComponentMetadata({ item }: { item: RegistryItem }) {
             {skillMd ? "Skill File" : "Prompt Template"}
           </h3>
           <div className="rounded-md border border-border bg-muted/20 p-4 overflow-y-auto max-h-[360px]">
-            <div className="prose prose-sm dark:prose-invert max-w-none text-foreground/90 leading-relaxed">
+            <div className="prose prose-sm dark:prose-invert max-w-none text-foreground/90 leading-relaxed prose-h1:text-xl prose-h1:leading-snug prose-h2:text-lg prose-h2:leading-snug">
               <ReactMarkdown remarkPlugins={[remarkGfm]}>{markdownContent}</ReactMarkdown>
             </div>
           </div>

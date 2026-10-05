@@ -69,17 +69,19 @@ export function ComponentInstallCommand({
 
   return (
     <div className="border border-border rounded-md bg-surface-sunken">
-      <div className="flex items-center gap-2 px-3 py-2 border-b border-border">
-        <Terminal className="h-3.5 w-3.5 text-muted-foreground" />
-        <span className="text-xs font-medium text-muted-foreground">Install</span>
-        <div className="ml-auto flex flex-wrap items-center justify-end gap-2">
+      <div className="space-y-2 px-3 py-3 border-b border-border">
+        <div className="flex items-center gap-2">
+          <Terminal className="h-3.5 w-3.5 text-muted-foreground" />
+          <span className="text-xs font-medium text-muted-foreground">Install</span>
+        </div>
+        <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
           {componentType === "skill" && (
             <>
               <PickerSelect
                 value={release}
                 onValueChange={setRelease}
                 ariaLabel="Skill release selection"
-                className="w-[134px]"
+                className="w-full min-w-0"
                 inputClassName="h-7 border-border text-xs"
                 options={[{ value: "pinned", label: "Shown version" }, { value: "latest", label: "Follow latest" }]}
               />
@@ -87,7 +89,7 @@ export function ComponentInstallCommand({
                 value={scope}
                 onValueChange={setScope}
                 ariaLabel="Skill installation scope"
-                className="w-[120px]"
+                className="w-full min-w-0"
                 inputClassName="h-7 border-border text-xs"
                 options={[{ value: "user", label: "User (global)" }, { value: "project", label: "Project" }]}
               />
@@ -97,36 +99,38 @@ export function ComponentInstallCommand({
             value={effectiveHarness ?? ""}
             onValueChange={setHarness}
             ariaLabel="Harness"
-            className="w-[130px]"
+            className="w-full min-w-0 sm:col-span-2"
             inputClassName="h-7 border-border text-xs"
             options={supportedHarnesses.map((entry) => ({ value: entry.name, label: entry.display_name }))}
           />
         </div>
       </div>
       <div className="flex items-center gap-2 p-3">
-        <code className="min-w-0 flex-1 break-all text-sm font-mono select-all text-foreground leading-relaxed">
-          {command ? <><span className="text-muted-foreground">$</span> {command}</> :
-            blockedByRollout ? "Complete-folder installs are not available on this server yet." :
-            componentType === "skill" && !skillVersion && release === "pinned" ? "Loading approved version…" : "No supported harness available"}
-        </code>
-        <Button
-          variant="ghost"
-          size="icon"
-          className="h-8 w-8 shrink-0 hover:bg-accent"
-          onClick={handleCopy}
-          disabled={!command}
-          aria-label="Copy command"
-        >
-          {copied ? (
-            <Check className="h-3.5 w-3.5 text-success" />
-          ) : (
-            <Copy className="h-3.5 w-3.5" />
-          )}
-        </Button>
+        {command ? (
+          <>
+            <code className="min-w-0 flex-1 overflow-x-auto whitespace-nowrap text-sm font-mono select-all text-foreground leading-relaxed">
+              <span className="text-muted-foreground">$</span> {command}
+            </code>
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-8 w-8 shrink-0 hover:bg-accent"
+              onClick={handleCopy}
+              aria-label="Copy command"
+            >
+              {copied ? <Check className="h-3.5 w-3.5 text-success" /> : <Copy className="h-3.5 w-3.5" />}
+            </Button>
+          </>
+        ) : (
+          <p role="status" className="text-sm text-muted-foreground">
+            {blockedByRollout ? "Complete-folder installs are not available on this server yet." :
+              componentType === "skill" && !skillVersion && release === "pinned" ? "Loading approved version…" : "No supported harness available"}
+          </p>
+        )}
       </div>
-      {componentType === "skill" && (
+      {componentType === "skill" && command && (
         <p className="px-3 pb-3 text-xs text-muted-foreground">
-          {scope === "project" ? "Run from the project root; this installs into that project." : "Installs for your user account."}
+          Scroll the command to read it in full, or copy it. {scope === "project" ? "Run from the project root; this installs into that project." : "Installs for your user account."}
           {release === "latest" ? " Follow latest may install a newer release than the one shown here." : " The command installs exactly the approved release shown."}
         </p>
       )}

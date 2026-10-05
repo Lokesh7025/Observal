@@ -39,8 +39,9 @@ def upgrade() -> None:
         ondelete="SET NULL",
     )
     # Historical rejected/pending pointers can hide an older approved release.
-    # Prefer the most recently released installable version, breaking ties by UUID;
-    # never point at a draft or resurrect a rejected version.
+    # Only stable releases can become defaults. Prefer approved over archived
+    # so an archived pointer never hides an available approved stable release.
+    # Leave a pending pointer unchanged when only pin-only prereleases exist.
     op.execute(
         """
         UPDATE skill_listings AS listing
@@ -48,7 +49,9 @@ def upgrade() -> None:
             SELECT approved.id FROM skill_versions AS approved
             WHERE approved.listing_id = listing.id
               AND approved.status IN ('approved', 'archived')
-            ORDER BY approved.released_at DESC, approved.id DESC LIMIT 1
+              AND approved.version ~ '^(0|[1-9][0-9]*)[.](0|[1-9][0-9]*)[.](0|[1-9][0-9]*)$'
+            ORDER BY (approved.status = 'approved') DESC,
+                     approved.released_at DESC, approved.id DESC LIMIT 1
         )
         WHERE listing.latest_version_id IN (
             SELECT stale.id FROM skill_versions AS stale
@@ -59,6 +62,7 @@ def upgrade() -> None:
               SELECT 1 FROM skill_versions AS approved
               WHERE approved.listing_id = listing.id
                 AND approved.status IN ('approved', 'archived')
+                AND approved.version ~ '^(0|[1-9][0-9]*)[.](0|[1-9][0-9]*)[.](0|[1-9][0-9]*)$'
           )
         """
     )

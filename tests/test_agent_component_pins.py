@@ -22,6 +22,11 @@ from schemas.bulk import BulkAgentItem, BulkAgentRequest
 from tests import discovery_support as ds
 
 
+def test_agent_pin_column_accepts_versioned_skill_folder_digest():
+    digest = "observal-content-v2:sha256:" + "0" * 64
+    assert AgentComponent.__table__.columns.resolved_digest.type.length >= len(digest)
+
+
 @pytest.fixture
 async def registry(monkeypatch):
     monkeypatch.setattr(agent_versions.inbox, "on_publish", AsyncMock())

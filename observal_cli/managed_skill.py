@@ -459,6 +459,10 @@ def transact(
             if previous:
                 verify_tree(target, previous)
                 os.rename(target.name, "old", src_dir_fd=parent_fd, dst_dir_fd=folder_fd)
+                # Another local writer may replace the path after the first
+                # verification. Never record a release if the folder actually
+                # moved into the backup differs from the reviewed old tree.
+                verify_tree(backup, previous)
             os.rename("staged", target.name, src_dir_fd=folder_fd, dst_dir_fd=parent_fd)
             if not parent_stable():
                 raise ManagedSkillError(f"Destination parent moved during swap; inspect recovery marker {marker}")

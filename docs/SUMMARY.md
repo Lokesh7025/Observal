@@ -58,6 +58,7 @@
   * [observal server migrate](cli/migrate.md)
 * [observal registry skill](cli/skill.md)
   * [Complete skill folder developer workflow](skill-folder-workflow.md)
+  * [Complete skill folder rollout (operators)](skill-folder-rollout.md)
 
 ## Self-Hosting
 

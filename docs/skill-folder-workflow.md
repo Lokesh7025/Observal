@@ -3,9 +3,12 @@
 
 # Complete skill folders: developer workflow
 
-> Folder review and delivery are rollout-gated. Check the server's current setting
-> before attempting review or install; saving and editing drafts can work while
-> delivery is off. Do not turn on the delivery gate as part of authoring.
+> In a fully rolled-out deployment, authors do not manage a feature switch:
+> save a draft, explicitly submit it for review, then install the approved
+> release. If this deployment has not enabled complete-folder delivery yet,
+> authors can save drafts but cannot finish review or installation. Ask the
+> operator to complete the [one-time rollout](skill-folder-rollout.md); do not
+> turn the gate on as part of authoring.
 
 A complete skill contains a UTF-8 `SKILL.md` at its root and optional scripts,
 assets, and templates. The current limits are **128 extra files**, **2 MiB per
@@ -26,8 +29,11 @@ observal registry skill submit --submit LISTING --version-id DRAFT_UUID
 ```
 
 The Components browser has the equivalent folder editor. Save the exact version
-and return from **My submissions** or its listing's **Versions** tab; the
-version number and short UUID identify which draft is being edited. A reviewer
+and reopen it from **My submissions**, the listing's **Versions** tab, or its
+**Edit** tab; the version number and short UUID identify which draft is being
+edited. The owner can submit from the draft detail page or select an exact
+version in **My submissions**. If folder review is disabled, the draft stays
+editable and the submission control explains why it is unavailable. A reviewer
 must inspect that exact candidate before approving it. Until approval, old
 released bytes and their installations remain unchanged.
 

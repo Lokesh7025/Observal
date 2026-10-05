@@ -253,6 +253,7 @@ export function useCreateSkillSuccessor() {
 }
 
 async function verifiedSkillFile(bytes: ArrayBuffer, expectedHash: string): Promise<void> {
+  if (!globalThis.crypto?.subtle) throw new Error("Verified folder editing requires HTTPS or localhost. Reopen Observal over a secure connection.");
   const digest = await crypto.subtle.digest("SHA-256", bytes);
   const hash = Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
   if (hash !== expectedHash) throw new Error("Saved folder file changed while loading; retry from the latest manifest");
@@ -337,6 +338,24 @@ export function useSubmitSkillFolderDraft() {
       toast.success("Submitted exact folder version for review");
     },
     onError: (err: Error) => toast.error(err.message || "Failed to submit folder version"),
+  });
+}
+
+export function useWithdrawSkillFolderVersion() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async ({ listingId, versionId }: { listingId: string; versionId: string }) => {
+      const manifest = await registry.getSkillVersionManifest(listingId, versionId);
+      return registry.withdrawSkillVersion(listingId, versionId, manifest.revision);
+    },
+    onSuccess: (_data, vars) => {
+      qc.invalidateQueries({ queryKey: ["registry", "skills"] });
+      qc.invalidateQueries({ queryKey: ["component-versions", "skills", vars.listingId] });
+      qc.invalidateQueries({ queryKey: ["skill-version-manifest", vars.listingId, vars.versionId] });
+      qc.invalidateQueries({ queryKey: ["review"] });
+      toast.success("Pending version returned to an editable draft");
+    },
+    onError: (err: Error) => toast.error(err.message || "Could not withdraw pending skill version"),
   });
 }
 

@@ -686,6 +686,10 @@ async def test_publish_uses_real_model_pair_snapshots_content_and_orders_transac
         assert created.script_content == "print('review')"
         assert created.git_url == "https://github.com/acme/skills"
         assert created.slash_command == "review-v2"
+        assert created.base_version_id == listing.latest_version.id
+        assert created.base_revision == skill_content_revision(listing, listing.latest_version)
+        assert created.content_revision == skill_content_revision(listing, created)
+        assert created.content_revision != created.base_revision
     elif component_type == "hook":
         assert created.script_content == "print('guard')"
     elif component_type == "sandbox":

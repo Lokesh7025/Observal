@@ -1448,6 +1448,14 @@ def _sync_managed_agent_lock(
         agents = section["agents"]
         index = lockfile._find_agent_idx(agents, agent_id, scope, str(directory))
         old = agents[index] if index is not None else {}
+        old_managed = {
+            c.get("id"): c["folder_receipt"]["target"]
+            for c in old.get("components", [])
+            if c.get("type") == "skill" and c.get("folder_receipt")
+        }
+        new_managed = {proof["listing_id"]: proof["target"] for proof in proofs}
+        if any(new_managed.get(listing_id) != target for listing_id, target in old_managed.items()):
+            raise RuntimeError("Agent upgrade would leave a managed skill folder without its ownership receipt")
         new_components = []
         for component in components:
             matches = [p for p in proofs if p["listing_id"] == component.get("id")]
@@ -2446,6 +2454,16 @@ def register_pull(app: typer.Typer):
                     registry_url=lockfile.current_registry_url(),
                     allow_agent_pin_change=bool(upgrade or version),
                 )
+                old_managed = {
+                    component.get("id"): component["folder_receipt"]["target"]
+                    for component in (prior_managed_entry or {}).get("components", [])
+                    if component.get("type") == "skill" and component.get("folder_receipt")
+                }
+                new_managed = {proof["listing_id"]: proof["target"] for _, _, proof, _ in managed_plan}
+                if any(new_managed.get(listing_id) != target for listing_id, target in old_managed.items()):
+                    raise managed_skill.ManagedSkillError(
+                        "Agent upgrade removes or relocates a managed skill folder; keep its pin or explicitly migrate it first"
+                    )
                 if not dry_run:
                     for bundle, target, proof, component in managed_plan:
 

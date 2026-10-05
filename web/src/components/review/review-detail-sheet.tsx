@@ -50,7 +50,7 @@ import {
 	useSkillFileContent,
 } from "@/hooks/use-api";
 import yaml from "js-yaml";
-import type { ReviewItem } from "@/lib/types";
+import type { ReviewItem, SkillManifestFile } from "@/lib/types";
 
 function toYaml(value: unknown): string {
 	try {
@@ -116,8 +116,36 @@ function McpConfigSection({ detail }: { detail: ReviewItem }) {
 	);
 }
 
-export function SkillFilesSection({ listingId, versionId, baseVersionId, baseDeliveryMode }: {
+function useVerifiedReviewBinary(blob: Blob | null, file: SkillManifestFile | undefined, onPreviewError?: () => void) {
+	const [result, setResult] = useState<{ source: Blob; sha256: string; verified: Blob | null; error: string } | null>(null);
+	useEffect(() => {
+		if (!blob || !file) return;
+		let active = true;
+		void (async () => {
+			try {
+				if (!globalThis.crypto?.subtle) throw new Error("Verified binary review requires HTTPS or localhost.");
+				const bytes = await blob.arrayBuffer();
+				if (bytes.byteLength !== file.size) throw new Error("Binary size differs from its reviewed manifest.");
+				const hash = Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", bytes)), (byte) =>
+					byte.toString(16).padStart(2, "0")).join("");
+				if (hash !== file.sha256) throw new Error("Binary checksum differs from its reviewed manifest.");
+				if (active) setResult({ source: blob, sha256: file.sha256, verified: blob, error: "" });
+			} catch (error) {
+				if (active) {
+					setResult({ source: blob, sha256: file.sha256, verified: null,
+						error: error instanceof Error ? error.message : "Binary verification failed." });
+					onPreviewError?.();
+				}
+			}
+		})();
+		return () => { active = false; };
+	}, [blob, file?.sha256, file?.size, onPreviewError]);
+	return result?.source === blob && result?.sha256 === file?.sha256 ? result : null;
+}
+
+export function SkillFilesSection({ listingId, versionId, baseVersionId, baseDeliveryMode, onPreviewError }: {
 	listingId: string; versionId: string; baseVersionId?: string | null; baseDeliveryMode?: string | null;
+	onPreviewError?: () => void;
 }) {
 	const { data: manifest, isLoading } = useSkillVersionManifest(listingId, versionId);
 	const { data: baseManifest, isLoading: isLoadingBase, isError: baseError } = useSkillVersionManifest(
@@ -127,23 +155,37 @@ export function SkillFilesSection({ listingId, versionId, baseVersionId, baseDel
 	const [expandedDirs, setExpandedDirs] = useState<Set<string>>(new Set());
 	const candidateFiles = new Map(manifest?.files.map((file) => [file.path, file]) ?? []);
 	const baseFiles = new Map(baseManifest?.files.map((file) => [file.path, file]) ?? []);
-	const { data: fileContent, isLoading: isLoadingContent } = useSkillFileContent(
+	const { data: fileContent, isLoading: isLoadingContent, isError: fileContentError } = useSkillFileContent(
 		listingId,
 		versionId,
 		selectedFile && candidateFiles.has(selectedFile) ? selectedFile : null,
 	);
-	const { data: baseContent, isLoading: isLoadingBaseContent } = useSkillFileContent(
+	const { data: baseContent, isLoading: isLoadingBaseContent, isError: baseContentError } = useSkillFileContent(
 		listingId,
 		baseVersionId ?? undefined,
 		selectedFile && baseFiles.has(selectedFile) ? selectedFile : null,
 	);
-	const binaryBlob = fileContent?.encoding === "binary" ? fileContent.content : null;
-	const binaryUrl = useMemo(() => binaryBlob ? URL.createObjectURL(binaryBlob) : null, [binaryBlob]);
-	useEffect(() => () => { if (binaryUrl) URL.revokeObjectURL(binaryUrl); }, [binaryUrl]);
+	const candidateMeta = selectedFile ? candidateFiles.get(selectedFile) : undefined;
+	const baseMeta = selectedFile ? baseFiles.get(selectedFile) : undefined;
+	const candidateBlob = fileContent?.encoding === "binary" ? fileContent.content : null;
 	const baseBlob = baseContent?.encoding === "binary" ? baseContent.content : null;
-	const baseUrl = useMemo(() => baseBlob ? URL.createObjectURL(baseBlob) : null, [baseBlob]);
+	const candidateBinary = useVerifiedReviewBinary(candidateBlob, candidateMeta, onPreviewError);
+	const baseBinary = useVerifiedReviewBinary(baseBlob, baseMeta, onPreviewError);
+	const binaryUrl = useMemo(() => candidateBinary?.verified ? URL.createObjectURL(candidateBinary.verified) : null, [candidateBinary]);
+	useEffect(() => () => { if (binaryUrl) URL.revokeObjectURL(binaryUrl); }, [binaryUrl]);
+	const baseUrl = useMemo(() => baseBinary?.verified ? URL.createObjectURL(baseBinary.verified) : null, [baseBinary]);
 	useEffect(() => () => { if (baseUrl) URL.revokeObjectURL(baseUrl); }, [baseUrl]);
-
+	const candidateMismatch = fileContent?.encoding === "utf-8" && !!candidateMeta && (
+		fileContent.version_id !== versionId || fileContent.revision !== manifest?.revision ||
+		fileContent.file.path !== selectedFile || fileContent.file.sha256 !== candidateMeta.sha256
+	);
+	const baseMismatch = baseContent?.encoding === "utf-8" && !!baseMeta && (
+		baseContent.version_id !== baseVersionId || baseContent.revision !== baseManifest?.revision ||
+		baseContent.file.path !== selectedFile || baseContent.file.sha256 !== baseMeta.sha256
+	);
+	useEffect(() => {
+		if (selectedFile && (fileContentError || baseContentError || candidateMismatch || baseMismatch)) onPreviewError?.();
+	}, [selectedFile, fileContentError, baseContentError, candidateMismatch, baseMismatch, onPreviewError]);
 	if (isLoading) {
 		return <div className="text-sm text-muted-foreground">Loading files...</div>;
 	}
@@ -270,8 +312,12 @@ export function SkillFilesSection({ listingId, versionId, baseVersionId, baseDel
 					{candidateFiles.has(selectedFile) && (
 						<div>
 							<p className="text-xs font-medium">Candidate</p>
-							{isLoadingContent ? <p className="text-xs">Loading...</p> : binaryUrl ? (
-								<a href={binaryUrl} download={selectedFile.split("/").at(-1)} className="text-sm underline">Download candidate binary ({binaryBlob?.size} bytes)</a>
+							{isLoadingContent ? <p className="text-xs">Loading...</p> : candidateBinary?.error ? (
+								<p role="alert" className="text-xs text-destructive">{candidateBinary.error}</p>
+							) : candidateBlob && !binaryUrl ? <p className="text-xs">Verifying binary…</p> : candidateMismatch ? (
+								<p role="alert" className="text-xs text-destructive">Candidate file changed; refresh before review.</p>
+							) : binaryUrl ? (
+								<a href={binaryUrl} download={selectedFile.split("/").at(-1)} className="text-sm underline">Download candidate binary ({candidateBlob?.size} bytes)</a>
 							) : (
 								<pre className="max-h-60 overflow-auto rounded bg-muted p-2 text-xs font-mono whitespace-pre-wrap">
 									{fileContent?.encoding === "utf-8" ? fileContent.content : "File preview unavailable"}
@@ -282,7 +328,11 @@ export function SkillFilesSection({ listingId, versionId, baseVersionId, baseDel
 					{baseFiles.has(selectedFile) && (
 						<div>
 							<p className="text-xs font-medium">Reviewed base</p>
-							{isLoadingBaseContent ? <p className="text-xs">Loading...</p> : baseUrl ? (
+							{isLoadingBaseContent ? <p className="text-xs">Loading...</p> : baseBinary?.error ? (
+								<p role="alert" className="text-xs text-destructive">{baseBinary.error}</p>
+							) : baseBlob && !baseUrl ? <p className="text-xs">Verifying binary…</p> : baseMismatch ? (
+								<p role="alert" className="text-xs text-destructive">Reviewed base file changed; refresh before review.</p>
+							) : baseUrl ? (
 								<a href={baseUrl} download={selectedFile.split("/").at(-1)} className="text-sm underline">Download base binary ({baseBlob?.size} bytes)</a>
 							) : (
 								<pre className="max-h-60 overflow-auto rounded bg-muted p-2 text-xs font-mono whitespace-pre-wrap">
@@ -297,7 +347,7 @@ export function SkillFilesSection({ listingId, versionId, baseVersionId, baseDel
 	);
 }
 
-function SkillConfigSection({ detail }: { detail: ReviewItem }) {
+function SkillConfigSection({ detail, onPreviewError }: { detail: ReviewItem; onPreviewError?: () => void }) {
 	// Check if this skill has a pending version with files
 	const hasVersionFiles = detail.version_id && detail.files && detail.files.length > 0;
 
@@ -314,7 +364,8 @@ function SkillConfigSection({ detail }: { detail: ReviewItem }) {
 			</dl>
 			{hasVersionFiles && (
 				<SkillFilesSection listingId={detail.id} versionId={detail.version_id!}
-					baseVersionId={detail.base_version_id} baseDeliveryMode={detail.base_delivery_mode} />
+					baseVersionId={detail.base_version_id} baseDeliveryMode={detail.base_delivery_mode}
+					onPreviewError={onPreviewError} />
 			)}
 		</div>
 	);
@@ -469,12 +520,12 @@ function AgentConfigSection({ detail }: { detail: ReviewItem }) {
 	);
 }
 
-function ConfigSection({ detail }: { detail: ReviewItem }) {
+function ConfigSection({ detail, onSkillPreviewError }: { detail: ReviewItem; onSkillPreviewError?: () => void }) {
 	switch (detail.type) {
 		case "mcp":
 			return <McpConfigSection detail={detail} />;
 		case "skill":
-			return <SkillConfigSection detail={detail} />;
+			return <SkillConfigSection detail={detail} onPreviewError={onSkillPreviewError} />;
 		case "hook":
 			return <HookConfigSection detail={detail} />;
 		case "prompt":
@@ -625,7 +676,9 @@ function SheetBody({
 	const [showRejectInput, setShowRejectInput] = useState(false);
 	const [rejectReason, setRejectReason] = useState("");
 	const [gitBaseAcknowledged, setGitBaseAcknowledged] = useState(false);
-	useEffect(() => setGitBaseAcknowledged(false), [versionId]);
+	const [previewFailed, setPreviewFailed] = useState(false);
+	const reportPreviewError = useCallback(() => setPreviewFailed(true), []);
+	useEffect(() => { setGitBaseAcknowledged(false); setPreviewFailed(false); }, [versionId]);
 	const { data: reviewedManifest, isPending: manifestPending, isError: manifestError } = useSkillVersionManifest(
 		selectedReview?.files?.length ? item.id : undefined,
 		selectedReview?.files?.length ? versionId : undefined,
@@ -683,7 +736,7 @@ function SheetBody({
 	const disableApprove =
 		(merged.type === "agent" && merged.components_ready === false) ||
 		(merged.type === "skill" && (!!versionId && (isLoadingVersion || !selectedReview?.revision ||
-			(selectedReview.base_delivery_mode === "git_fetch" && !gitBaseAcknowledged) ||
+			previewFailed || (selectedReview.base_delivery_mode === "git_fetch" && !gitBaseAcknowledged) ||
 			(!!selectedReview.files?.length && (manifestPending || manifestError || reviewedManifest?.revision !== selectedReview.revision)) ||
 			(selectedReview.base_delivery_mode === "registry_direct" && (basePending || baseError || !reviewedBaseManifest)))));
 
@@ -776,7 +829,7 @@ function SheetBody({
 					<h4 className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
 						Configuration
 					</h4>
-					<ConfigSection detail={merged} />
+					<ConfigSection detail={merged} onSkillPreviewError={reportPreviewError} />
 				</div>
 			)}
 
