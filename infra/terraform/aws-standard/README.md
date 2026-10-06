@@ -54,9 +54,9 @@ To deploy into an existing VPC, set `vpc_id`, `public_subnet_ids`, and `private_
 
 Set `domain_name`, `route53_zone_id`, and `enable_tls = true` to provision an ACM certificate with DNS validation and enable HTTPS on the ALB.
 
-## GitHub webhooks on a private install
+## Git webhooks on a private install
 
-With `alb_scheme = "internal"` or a restricted `alb_ingress_cidrs`, github.com cannot deliver the webhooks that MCP GitHub sync relies on. Set `enable_github_webhook_ingress = true` and `webhook_domain_name` to add a second, public ALB that accepts only `POST /api/v1/webhooks/github/*` over HTTPS from GitHub's webhook IP ranges, and answers `404` to everything else. See [GitHub webhooks on a private install](../../../docs/self-hosting/aws-terraform.md#github-webhooks-on-a-private-install).
+With `alb_scheme = "internal"` or a restricted `alb_ingress_cidrs`, github.com and gitlab.com cannot deliver the webhooks that MCP repository sync relies on. Set `enable_webhook_ingress = true`, `webhook_providers` (`github`, `gitlab`, or both) and `webhook_domain_name` to add a second, public ALB that accepts only `POST /api/v1/webhooks/<provider>/*` over HTTPS from those providers' webhook IP ranges, and answers `404` to everything else. See [Git webhooks on a private install](../../../docs/self-hosting/aws-terraform.md#git-webhooks-on-a-private-install).
 
 ## Differences from Enterprise Module
 

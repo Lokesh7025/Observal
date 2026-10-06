@@ -60,7 +60,7 @@ resource "aws_security_group" "ecs_instances" {
   dynamic "ingress" {
     for_each = local.webhook_ingress_enabled ? [1] : []
     content {
-      description     = "API HTTP from the GitHub webhook ALB"
+      description     = "API HTTP from the webhook ALB"
       from_port       = 8000
       to_port         = 8000
       protocol        = "tcp"
