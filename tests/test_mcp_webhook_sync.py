@@ -97,6 +97,7 @@ def _sync(listing: McpListing, owner: User, secret: str, **kwargs) -> McpWebhook
     return McpWebhookSync(
         id=uuid.uuid4(),
         listing_id=listing.id,
+        provider=kwargs.get("provider", "github"),
         secret=encrypt_value(secret),
         enabled_by=owner.id,
         sync_on_push=kwargs.get("sync_on_push", True),
@@ -120,6 +121,38 @@ def _release(tag: str = "v2.0.0", *, action: str = "published", draft: bool = Fa
         "action": action,
         "release": {"tag_name": tag, "draft": draft, "body": "Big release"},
         "repository": {"clone_url": f"{REPO_URL}.git", "html_url": REPO_URL, "default_branch": "main"},
+    }
+
+
+GITLAB_URL = "https://gitlab.com/acme/tools/weather-mcp"
+
+
+def _gl_project(repo: str = GITLAB_URL, default_branch: str = "main") -> dict:
+    ssh = "git@" + repo.removeprefix("https://").replace("/", ":", 1) + ".git"
+    return {"web_url": repo, "git_http_url": f"{repo}.git", "git_ssh_url": ssh, "default_branch": default_branch}
+
+
+def _gl_push(branch: str = "main", *, repo: str = GITLAB_URL, after: str = "a" * 40, **extra) -> dict:
+    return {
+        "object_kind": "push",
+        "ref": f"refs/heads/{branch}",
+        "before": "b" * 40,
+        "after": after,
+        "checkout_sha": None if after == "0" * 40 else after,
+        "project": _gl_project(repo),
+        # GitLab lists the pushed commits; the head is the one matching checkout_sha.
+        "commits": [] if after == "0" * 40 else [{"id": after, "message": "Add forecast tool"}, {"id": "c" * 40}],
+        **extra,
+    }
+
+
+def _gl_release(tag: str = "v2.0.0", *, action: str = "create") -> dict:
+    return {
+        "object_kind": "release",
+        "action": action,
+        "tag": tag,
+        "description": "Big release",
+        "project": _gl_project(),
     }
 
 
@@ -208,6 +241,84 @@ class TestPlanDelivery:
     def test_hostile_branch_name_is_refused(self):
         plan = svc.plan_delivery(self._sync(branch="--upload-pack=x"), REPO_URL, "push", _push("--upload-pack=x"))
         assert plan == "branch name is not supported"
+
+
+class TestGitLab:
+    def _sync(self, **kwargs):
+        return SimpleNamespace(
+            sync_on_push=kwargs.get("sync_on_push", True),
+            sync_on_release=kwargs.get("sync_on_release", False),
+            branch=kwargs.get("branch"),
+        )
+
+    def _plan(self, payload, event=None, sync=None, url=GITLAB_URL):
+        event = event or svc.gitlab_event_name(None, payload)
+        return svc.plan_gitlab_delivery(sync or self._sync(), url, event, payload)
+
+    def test_token_must_match_exactly(self):
+        assert svc.verify_gitlab_token("s3cret", "s3cret")
+        for header in (None, "", "s3cre", "s3cret ", "S3CRET"):
+            assert not svc.verify_gitlab_token("s3cret", header)
+        assert not svc.verify_gitlab_token("", "")
+
+    @pytest.mark.parametrize(
+        ("url", "provider"),
+        [
+            (GITLAB_URL, "gitlab"),
+            ("https://gitlab.acme.internal/team/mcp", "gitlab"),
+            ("git@gitlab.com:acme/mcp.git", "gitlab"),
+            (REPO_URL, "github"),
+            ("https://code.acme.com/team/mcp", "github"),
+            (None, "github"),
+        ],
+    )
+    def test_provider_is_detected_from_the_host(self, url, provider):
+        assert svc.detect_provider(url) == provider
+
+    @pytest.mark.parametrize(
+        ("header", "payload", "event"),
+        [
+            ("Push Hook", {}, "push"),
+            ("Tag Push Hook", {}, "tag_push"),
+            ("Release Hook", {}, "release"),
+            ("System Hook", {"object_kind": "push"}, "push"),
+            (None, {"object_kind": "merge_request"}, "merge_request"),
+        ],
+    )
+    def test_event_names(self, header, payload, event):
+        assert svc.gitlab_event_name(header, payload) == event
+
+    def test_push_to_default_branch_queues_sync_with_head_commit_message(self):
+        assert self._plan(_gl_push()) == svc.SyncRequest(trigger="push", ref="main", changelog="Add forecast tool")
+
+    def test_nested_group_ssh_and_http_urls_match(self):
+        assert svc.normalize_repo_url(GITLAB_URL) == "gitlab.com/acme/tools/weather-mcp"
+        assert isinstance(self._plan(_gl_push(), url="git@gitlab.com:acme/tools/weather-mcp.git"), svc.SyncRequest)
+
+    def test_push_rules(self):
+        assert self._plan(_gl_push("feature/x")) == "push to feature/x ignored; tracking main"
+        assert self._plan(_gl_push(after="0" * 40)) == "branch was deleted"
+        assert self._plan(_gl_push(), sync=self._sync(sync_on_push=False)) == "push sync is turned off"
+        assert isinstance(self._plan(_gl_push("stable"), sync=self._sync(branch="stable")), svc.SyncRequest)
+
+    def test_release_rules(self):
+        on = self._sync(sync_on_release=True)
+        assert self._plan(_gl_release(), sync=on) == svc.SyncRequest(
+            trigger="release", ref="v2.0.0", changelog="Big release"
+        )
+        assert self._plan(_gl_release()) == "release sync is turned off"
+        assert self._plan(_gl_release(action="update"), sync=on) == "release update ignored"
+        assert "not a semantic version" in self._plan(_gl_release("nightly"), sync=on)
+
+    def test_tag_pushes_and_other_events_are_ignored(self):
+        tag_push = {**_gl_push(), "object_kind": "tag_push", "ref": "refs/tags/v2.0.0"}
+        assert "create a release" in self._plan(tag_push, event="tag_push")
+        note = {"object_kind": "note", "project": _gl_project()}
+        assert self._plan(note) == "note events are ignored"
+
+    def test_wrong_repository_is_rejected(self):
+        with pytest.raises(ValueError, match="different repository"):
+            self._plan(_gl_push(repo="https://gitlab.com/evil/weather-mcp"))
 
 
 class TestVersions:
@@ -548,6 +659,78 @@ async def test_receiver_ignores_untracked_events_without_touching_status(monkeyp
             assert (stored.last_event, stored.last_sync_status) == ("ping", "success")
 
 
+async def _gl_deliver(client, sync_id, payload, *, event="Push Hook", token="s3cret"):
+    headers = {"Content-Type": "application/json", "X-Gitlab-Event": event}
+    if token is not None:
+        headers["X-Gitlab-Token"] = token
+    return await client.post(f"/api/v1/webhooks/gitlab/mcp/{sync_id}", content=json.dumps(payload), headers=headers)
+
+
+@pytest.mark.asyncio
+async def test_enabling_sync_detects_gitlab_and_can_be_overridden(monkeypatch):
+    owner = _user()
+    listing, ver = _listing(owner, source_url=GITLAB_URL)
+    async with _database() as sessions:
+        await _seed(sessions, owner, listing, ver)
+        async with _api(sessions, owner, monkeypatch) as (client, _):
+            url = f"/api/v1/mcps/{listing.id}/webhook-sync"
+            body = (await client.put(url, json={"sync_on_push": True})).json()
+            assert body["provider"] == "gitlab"
+            assert body["webhook_url"] == f"http://test/api/v1/webhooks/gitlab/mcp/{body['id']}"
+
+            # Self-hosted GitLab on a neutral hostname, or a mistaken guess, is fixed by picking the provider.
+            switched = (await client.put(url, json={"sync_on_push": True, "provider": "github"})).json()
+            assert switched["provider"] == "github" and "/webhooks/github/" in switched["webhook_url"]
+            assert switched["secret"] is None, "changing the provider keeps the secret"
+            assert (await client.put(url, json={"sync_on_push": True, "provider": "bitbucket"})).status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_gitlab_receiver_queues_push_and_release_with_the_secret_token(monkeypatch):
+    owner = _user()
+    listing, ver = _listing(owner, source_url=GITLAB_URL)
+    sync = _sync(listing, owner, "s3cret", provider="gitlab", sync_on_release=True)
+    async with _database() as sessions:
+        await _seed(sessions, owner, listing, ver, sync)
+        async with _api(sessions, None, monkeypatch) as (client, queued):
+            resp = await _gl_deliver(client, sync.id, _gl_push())
+            assert resp.status_code == 202, resp.text
+            assert resp.json() == {"status": "queued", "reason": None, "trigger": "push", "ref": "main"}
+            release = await _gl_deliver(client, sync.id, _gl_release(), event="Release Hook")
+            assert release.json()["trigger"] == "release"
+            assert queued == [
+                (sync.id, svc.SyncRequest(trigger="push", ref="main", changelog="Add forecast tool")),
+                (sync.id, svc.SyncRequest(trigger="release", ref="v2.0.0", changelog="Big release")),
+            ]
+            tag = await _gl_deliver(client, sync.id, {**_gl_push(), "object_kind": "tag_push"}, event="Tag Push Hook")
+            assert tag.json()["status"] == "ignored"
+
+        async with sessions() as session:
+            stored = await session.get(McpWebhookSync, sync.id)
+            assert (stored.last_event, stored.last_sync_status) == ("tag_push", "queued")
+
+
+@pytest.mark.asyncio
+async def test_gitlab_receiver_rejects_bad_tokens_and_the_other_providers_hooks(monkeypatch):
+    owner = _user()
+    listing, ver = _listing(owner, source_url=GITLAB_URL)
+    gl_sync = _sync(listing, owner, "s3cret", provider="gitlab")
+    other, other_ver = _listing(owner)
+    other.slug = other.name = "other-mcp"
+    gh_sync = _sync(other, owner, "s3cret")
+    async with _database() as sessions:
+        await _seed(sessions, owner, listing, ver, other, other_ver, gl_sync, gh_sync)
+        async with _api(sessions, None, monkeypatch) as (client, queued):
+            assert (await _gl_deliver(client, gl_sync.id, _gl_push(), token="wrong")).status_code == 401
+            assert (await _gl_deliver(client, gl_sync.id, _gl_push(), token=None)).status_code == 401
+            # Each sync only answers on its own provider's endpoint.
+            assert (await _gl_deliver(client, gh_sync.id, _gl_push())).status_code == 404
+            assert (await _deliver(client, gl_sync.id, _push(repo=GITLAB_URL))).status_code == 404
+            evil = _gl_push(repo="https://gitlab.com/evil/weather-mcp")
+            assert (await _gl_deliver(client, gl_sync.id, evil)).status_code == 422
+            assert queued == []
+
+
 # ── The sync job against a real git repository ───────────────
 
 
@@ -642,6 +825,20 @@ async def test_push_sync_publishes_new_approved_version_from_branch_tip(local_re
         async with sessions() as session:
             stored_sync = await session.get(McpWebhookSync, sync.id)
             assert (stored_sync.last_sync_status, stored_sync.last_version) == ("success", "1.5.0")
+
+
+@pytest.mark.asyncio
+async def test_gitlab_sync_publishes_and_says_where_it_came_from(local_repo, monkeypatch):
+    owner = _user()
+    listing, ver = _listing(owner, source_url=GITLAB_URL)
+    sync = _sync(listing, owner, "s3cret", provider="gitlab")
+    async with _database() as sessions:
+        await _seed(sessions, owner, listing, ver, sync)
+        outcome = await _run(sessions, sync.id, svc.SyncRequest("push", "main", "Add forecast"), monkeypatch)
+        assert outcome.status == "success" and outcome.version == "1.0.1"
+        versions, _ = await _versions(sessions, listing.id)
+        assert versions["1.0.1"].changelog.startswith("Synced from GitLab main at ")
+        assert versions["1.0.1"].changelog.endswith("Add forecast")
 
 
 @pytest.mark.asyncio

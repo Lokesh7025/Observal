@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Lokesh Selvam <lokeshselvam7025@gmail.com>
 # SPDX-License-Identifier: Apache-2.0
 
-"""Add GitHub webhook auto-sync settings for MCP listings.
+"""Add GitHub and GitLab webhook auto-sync settings for MCP listings.
 
 Revision ID: 040_mcp_webhook_syncs
 Revises: 039_agent_pin_digest
@@ -31,6 +31,7 @@ def upgrade() -> None:
         "mcp_webhook_syncs",
         sa.Column("id", postgresql.UUID(as_uuid=True), nullable=False),
         sa.Column("listing_id", postgresql.UUID(as_uuid=True), nullable=False),
+        sa.Column("provider", sa.String(length=20), nullable=False, server_default="github"),
         sa.Column("secret", sa.Text(), nullable=False),
         sa.Column("branch", sa.String(length=255), nullable=True),
         sa.Column("sync_on_push", sa.Boolean(), nullable=False),

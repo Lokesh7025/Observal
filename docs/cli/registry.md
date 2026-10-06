@@ -320,7 +320,7 @@ observal registry mcp transfer-owner my-server @alice -y
 
 ### `observal registry mcp sync`
 
-Publish a new MCP version automatically when the listing's GitHub repository changes. See [Sync an MCP server from GitHub](../use-cases/mcp-github-sync.md) for the full setup.
+Publish a new MCP version automatically when the listing's GitHub or GitLab repository changes. See [Sync an MCP server from GitHub or GitLab](../use-cases/mcp-repo-sync.md) for the full setup.
 
 | Command | Description |
 | --- | --- |
@@ -333,8 +333,9 @@ Publish a new MCP version automatically when the listing's GitHub repository cha
 | `enable` option | Short | Description |
 | --- | --- | --- |
 | `--push / --no-push` | | Publish a version on each push to the tracked branch (on by default) |
-| `--release / --no-release` | | Publish a version when a GitHub release is published (off by default) |
+| `--release / --no-release` | | Publish a version when a release is published (off by default) |
 | `--branch` | `-b` | Branch to track. Defaults to the repository's default branch |
+| `--provider` | | `github` or `gitlab`. Detected from the repository URL; set it for a self-managed GitLab whose hostname does not contain `gitlab` |
 | `--output` | `-o` | Output format: `table` or `json` |
 
 On an existing setup, `enable` keeps any setting you do not pass.
@@ -345,6 +346,9 @@ observal registry mcp sync enable alice/weather-mcp
 
 # Releases only
 observal registry mcp sync enable alice/weather-mcp --release --no-push
+
+# Self-managed GitLab on its own hostname
+observal registry mcp sync enable alice/weather-mcp --provider gitlab
 
 # Check the last result
 observal registry mcp sync status alice/weather-mcp --output json

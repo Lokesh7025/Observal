@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Lokesh Selvam <lokeshselvam7025@gmail.com>
 # SPDX-License-Identifier: Apache-2.0
 
-"""GitHub webhook auto-sync for MCP listings: owner settings and the public receiver."""
+"""Webhook auto-sync for MCP listings: owner settings and the public GitHub and GitLab receivers."""
 
 import json
 import uuid
@@ -21,12 +21,18 @@ from schemas.mcp_webhook_sync import McpWebhookDeliveryResponse, McpWebhookSyncR
 from services.dynamic_settings import decrypt_value, encrypt_value
 from services.mcp_webhook_sync import (
     EVENT_HEADER,
+    GITLAB_EVENT_HEADER,
+    GITLAB_TOKEN_HEADER,
     SIGNATURE_HEADER,
     SyncRequest,
+    detect_provider,
     enqueue_sync,
     generate_secret,
+    gitlab_event_name,
     has_approved_version,
     plan_delivery,
+    plan_gitlab_delivery,
+    verify_gitlab_token,
     verify_signature,
 )
 
@@ -34,14 +40,14 @@ router = APIRouter(prefix="/api/v1/mcps", tags=["mcp-webhook-sync"])
 webhook_router = APIRouter(prefix="/api/v1/webhooks", tags=["webhooks"])
 
 
-async def _webhook_url(request: Request, sync_id: uuid.UUID) -> str:
+async def _webhook_url(request: Request, sync: McpWebhookSync) -> str:
     from api.routes.config import derive_endpoints
     from config import settings
 
     base = (settings.WEBHOOK_PUBLIC_URL or "").strip().rstrip("/")
     if not base:
         base = (await derive_endpoints(request))["api"]
-    return f"{base}/api/v1/webhooks/github/mcp/{sync_id}"
+    return f"{base}/api/v1/webhooks/{sync.provider}/mcp/{sync.id}"
 
 
 async def _response(request: Request, sync: McpWebhookSync | None, secret: str | None = None):
@@ -50,7 +56,8 @@ async def _response(request: Request, sync: McpWebhookSync | None, secret: str |
     return McpWebhookSyncResponse(
         enabled=True,
         id=sync.id,
-        webhook_url=await _webhook_url(request, sync.id),
+        provider=sync.provider,
+        webhook_url=await _webhook_url(request, sync),
         secret=secret,
         sync_on_push=sync.sync_on_push,
         sync_on_release=sync.sync_on_release,
@@ -138,8 +145,15 @@ async def configure_webhook_sync(
     secret = None
     if sync is None:
         secret = generate_secret()
-        sync = McpWebhookSync(listing_id=listing.id, secret=encrypt_value(secret), enabled_by=current_user.id)
+        sync = McpWebhookSync(
+            listing_id=listing.id,
+            provider=req.provider or detect_provider(listing.git_url),
+            secret=encrypt_value(secret),
+            enabled_by=current_user.id,
+        )
         db.add(sync)
+    elif req.provider:
+        sync.provider = req.provider
     sync.sync_on_push = req.sync_on_push
     sync.sync_on_release = req.sync_on_release
     sync.branch = req.branch
@@ -203,6 +217,45 @@ async def disable_webhook_sync(
     return {"disabled": str(listing.id)}
 
 
+async def _sync_for_provider(db: AsyncSession, sync_id: uuid.UUID, provider: str) -> McpWebhookSync:
+    sync = await db.get(McpWebhookSync, sync_id)
+    # A sync set up for the other provider is unknown here, so its secret is only
+    # ever checked the way its own provider sends it.
+    if sync is None or sync.provider != provider:
+        raise HTTPException(status_code=404, detail="Unknown webhook")
+    return sync
+
+
+def _json_payload(body: bytes) -> dict:
+    try:
+        payload = json.loads(body)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        raise HTTPException(
+            status_code=400, detail="Payload must be JSON. Set the webhook content type to application/json."
+        ) from None
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Payload must be a JSON object")
+    return payload
+
+
+async def _handle_delivery(db: AsyncSession, sync: McpWebhookSync, event: str, payload: dict, planner):
+    listing = await db.get(McpListing, sync.listing_id)
+    try:
+        plan = planner(sync, (listing.git_url if listing else None) or "", event, payload)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from None
+
+    sync.last_delivery_at = datetime.now(UTC)
+    sync.last_event = event[:20] or None
+    if isinstance(plan, str):
+        # Ignored deliveries keep the last sync result; the provider shows the reason in its delivery log.
+        await db.commit()
+        return McpWebhookDeliveryResponse(status="ignored", reason=plan)
+
+    await _queue(db, sync, plan)
+    return McpWebhookDeliveryResponse(status="queued", trigger=plan.trigger, ref=plan.ref)
+
+
 @webhook_router.post("/github/mcp/{sync_id}", response_model=McpWebhookDeliveryResponse, status_code=202)
 @limiter.limit("60/minute")
 async def receive_github_webhook(
@@ -213,34 +266,26 @@ async def receive_github_webhook(
     """Receive a GitHub webhook delivery. Authenticated by the HMAC signature, not a user token."""
     optic.trace("sync_id={}", sync_id)
     body = await request.body()
-    sync = await db.get(McpWebhookSync, sync_id)
-    if sync is None:
-        raise HTTPException(status_code=404, detail="Unknown webhook")
+    sync = await _sync_for_provider(db, sync_id, "github")
     if not verify_signature(decrypt_value(sync.secret), body, request.headers.get(SIGNATURE_HEADER)):
         raise HTTPException(status_code=401, detail="Invalid webhook signature")
-
     event = request.headers.get(EVENT_HEADER, "")
-    try:
-        payload = json.loads(body)
-    except (json.JSONDecodeError, UnicodeDecodeError):
-        raise HTTPException(
-            status_code=400, detail="Payload must be JSON. Set the webhook content type to application/json."
-        ) from None
-    if not isinstance(payload, dict):
-        raise HTTPException(status_code=400, detail="Payload must be a JSON object")
+    return await _handle_delivery(db, sync, event, _json_payload(body), plan_delivery)
 
-    listing = await db.get(McpListing, sync.listing_id)
-    try:
-        plan = plan_delivery(sync, (listing.git_url if listing else None) or "", event, payload)
-    except ValueError as e:
-        raise HTTPException(status_code=422, detail=str(e)) from None
 
-    sync.last_delivery_at = datetime.now(UTC)
-    sync.last_event = event[:20] or None
-    if isinstance(plan, str):
-        # Ignored deliveries keep the last sync result; GitHub shows the reason in its delivery log.
-        await db.commit()
-        return McpWebhookDeliveryResponse(status="ignored", reason=plan)
-
-    await _queue(db, sync, plan)
-    return McpWebhookDeliveryResponse(status="queued", trigger=plan.trigger, ref=plan.ref)
+@webhook_router.post("/gitlab/mcp/{sync_id}", response_model=McpWebhookDeliveryResponse, status_code=202)
+@limiter.limit("60/minute")
+async def receive_gitlab_webhook(
+    sync_id: uuid.UUID,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    """Receive a GitLab webhook delivery. Authenticated by the secret token header, not a user token."""
+    optic.trace("sync_id={}", sync_id)
+    body = await request.body()
+    sync = await _sync_for_provider(db, sync_id, "gitlab")
+    if not verify_gitlab_token(decrypt_value(sync.secret), request.headers.get(GITLAB_TOKEN_HEADER)):
+        raise HTTPException(status_code=401, detail="Invalid webhook token")
+    payload = _json_payload(body)
+    event = gitlab_event_name(request.headers.get(GITLAB_EVENT_HEADER), payload)
+    return await _handle_delivery(db, sync, event, payload, plan_gitlab_delivery)
