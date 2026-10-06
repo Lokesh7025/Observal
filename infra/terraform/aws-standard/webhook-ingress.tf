@@ -1,33 +1,39 @@
 # SPDX-FileCopyrightText: 2026 Lokesh Selvam <lokeshselvam7025@gmail.com>
 # SPDX-License-Identifier: Apache-2.0
 
-# Public GitHub webhook entry point for private installs (opt-in).
+# Public webhook entry point for private installs (opt-in).
 #
 # When the main ALB is internal (alb_scheme = "internal") or locked to company
-# CIDRs, github.com cannot deliver webhooks, so MCP GitHub sync has nothing to
-# react to. This adds a second, internet-facing ALB that:
-#   - only accepts traffic from GitHub's published webhook IP ranges,
-#   - only listens on HTTPS (GitHub verifies the certificate),
-#   - forwards only POST /api/v1/webhooks/github/* to the api tasks,
+# CIDRs, github.com and gitlab.com cannot deliver webhooks, so MCP repository
+# sync has nothing to react to. This adds a second, internet-facing ALB that:
+#   - only accepts traffic from the providers' published webhook IP ranges,
+#   - only listens on HTTPS (both providers verify the certificate),
+#   - forwards only POST /api/v1/webhooks/<provider>/* to the api tasks,
 #   - answers 404 for everything else, so the UI, API and login stay private.
-# The receiver also verifies each delivery's HMAC signature before doing anything.
+# The receiver also authenticates each delivery (GitHub HMAC signature, GitLab
+# secret token) before doing anything.
 
 locals {
-  webhook_ingress_enabled = var.enable_github_webhook_ingress
+  webhook_ingress_enabled = var.enable_webhook_ingress
   webhook_zone_id         = var.webhook_route53_zone_id != "" ? var.webhook_route53_zone_id : var.route53_zone_id
   webhook_public_url      = local.webhook_ingress_enabled ? "https://${var.webhook_domain_name}" : ""
+  webhook_github          = local.webhook_ingress_enabled && contains(var.webhook_providers, "github")
+  webhook_gitlab          = local.webhook_ingress_enabled && contains(var.webhook_providers, "gitlab")
+  webhook_paths           = [for provider in var.webhook_providers : "/api/v1/webhooks/${provider}/*"]
 
   # GitHub also publishes IPv6 ranges; the ALB is IPv4-only, so keep IPv4.
-  webhook_ingress_cidrs = length(var.webhook_ingress_cidrs) > 0 ? var.webhook_ingress_cidrs : (
-    local.webhook_ingress_enabled && length(data.http.github_meta) > 0
-    ? [for cidr in jsondecode(data.http.github_meta[0].response_body).hooks : cidr if !strcontains(cidr, ":")]
-    : []
-  )
+  github_hook_cidrs = local.webhook_github && length(data.http.github_meta) > 0 ? [
+    for cidr in jsondecode(data.http.github_meta[0].response_body).hooks : cidr if !strcontains(cidr, ":")
+  ] : []
+  webhook_ingress_cidrs = length(var.webhook_ingress_cidrs) > 0 ? var.webhook_ingress_cidrs : distinct(concat(
+    local.github_hook_cidrs,
+    local.webhook_gitlab ? var.gitlab_webhook_cidrs : [],
+  ))
 }
 
 # Read on every plan, so re-applying picks up changes to GitHub's ranges.
 data "http" "github_meta" {
-  count = local.webhook_ingress_enabled && length(var.webhook_ingress_cidrs) == 0 ? 1 : 0
+  count = local.webhook_github && length(var.webhook_ingress_cidrs) == 0 ? 1 : 0
   url   = "https://api.github.com/meta"
 
   request_headers = {
@@ -48,7 +54,7 @@ resource "terraform_data" "webhook_ingress_validation" {
   lifecycle {
     precondition {
       condition     = var.webhook_domain_name != ""
-      error_message = "webhook_domain_name is required when enable_github_webhook_ingress is true (GitHub needs a hostname with a valid TLS certificate)."
+      error_message = "webhook_domain_name is required when enable_webhook_ingress is true (GitHub and GitLab need a hostname with a valid TLS certificate)."
     }
     precondition {
       condition     = local.webhook_zone_id != ""
@@ -56,11 +62,11 @@ resource "terraform_data" "webhook_ingress_validation" {
     }
     precondition {
       condition     = local.should_create_vpc || (var.public_subnet_ids != null && length(coalesce(var.public_subnet_ids, [])) >= 2)
-      error_message = "enable_github_webhook_ingress needs at least 2 public subnets: set public_subnet_ids when vpc_id is set, even if alb_scheme is 'internal'."
+      error_message = "enable_webhook_ingress needs at least 2 public subnets: set public_subnet_ids when vpc_id is set, even if alb_scheme is 'internal'."
     }
     precondition {
       condition     = length(local.webhook_ingress_cidrs) > 0
-      error_message = "No webhook source ranges: GitHub's meta API returned no IPv4 hook ranges and webhook_ingress_cidrs is empty."
+      error_message = "No webhook source ranges: none were found for webhook_providers and webhook_ingress_cidrs is empty."
     }
   }
 }
@@ -70,12 +76,12 @@ resource "terraform_data" "webhook_ingress_validation" {
 resource "aws_security_group" "webhook_alb" {
   count       = local.webhook_ingress_enabled ? 1 : 0
   name        = "${local.name}-webhook-alb"
-  description = "GitHub webhook deliveries only."
+  description = "Git provider webhook deliveries only."
   vpc_id      = local.vpc_id
 
-  # tfsec:ignore:aws-ec2-no-public-ingress-sgr Limited to GitHub's webhook ranges (or var.webhook_ingress_cidrs).
+  # tfsec:ignore:aws-ec2-no-public-ingress-sgr Limited to the providers' webhook ranges (or var.webhook_ingress_cidrs).
   ingress {
-    description = "HTTPS from GitHub webhook ranges"
+    description = "HTTPS from git provider webhook ranges"
     from_port   = 443
     to_port     = 443
     protocol    = "tcp"
@@ -95,7 +101,7 @@ resource "aws_security_group" "webhook_alb" {
 
 # ── Load balancer ──────────────────────────────────────────────────────────
 
-# tfsec:ignore:aws-elb-alb-not-public Public by design; reachable only from GitHub's webhook ranges.
+# tfsec:ignore:aws-elb-alb-not-public Public by design; reachable only from the providers' webhook ranges.
 resource "aws_lb" "webhook" {
   count              = local.webhook_ingress_enabled ? 1 : 0
   name               = "${local.name}-hooks"
@@ -191,7 +197,7 @@ resource "aws_lb_listener" "webhook" {
   }
 }
 
-resource "aws_lb_listener_rule" "webhook_github" {
+resource "aws_lb_listener_rule" "webhook_forward" {
   count        = local.webhook_ingress_enabled ? 1 : 0
   listener_arn = aws_lb_listener.webhook[0].arn
   priority     = 100
@@ -203,7 +209,7 @@ resource "aws_lb_listener_rule" "webhook_github" {
 
   condition {
     path_pattern {
-      values = ["/api/v1/webhooks/github/*"]
+      values = local.webhook_paths
     }
   }
 

@@ -197,29 +197,30 @@ The ALB SG must allow inbound TCP 80/443 from your desired CIDRs. The ECS SG mus
 
 A full working example lives at [`infra/terraform/aws/examples/byovpc`](https://github.com/Observal/Observal/blob/main/infra/terraform/aws/examples/byovpc/README.md).
 
-### GitHub webhooks on a private install
+### Git webhooks on a private install
 
-[MCP GitHub sync](../use-cases/mcp-github-sync.md) publishes a new MCP version as soon as GitHub sends a webhook. With `alb_scheme = "internal"`, or with `alb_ingress_cidrs` limited to your own networks, github.com cannot reach Observal, so nothing syncs. Turn on the webhook entry point to fix that without opening the rest of the install:
+[MCP repository sync](../use-cases/mcp-repo-sync.md) publishes a new MCP version as soon as GitHub or GitLab sends a webhook. With `alb_scheme = "internal"`, or with `alb_ingress_cidrs` limited to your own networks, github.com and gitlab.com cannot reach Observal, so nothing syncs. Turn on the webhook entry point to fix that without opening the rest of the install:
 
 ```hcl
-enable_github_webhook_ingress = true
-webhook_domain_name           = "hooks.observal.example.com"
-webhook_route53_zone_id       = "Z0123456789ABCDEFGHIJ"   # public zone; defaults to route53_zone_id
+enable_webhook_ingress  = true
+webhook_providers       = ["github", "gitlab"]           # default ["github"]
+webhook_domain_name     = "hooks.observal.example.com"
+webhook_route53_zone_id = "Z0123456789ABCDEFGHIJ"        # public zone; defaults to route53_zone_id
 ```
 
 Terraform then adds:
 
 * A second, internet-facing ALB in the public subnets, separate from the main ALB, which keeps its scheme and CIDR restrictions.
-* A security group that admits HTTPS only from GitHub's webhook IP ranges, read from `https://api.github.com/meta` at plan time.
-* An HTTPS listener with an ACM certificate. It forwards only `POST /api/v1/webhooks/github/*` to the API tasks and answers `404` for everything else, so the UI, API and login stay private.
-* A DNS record for `webhook_domain_name`, and `WEBHOOK_PUBLIC_URL` on the API so the MCP **Sync** tab shows the public Payload URL.
+* A security group that admits HTTPS only from the listed providers' webhook IP ranges: GitHub's, read from `https://api.github.com/meta` at plan time, and [GitLab.com's](https://docs.gitlab.com/user/gitlab_com/#ip-range) (`gitlab_webhook_cidrs`).
+* An HTTPS listener with an ACM certificate. It forwards only `POST /api/v1/webhooks/<provider>/*` for the listed providers to the API tasks and answers `404` for everything else, so the UI, API and login stay private.
+* A DNS record for `webhook_domain_name`, and `WEBHOOK_PUBLIC_URL` on the API so the MCP **Sync** tab shows the public webhook URL.
 
-The receiver also rejects any delivery without a valid HMAC signature for that listing.
+The receiver also rejects any delivery that is not authenticated for that listing (a GitHub HMAC signature or the GitLab secret token).
 
 Things to know:
 
-* GitHub occasionally adds webhook ranges. Each `terraform plan` or `apply` reads the current list, so re-apply after GitHub announces a change. The `webhook_ingress_cidrs` output shows the ranges in force.
-* GitHub Enterprise Cloud with data residency (`*.ghe.com`) sends webhooks from different addresses. Set `webhook_ingress_cidrs` to the ranges from your instance's meta API. A GitHub Enterprise Server inside your network can reach the internal ALB directly and does not need this.
+* GitHub occasionally adds webhook ranges. Each `terraform plan` or `apply` reads the current list, so re-apply after GitHub announces a change. The `webhook_ingress_cidrs` output shows the ranges in force. The read uses GitHub's unauthenticated API, limited to 60 requests an hour per IP address, so a plan from a busy shared address can fail; retry later or set `webhook_ingress_cidrs`.
+* GitHub Enterprise Cloud with data residency (`*.ghe.com`), or a self-managed GitLab or GitHub server outside your network, sends webhooks from other addresses. Set `webhook_ingress_cidrs` to those ranges; it replaces the published ones. A git server inside your network can reach the internal ALB directly and does not need this.
 * With `vpc_id` set, provide `public_subnet_ids` even when `alb_scheme = "internal"`; the webhook ALB lives there.
 * Turning it on for an existing install registers the API service with one more target group, which triggers a rolling redeploy of the API.
 * Cost: one more ALB, about $20 a month.
@@ -360,7 +361,7 @@ Rough monthly baseline in `us-east-1` at on-demand rates (May 2026):
 | RDS `db.t4g.small` Multi-AZ         | $50          |
 | ElastiCache (2× `cache.t4g.micro`)  | $25          |
 | ALB                                 | $20          |
-| Webhook ALB (only with `enable_github_webhook_ingress`) | $20 |
+| Webhook ALB (only with `enable_webhook_ingress`) | $20 |
 | NAT Gateway                         | $33 + egress |
 | EBS gp3 100 GB                      | $8           |
 | S3 backups (1 GB cold)              | $0.10        |

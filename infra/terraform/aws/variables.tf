@@ -266,19 +266,31 @@ variable "alb_ingress_cidrs" {
   default     = ["0.0.0.0/0"]
 }
 
-# ── GitHub webhook ingress (optional) ──────────────────────────────────────
+# ── Git webhook ingress (optional) ─────────────────────────────────────────
 # For private installs (alb_scheme = "internal" or a restricted
-# alb_ingress_cidrs) that use MCP GitHub sync. Adds a separate internet-facing
-# ALB that only accepts GitHub webhook deliveries. See webhook-ingress.tf.
+# alb_ingress_cidrs) that use MCP repository sync. Adds a separate
+# internet-facing ALB that only accepts GitHub and/or GitLab webhook
+# deliveries. See webhook-ingress.tf.
 
-variable "enable_github_webhook_ingress" {
-  description = "Create a public HTTPS load balancer that only forwards GitHub webhook deliveries (POST /api/v1/webhooks/github/*) from GitHub's IP ranges, so MCP GitHub sync works on a private install."
+variable "enable_webhook_ingress" {
+  description = "Create a public HTTPS load balancer that only forwards git provider webhook deliveries (POST /api/v1/webhooks/<provider>/*) from the providers' IP ranges, so MCP repository sync works on a private install."
   type        = bool
   default     = false
 }
 
+variable "webhook_providers" {
+  description = "Providers whose webhooks the webhook load balancer accepts: github, gitlab, or both. Each adds its webhook path and, unless webhook_ingress_cidrs is set, its published source ranges."
+  type        = list(string)
+  default     = ["github"]
+
+  validation {
+    condition     = length(var.webhook_providers) > 0 && alltrue([for p in var.webhook_providers : contains(["github", "gitlab"], p)])
+    error_message = "webhook_providers must list github, gitlab, or both."
+  }
+}
+
 variable "webhook_domain_name" {
-  description = "Public hostname for the webhook load balancer (e.g. hooks.observal.example.com). Required when enable_github_webhook_ingress is true."
+  description = "Public hostname for the webhook load balancer (e.g. hooks.observal.example.com). Required when enable_webhook_ingress is true."
   type        = string
   default     = ""
 }
@@ -290,9 +302,15 @@ variable "webhook_route53_zone_id" {
 }
 
 variable "webhook_ingress_cidrs" {
-  description = "IPv4 CIDRs allowed to reach the webhook load balancer. Empty means GitHub's published webhook ranges from https://api.github.com/meta, read at plan time. Set this for GitHub Enterprise Cloud with data residency (*.ghe.com) or a self-hosted git server."
+  description = "IPv4 CIDRs allowed to reach the webhook load balancer, replacing the providers' published ranges. Set this for GitHub Enterprise Cloud with data residency (*.ghe.com), or a self-managed GitLab or GitHub server outside your network."
   type        = list(string)
   default     = []
+}
+
+variable "gitlab_webhook_cidrs" {
+  description = "GitLab.com's outbound webhook ranges (https://docs.gitlab.com/user/gitlab_com/#ip-range), used when webhook_providers includes gitlab and webhook_ingress_cidrs is empty."
+  type        = list(string)
+  default     = ["34.74.90.64/28", "34.74.226.0/24"]
 }
 
 # ── Application config ─────────────────────────────────────────────────────

@@ -13,7 +13,7 @@ output "alb_dns_name" {
 }
 
 output "webhook_public_url" {
-  description = "Public base URL GitHub uses for webhook deliveries (empty unless enable_github_webhook_ingress is true). The MCP Sync tab shows full Payload URLs under it."
+  description = "Public base URL GitHub and GitLab use for webhook deliveries (empty unless enable_webhook_ingress is true). The MCP Sync tab shows full webhook URLs under it."
   value       = local.webhook_public_url
 }
 
