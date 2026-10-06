@@ -9,7 +9,7 @@ from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from loguru import logger as optic
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.deps import get_db, get_effective_component_permission, require_role, resolve_listing
@@ -91,9 +91,10 @@ async def _sync_for(db: AsyncSession, listing: McpListing) -> McpWebhookSync | N
 async def _queue(db: AsyncSession, sync: McpWebhookSync, request: SyncRequest) -> None:
     """Mark the sync queued, then hand it to the worker.
 
-    "queued" is committed before the job exists, so the worker's own status
-    updates always land after it. If the job cannot be queued, the sync is
-    marked failed instead of staying "queued" with nothing to run it.
+    "queued" is committed before the job exists, and nothing is written after a
+    successful enqueue, so the worker's own status updates always land after it.
+    If the job cannot be queued, the sync is marked failed instead of staying
+    "queued" with nothing to run it.
     """
     sync.last_sync_status = "queued"
     sync.last_sync_error = None
@@ -102,8 +103,16 @@ async def _queue(db: AsyncSession, sync: McpWebhookSync, request: SyncRequest) -
         await enqueue_sync(sync.id, request)
     except Exception:
         optic.exception("mcp webhook sync could not be queued sync_id={}", sync.id)
-        sync.last_sync_status = "failed"
-        sync.last_sync_error = "Could not queue the sync job because the worker queue is unavailable. Try again later."
+        # Only while still "queued": if the job reached the queue before the error,
+        # the worker may already have recorded a result, which must not be overwritten.
+        await db.execute(
+            update(McpWebhookSync)
+            .where(McpWebhookSync.id == sync.id, McpWebhookSync.last_sync_status == "queued")
+            .values(
+                last_sync_status="failed",
+                last_sync_error="Could not queue the sync job because the worker queue is unavailable. Try again later.",
+            )
+        )
         await db.commit()
         raise HTTPException(status_code=503, detail="Could not queue the sync job. Try again later.") from None
 

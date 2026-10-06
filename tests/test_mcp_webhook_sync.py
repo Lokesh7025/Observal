@@ -592,6 +592,36 @@ async def test_queue_failure_marks_sync_failed_instead_of_stuck_queued(monkeypat
             assert stored.last_event == "push"
 
 
+@pytest.mark.asyncio
+async def test_queue_error_after_the_job_ran_keeps_the_worker_result(monkeypatch):
+    from api.routes import mcp_webhook_sync as routes
+
+    owner = _user()
+    listing, ver = _listing(owner)
+    sync = _sync(listing, owner, "s3cret")
+    async with _database() as sessions:
+        await _seed(sessions, owner, listing, ver, sync)
+        async with _api(sessions, owner, monkeypatch) as (client, _):
+
+            async def enqueue_then_fail(sync_id, request):
+                # The job reached the queue and the worker finished it before the error surfaced.
+                async with sessions() as worker:
+                    row = await worker.get(McpWebhookSync, sync_id)
+                    row.last_sync_status = "success"
+                    row.last_version = "0.3.0"
+                    await worker.commit()
+                raise ConnectionError("connection reset after write")
+
+            monkeypatch.setattr(routes, "enqueue_sync", enqueue_then_fail)
+            assert (await _deliver(client, sync.id, _push())).status_code == 503
+
+        async with sessions() as session:
+            stored = await session.get(McpWebhookSync, sync.id)
+            assert stored.last_sync_status == "success"
+            assert stored.last_sync_error is None
+            assert stored.last_version == "0.3.0"
+
+
 # ── Public receiver ──────────────────────────────────────────
 
 
