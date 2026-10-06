@@ -10,7 +10,7 @@
 - Read owned state
 - Edit
 - Publish a version
-- Sync an MCP from GitHub
+- Sync an MCP from GitHub or GitLab
 - Archive and restore
 - Transfer ownership
 - Co-authors
@@ -121,19 +121,20 @@ Export requires a **new** destination directory, downloads and verifies every de
 
 Always use `--output json` for machine-readable responses. Verify revision fields match before mutations.
 
-## Sync an MCP from GitHub
+## Sync an MCP from GitHub or GitLab
 
-An MCP listing with a git URL can publish versions automatically from GitHub pushes, releases, or both. Synced versions skip review, so confirm with the user before enabling it.
+An MCP listing with a git URL can publish versions automatically from GitHub or GitLab pushes, releases, or both. Synced versions skip review, so confirm with the user before enabling it.
 
 ```bash
 observal registry mcp sync enable NAMESPACE/SLUG --output json
 observal registry mcp sync enable NAMESPACE/SLUG --release --no-push --output json
+observal registry mcp sync enable NAMESPACE/SLUG --provider gitlab --output json   # self-managed GitLab hostname
 observal registry mcp sync status NAMESPACE/SLUG --output json
 observal registry mcp sync run NAMESPACE/SLUG --output json
 observal registry mcp sync disable NAMESPACE/SLUG --yes --output json
 ```
 
-The first `enable` returns `webhook_url` and a one-time `secret`. Tell the user to add them in the repository under Settings > Webhooks with content type `application/json`. Never echo the secret into files or logs.
+The first `enable` returns `provider`, `webhook_url` and a one-time `secret`. Tell the user to add them under Settings > Webhooks: on GitHub as the Payload URL and Secret with content type `application/json`, on GitLab as the URL and Secret token with Push and/or Releases events. Never echo the secret into files or logs.
 
 ## Archive and restore
 

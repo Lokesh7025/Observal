@@ -4,10 +4,13 @@
 import re
 import uuid
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 _REF_NAME_RE = re.compile(r"^[A-Za-z0-9._/-]{1,255}$")
+
+WebhookProvider = Literal["github", "gitlab"]
 
 
 def valid_ref_name(name: str) -> bool:
@@ -18,6 +21,9 @@ def valid_ref_name(name: str) -> bool:
 class McpWebhookSyncRequest(BaseModel):
     sync_on_push: bool = True
     sync_on_release: bool = False
+    # None keeps the current provider, or detects it from the repository URL when
+    # sync is first turned on.
+    provider: WebhookProvider | None = None
     # None tracks the repository's default branch.
     branch: str | None = Field(None, max_length=255)
 
@@ -41,6 +47,7 @@ class McpWebhookSyncRequest(BaseModel):
 class McpWebhookSyncResponse(BaseModel):
     enabled: bool
     id: uuid.UUID | None = None
+    provider: WebhookProvider | None = None
     webhook_url: str | None = None
     # Present only right after the secret is created or rotated; it is never shown again.
     secret: str | None = None

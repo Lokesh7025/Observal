@@ -223,9 +223,12 @@ export type ComponentVersionDetail = ComponentVersionSummary;
 
 export type McpWebhookSyncStatus = "queued" | "syncing" | "success" | "skipped" | "failed";
 
+export type McpWebhookProvider = "github" | "gitlab";
+
 export interface McpWebhookSync {
 	enabled: boolean;
 	id?: string | null;
+	provider?: McpWebhookProvider | null;
 	webhook_url?: string | null;
 	/** Present only right after sync is first turned on or the secret is rotated. */
 	secret?: string | null;
@@ -246,6 +249,7 @@ export interface McpWebhookSyncRequest {
 	sync_on_push: boolean;
 	sync_on_release: boolean;
 	branch: string | null;
+	provider?: McpWebhookProvider | null;
 }
 
 export interface BulkResultItem {

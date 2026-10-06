@@ -1,9 +1,11 @@
 # SPDX-FileCopyrightText: 2026 Lokesh Selvam <lokeshselvam7025@gmail.com>
 # SPDX-License-Identifier: Apache-2.0
 
-"""GitHub webhook auto-sync commands for MCP servers."""
+"""Webhook auto-sync commands for MCP servers hosted on GitHub or GitLab."""
 
 from __future__ import annotations
+
+from enum import Enum
 
 import typer
 from loguru import logger as optic
@@ -14,13 +16,28 @@ from observal_cli.render import OutputMode, console, esc, kv_panel, output_json,
 
 mcp_sync_app = typer.Typer(
     help=(
-        "Publish a new MCP version automatically when its GitHub repository changes\n\n"
+        "Publish a new MCP version automatically when its GitHub or GitLab repository changes\n\n"
         "Examples:\n"
         "  observal registry mcp sync enable alice/my-server\n"
         "  observal registry mcp sync enable alice/my-server --release --no-push\n"
+        "  observal registry mcp sync enable alice/my-server --provider gitlab\n"
         "  observal registry mcp sync status alice/my-server"
     )
 )
+
+
+class Provider(str, Enum):
+    """Where the MCP's repository is hosted."""
+
+    github = "github"
+    gitlab = "gitlab"
+
+
+_LABELS = {"github": "GitHub", "gitlab": "GitLab"}
+
+
+def _label(state: dict) -> str:
+    return _LABELS.get(state.get("provider") or "github", "GitHub")
 
 
 def _path(mcp_id: str) -> str:
@@ -38,6 +55,7 @@ def _render(state: dict, title: str) -> None:
         return
     status = state.get("last_sync_status") or "never synced"
     fields = [
+        ("Provider", _label(state)),
         ("Webhook URL", esc(state.get("webhook_url") or "")),
         ("Triggers", _triggers(state)),
         ("Branch", esc(state.get("branch") or "repository default")),
@@ -60,8 +78,15 @@ def _print_setup(state: dict) -> None:
         return
     rprint("\n[bold]Webhook secret[/bold] (shown once, store it now):")
     rprint(f"  [yellow]{esc(secret)}[/yellow]")
+    url = esc(state.get("webhook_url") or "")
+    if state.get("provider") == "gitlab":
+        rprint("\n[bold]Add the webhook in GitLab[/bold]: project Settings > Webhooks > Add new webhook")
+        rprint(f"  URL:           {url}")
+        rprint("  Secret token:  the secret above")
+        rprint(f"  Trigger:       {_gitlab_events_hint(state)}")
+        return
     rprint("\n[bold]Add the webhook in GitHub[/bold]: repository Settings > Webhooks > Add webhook")
-    rprint(f"  Payload URL:   {esc(state.get('webhook_url') or '')}")
+    rprint(f"  Payload URL:   {url}")
     rprint("  Content type:  application/json")
     rprint("  Secret:        the secret above")
     rprint(f"  Events:        {_events_hint(state)}")
@@ -75,17 +100,28 @@ def _events_hint(state: dict) -> str:
     return "Just the push event"
 
 
+def _gitlab_events_hint(state: dict) -> str:
+    events = (("Push events", "sync_on_push"), ("Releases events", "sync_on_release"))
+    return " and ".join(name for name, key in events if state.get(key))
+
+
 @mcp_sync_app.command(name="enable")
 def mcp_sync_enable(
     mcp_id: str = typer.Argument(..., help="ID, name, row number, or @alias"),
     push: bool | None = typer.Option(None, "--push/--no-push", help="Publish a version on each push to the branch"),
     release: bool | None = typer.Option(
-        None, "--release/--no-release", help="Publish a version when a GitHub release is published"
+        None, "--release/--no-release", help="Publish a version when a release is published"
     ),
     branch: str | None = typer.Option(None, "--branch", "-b", help="Branch to track (default: repository default)"),
+    provider: Provider | None = typer.Option(
+        None,
+        "--provider",
+        help="Where the repository is hosted. Detected from the repository URL; set it for self-hosted GitLab.",
+        case_sensitive=False,
+    ),
     output: OutputMode = typer.Option("table", "--output", "-o", help="Output format: table or json"),
 ):
-    """Turn on GitHub webhook sync, or change which events trigger it.
+    """Turn on GitHub or GitLab webhook sync, or change which events trigger it.
 
     Synced versions are approved and published right away. Push sync bumps
     the patch version, or uses the version in pyproject.toml or package.json
@@ -93,15 +129,16 @@ def mcp_sync_enable(
     (v1.2.3 or 1.2.3) as the version.
 
     On first enable this prints the webhook URL and a secret to add in the
-    repository's GitHub settings. The secret is shown only once; use
+    repository's webhook settings. The secret is shown only once; use
     rotate-secret to issue a new one.
 
     Examples:
         observal registry mcp sync enable alice/my-server
         observal registry mcp sync enable alice/my-server --release
         observal registry mcp sync enable alice/my-server --release --no-push --branch stable
+        observal registry mcp sync enable alice/my-server --provider gitlab
     """
-    optic.trace("mcp_id={}, push={}, release={}", mcp_id, push, release)
+    optic.trace("mcp_id={}, push={}, release={}, provider={}", mcp_id, push, release, provider)
     path = _path(mcp_id)
     current = client.get(path)
     enabled = current.get("enabled")
@@ -109,6 +146,7 @@ def mcp_sync_enable(
         "sync_on_push": push if push is not None else (current.get("sync_on_push") if enabled else True),
         "sync_on_release": release if release is not None else (current.get("sync_on_release") if enabled else False),
         "branch": branch if branch is not None else (current.get("branch") if enabled else None),
+        "provider": provider.value if provider else None,
     }
     state = client.put(path, body)
     if output == "json":
@@ -159,7 +197,7 @@ def mcp_sync_rotate_secret(
     mcp_id: str = typer.Argument(..., help="ID, name, row number, or @alias"),
     output: OutputMode = typer.Option("table", "--output", "-o", help="Output format: table or json"),
 ):
-    """Issue a new webhook secret. Update it in GitHub, or deliveries will be rejected.
+    """Issue a new webhook secret. Update it in GitHub or GitLab, or deliveries will be rejected.
 
     Examples:
         observal registry mcp sync rotate-secret alice/my-server
@@ -186,9 +224,9 @@ def mcp_sync_disable(
     optic.trace("mcp_id={}", mcp_id)
     path = _path(mcp_id)
     if not yes and output != "json":
-        typer.confirm("Turn off webhook sync? GitHub deliveries will be rejected afterwards.", abort=True)
+        typer.confirm("Turn off webhook sync? Webhook deliveries will be rejected afterwards.", abort=True)
     result = client.delete(path)
     if output == "json":
         output_json(result)
         return
-    rprint("[green]Webhook sync disabled.[/green] Remove the webhook from the repository's GitHub settings too.")
+    rprint("[green]Webhook sync disabled.[/green] Remove the webhook from the repository's settings too.")

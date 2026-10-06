@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Lokesh Selvam <lokeshselvam7025@gmail.com>
 # SPDX-License-Identifier: Apache-2.0
 
-"""GitHub webhook auto-sync settings for one MCP listing."""
+"""Webhook auto-sync settings for one MCP listing (GitHub or GitLab)."""
 
 import uuid
 from datetime import UTC, datetime
@@ -21,7 +21,10 @@ class McpWebhookSync(Base):
     listing_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("mcp_listings.id", ondelete="CASCADE"), nullable=False, unique=True
     )
-    # Encrypted with services.dynamic_settings.encrypt_value; HMAC needs the plaintext back.
+    # github or gitlab: which webhook format the receiver accepts for this listing.
+    provider: Mapped[str] = mapped_column(String(20), nullable=False, default="github", server_default="github")
+    # Encrypted with services.dynamic_settings.encrypt_value. GitHub signs deliveries
+    # with it (HMAC); GitLab sends it back as a token. Both need the plaintext.
     secret: Mapped[str] = mapped_column(Text, nullable=False)
     # None tracks the repository's default branch.
     branch: Mapped[str | None] = mapped_column(String(255), nullable=True)

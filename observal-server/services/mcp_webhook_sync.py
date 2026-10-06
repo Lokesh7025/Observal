@@ -1,12 +1,15 @@
 # SPDX-FileCopyrightText: 2026 Lokesh Selvam <lokeshselvam7025@gmail.com>
 # SPDX-License-Identifier: Apache-2.0
 
-"""GitHub webhook auto-sync for MCP listings.
+"""Webhook auto-sync for MCP listings hosted on GitHub or GitLab.
 
-A push to the tracked branch, or a published GitHub release, re-reads the MCP's
+A push to the tracked branch, or a published release, re-reads the MCP's
 repository and publishes a new auto-approved version. A sync always creates a new
 version and never edits an existing one, because agent lockfiles pin version
 content by digest (services/agent_lock.py).
+
+Only receiving a delivery is provider specific (how it is authenticated and how
+its payload reads). Fetching, analysis and versioning are plain git.
 """
 
 from __future__ import annotations
@@ -53,6 +56,13 @@ if TYPE_CHECKING:
 
 SIGNATURE_HEADER = "X-Hub-Signature-256"
 EVENT_HEADER = "X-GitHub-Event"
+GITLAB_TOKEN_HEADER = "X-Gitlab-Token"
+GITLAB_EVENT_HEADER = "X-Gitlab-Event"
+
+PROVIDER_LABELS = {"github": "GitHub", "gitlab": "GitLab"}
+
+_GITLAB_EVENTS = {"Push Hook": "push", "Tag Push Hook": "tag_push", "Release Hook": "release"}
+_NULL_SHA = "0" * 40
 
 # Same shape the version routes accept: X.Y.Z with an optional prerelease suffix.
 _SEMVER_RE = re.compile(r"^(\d+)\.(\d+)\.(\d+)(-[a-zA-Z0-9.]+)?$")
@@ -69,7 +79,7 @@ class SyncError(Exception):
 
 
 class FetchError(SyncError):
-    """Fetching the repository failed, which is often transient (network, a ref GitHub is still publishing)."""
+    """Fetching the repository failed, which is often transient (network, a tag still being published)."""
 
 
 @dataclass(frozen=True)
@@ -100,6 +110,22 @@ def verify_signature(secret: str, body: bytes, header: str | None) -> bool:
         return False
     expected = "sha256=" + hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
     return hmac.compare_digest(expected, header)
+
+
+def verify_gitlab_token(secret: str, header: str | None) -> bool:
+    """Check GitLab's ``X-Gitlab-Token`` header, which carries the secret token as is."""
+    if not secret or not header:
+        return False
+    return hmac.compare_digest(secret.encode(), header.encode())
+
+
+def detect_provider(git_url: str | None) -> str:
+    """Guess the provider from the repository host. Self-hosted GitLab on another
+    hostname is picked explicitly when sync is turned on."""
+    host = urlparse(git_url or "").hostname or ""
+    if not host and (git_url or "").startswith("git@"):
+        host = git_url[4:].split(":", 1)[0]
+    return "gitlab" if "gitlab" in host.lower() else "github"
 
 
 def normalize_repo_url(url: str | None) -> str:
@@ -175,6 +201,70 @@ def plan_delivery(sync: McpWebhookSync, git_url: str, event: str, payload: dict)
         return SyncRequest(trigger="release", ref=tag, changelog=notes)
 
     return f"{event} events are ignored"
+
+
+def gitlab_event_name(header: str | None, payload: dict) -> str:
+    """``Push Hook`` becomes ``push``; falls back to the payload's ``object_kind``."""
+    return _GITLAB_EVENTS.get(header or "") or str(payload.get("object_kind") or header or "")
+
+
+def _gitlab_repo_urls(payload: dict) -> set[str]:
+    project = payload.get("project") or {}
+    repo = payload.get("repository") or {}
+    urls = [project.get(key) for key in ("web_url", "git_http_url", "git_ssh_url", "http_url", "ssh_url")]
+    urls += [repo.get(key) for key in ("homepage", "git_http_url", "git_ssh_url", "url")]
+    return {normalize_repo_url(url) for url in urls if isinstance(url, str)} - {""}
+
+
+def _gitlab_head_message(payload: dict) -> str:
+    head = payload.get("checkout_sha") or payload.get("after")
+    commits = [c for c in payload.get("commits") or [] if isinstance(c, dict)]
+    match = next((c for c in commits if c.get("id") == head), commits[-1] if commits else {})
+    return str(match.get("message") or "")
+
+
+def plan_gitlab_delivery(sync: McpWebhookSync, git_url: str, event: str, payload: dict) -> SyncRequest | str:
+    """GitLab version of ``plan_delivery``. ``event`` comes from ``gitlab_event_name``.
+
+    GitLab has no ping event: its "Test" button sends a sample push, which is
+    planned like a real one and skipped by the job if that commit is published.
+    """
+    if normalize_repo_url(git_url) not in _gitlab_repo_urls(payload):
+        raise ValueError("This webhook is for a different repository than the MCP listing")
+
+    if event == "push":
+        if not sync.sync_on_push:
+            return "push sync is turned off"
+        ref = str(payload.get("ref") or "")
+        if not ref.startswith("refs/heads/"):
+            return "not a branch push"
+        branch = ref.removeprefix("refs/heads/")
+        tracked = sync.branch or (payload.get("project") or {}).get("default_branch")
+        if branch != tracked:
+            return f"push to {branch} ignored; tracking {tracked}"
+        if payload.get("after") == _NULL_SHA or (not payload.get("checkout_sha") and not payload.get("commits")):
+            return "branch was deleted"
+        if not valid_ref_name(branch):
+            return "branch name is not supported"
+        return SyncRequest(trigger="push", ref=branch, changelog=_gitlab_head_message(payload))
+
+    if event == "release":
+        if not sync.sync_on_release:
+            return "release sync is turned off"
+        action = payload.get("action")
+        if action != "create":
+            return f"release {action} ignored"
+        tag = str(payload.get("tag") or "")
+        if not valid_ref_name(tag):
+            return "release tag name is not supported"
+        if tag_to_version(tag) is None:
+            return f"release tag {tag} is not a semantic version (expected v1.2.3 or 1.2.3)"
+        notes = str(payload.get("description") or payload.get("name") or "")
+        return SyncRequest(trigger="release", ref=tag, changelog=notes)
+
+    if event == "tag_push":
+        return "tag pushes are ignored; create a release from the tag to sync it"
+    return f"{event or 'unknown'} events are ignored"
 
 
 def has_approved_version(listing: McpListing) -> bool:
@@ -275,9 +365,9 @@ def _merge_env_vars(current: list | None, detected: list | None) -> list:
     return merged
 
 
-def _changelog(trigger: str, ref: str, sha: str, notes: str) -> str:
+def _changelog(trigger: str, ref: str, sha: str, notes: str, provider: str = "github") -> str:
     source = f"release {ref}" if trigger == "release" else f"{ref} at {sha[:12]}"
-    header = f"Synced from GitHub {source}."
+    header = f"Synced from {PROVIDER_LABELS.get(provider, 'git')} {source}."
     notes = notes.strip()
     text = f"{header}\n\n{notes}" if notes else header
     return text[:_CHANGELOG_LIMIT]
@@ -293,6 +383,7 @@ def build_version(
     sha: str,
     notes: str,
     actor_id: uuid.UUID,
+    provider: str = "github",
 ) -> McpVersion:
     """Snapshot the current version, then refresh what the repository now says.
 
@@ -307,7 +398,7 @@ def build_version(
         listing_id=listing.id,
         version=version,
         description=(current.description if current else "") or analysis.get("description") or listing.name,
-        changelog=_changelog(trigger, ref, sha, notes),
+        changelog=_changelog(trigger, ref, sha, notes, provider),
         status=ListingStatus.approved,
         released_by=actor_id,
         released_at=now,
@@ -343,7 +434,7 @@ def build_version(
 
 
 async def enqueue_sync(sync_id: uuid.UUID, request: SyncRequest) -> None:
-    """Queue a sync on the arq worker. GitHub waits only 10s, and a clone can take minutes.
+    """Queue a sync on the arq worker. GitHub and GitLab wait only 10s, and a clone can take minutes.
 
     Redelivered webhooks are not deduplicated here: the job skips a commit or tag
     it already published, so a retry after a failure still runs.
@@ -423,6 +514,7 @@ async def _sync_listing(db: AsyncSession, sync: McpWebhookSync, request: SyncReq
         sha=sha,
         notes=request.changelog,
         actor_id=actor.id,
+        provider=sync.provider,
     )
     db.add(ver)
     await db.flush()
