@@ -446,20 +446,20 @@ async def enqueue_sync(sync_id: uuid.UUID, request: SyncRequest) -> None:
     await pool.enqueue_job("sync_mcp_webhook", str(sync_id), request.trigger, request.ref, request.changelog)
 
 
-async def _publishing_actor(
-    db: AsyncSession, listing: McpListing, user_id: uuid.UUID, *, lock_membership: bool = False
-) -> User:
+async def _publishing_actor(db: AsyncSession, listing: McpListing, user_id: uuid.UUID, *, lock: bool = False) -> User:
     """The user synced versions are published as, if they may still publish.
 
     The same gate as the owner routes (resolve_listing): the submitter stays
     "owner" forever, so someone removed from a private listing's teamspace fails
-    too. With ``lock_membership``, their membership row stays locked until the
-    publish commits, so a removal from the teamspace waits for it.
+    too. With ``lock``, the user row (role) and their teamspace membership stay
+    locked until the publish commits, so revoking either waits for it. The caller
+    locks the listing row (co-authors).
     """
-    actor = (
-        await db.execute(select(User).where(User.id == user_id).execution_options(populate_existing=True))
-    ).scalar_one_or_none()
-    if actor is not None and lock_membership and listing.is_private and listing.team_id is not None:
+    query = select(User).where(User.id == user_id).execution_options(populate_existing=True)
+    if lock:
+        query = query.with_for_update(read=True)
+    actor = (await db.execute(query)).scalar_one_or_none()
+    if actor is not None and lock and listing.is_private and listing.team_id is not None:
         await db.execute(
             select(TeamMembership.id)
             .where(TeamMembership.team_id == listing.team_id, TeamMembership.user_id == actor.id)
@@ -535,13 +535,18 @@ async def _sync_listing(db: AsyncSession, sync: McpWebhookSync, request: SyncReq
             .execution_options(populate_existing=True)
         )
     ).scalar_one()
-    # Access may have changed during the fetch (co-authors, teamspace membership).
+    # Access may have changed during the fetch (co-authors, role, teamspace membership).
+    # Locked until the publish commits, so a revocation either lands before this
+    # check or waits for the publish; the publish updates this row anyway.
     listing = (
         await db.execute(
-            select(McpListing).where(McpListing.id == listing.id).execution_options(populate_existing=True)
+            select(McpListing)
+            .where(McpListing.id == listing.id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
         )
     ).scalar_one()
-    actor = await _publishing_actor(db, listing, sync.enabled_by, lock_membership=True)
+    actor = await _publishing_actor(db, listing, sync.enabled_by, lock=True)
     versions = await _existing_versions(db, listing.id)
     if request.trigger == "release":
         existing = next((v for v in versions if v.version == release_version), None)
