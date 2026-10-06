@@ -42,6 +42,9 @@ class McpWebhookSync(Base):
     last_synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_synced_sha: Mapped[str | None] = mapped_column(String(40), nullable=True)
     last_version: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    # When the fetch behind the newest push-synced version started. A push sync whose
+    # fetch started earlier holds older code, so it is not published after it.
+    published_fetch_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
