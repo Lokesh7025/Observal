@@ -44,6 +44,7 @@ def upgrade() -> None:
         sa.Column("last_synced_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("last_synced_sha", sa.String(length=40), nullable=True),
         sa.Column("last_version", sa.String(length=50), nullable=True),
+        sa.Column("published_fetch_started_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=True),
         sa.ForeignKeyConstraint(["listing_id"], ["mcp_listings.id"], ondelete="CASCADE"),

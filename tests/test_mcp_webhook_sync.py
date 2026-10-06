@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Lokesh Selvam <lokeshselvam7025@gmail.com>
 # SPDX-License-Identifier: Apache-2.0
 
-"""GitHub webhook auto-sync for MCP listings.
+"""GitHub and GitLab webhook auto-sync for MCP listings.
 
 The receiver and settings routes run against a real in-memory SQLite session.
 The sync job runs real git against a local repository, so fetching, version
@@ -967,3 +967,68 @@ async def test_failures_are_recorded_for_the_owner(local_repo, monkeypatch):
             assert "no longer owns" in stored.last_sync_error
         versions, _ = await _versions(sessions, listing.id)
         assert set(versions) == {"1.0.0"}
+
+
+@pytest.mark.asyncio
+async def test_sync_stops_when_the_enabler_leaves_the_private_teamspace(local_repo, monkeypatch):
+    owner = _user()
+    team = Team(id=uuid.uuid4(), name="Weather", handle="weather", is_private=True, created_by=owner.id)
+    membership = TeamMembership(id=uuid.uuid4(), team_id=team.id, user_id=owner.id)
+    listing, ver = _listing(owner)
+    listing.is_private, listing.team_id = True, team.id
+    sync = _sync(listing, owner, "s3cret")
+    async with _database() as sessions:
+        await _seed(sessions, owner, team, membership, listing, ver, sync)
+        assert (await _run(sessions, sync.id, svc.SyncRequest("push", "main"), monkeypatch)).status == "success"
+
+        # Still the listing's submitter, so "owner" by permission, but no longer in the teamspace.
+        async with sessions() as session:
+            await session.delete(await session.get(TeamMembership, membership.id))
+            await session.commit()
+        _git(local_repo, "commit", "-q", "--allow-empty", "-m", "after removal")
+        assert await _run(sessions, sync.id, svc.SyncRequest("push", "main"), monkeypatch) is None
+        async with sessions() as session:
+            assert "no longer owns" in (await session.get(McpWebhookSync, sync.id)).last_sync_error
+        versions, _ = await _versions(sessions, listing.id)
+        assert set(versions) == {"1.0.0", "1.0.1"}
+
+
+@pytest.mark.asyncio
+async def test_an_older_fetch_that_finishes_last_is_not_published(local_repo, monkeypatch):
+    import asyncio
+    import threading
+
+    owner = _user()
+    listing, ver = _listing(owner)
+    sync = _sync(listing, owner, "s3cret")
+    real_fetch = svc._fetch_checkout
+    fetched, release = threading.Event(), threading.Event()
+
+    def slow_fetch(*args):
+        result = real_fetch(*args)
+        fetched.set()
+        release.wait(timeout=30)
+        return result
+
+    async with _database() as sessions:
+        await _seed(sessions, owner, listing, ver, sync)
+        first_sha = _git(local_repo, "rev-parse", "HEAD")
+        monkeypatch.setattr(svc, "_fetch_checkout", slow_fetch)
+        slow = asyncio.create_task(_run(sessions, sync.id, svc.SyncRequest("push", "main"), monkeypatch))
+        while not fetched.is_set():
+            await asyncio.sleep(0.01)
+
+        # A second push lands and syncs completely while the first is still in flight.
+        monkeypatch.setattr(svc, "_fetch_checkout", real_fetch)
+        _git(local_repo, "commit", "-q", "--allow-empty", "-m", "second")
+        newer = await _run(sessions, sync.id, svc.SyncRequest("push", "main"), monkeypatch)
+        assert (newer.status, newer.version) == ("success", "1.0.1")
+
+        release.set()
+        late = await slow
+        assert late.status == "skipped" and first_sha[:12] in late.detail
+        versions, stored = await _versions(sessions, listing.id)
+        assert set(versions) == {"1.0.0", "1.0.1"}
+        assert stored.latest_version_id == versions["1.0.1"].id
+        async with sessions() as session:
+            assert (await session.get(McpWebhookSync, sync.id)).last_synced_sha == newer.sha

@@ -42,7 +42,7 @@ Pushing a tag on its own does not sync. Create a release from the tag.
 
 If fetching the repository fails, the sync retries twice, 15 and then 30 seconds later, before it is marked failed. This covers network errors and a release whose tag is still being published.
 
-A push sync always fetches the branch tip when the job runs, not the commit named in the delivery. Several quick pushes therefore publish the newest code, and a commit that is already published is skipped. A release whose version already exists is skipped too. A release older than the current latest version is published but does not become the latest.
+A push sync always fetches the branch tip when the job runs, not the commit named in the delivery. Several quick pushes therefore publish the newest code, and a commit that is already published is skipped. If an earlier sync finishes after a later one, it is skipped too, so older code never becomes the latest version. A release whose version already exists is skipped too. A release older than the current latest version is published but does not become the latest.
 
 ## Set it up
 
@@ -120,7 +120,7 @@ Observal fetches the repository with the server's `GIT_CLONE_TOKEN`, the same to
 - Each listing has its own secret, stored encrypted. GitHub deliveries need a valid `X-Hub-Signature-256` signature and GitLab deliveries the matching `X-Gitlab-Token`; anything else is rejected with `401`.
 - Each listing answers only on its own provider's endpoint, so a GitLab secret is never accepted as a GitHub signature or the reverse.
 - A delivery from a different repository than the listing's git URL is rejected with `422`.
-- Synced versions are published as the user who last turned on or changed sync. If that user no longer owns the listing, syncs fail until an owner turns sync off and on again.
+- Synced versions are published as the user who last turned on or changed sync. If that user no longer owns the listing, or was removed from the teamspace of a private listing, syncs fail until an owner turns sync off and on again.
 - The receivers allow 60 deliveries per minute per client address.
 
 ## Why sync is one way

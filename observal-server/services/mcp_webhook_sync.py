@@ -36,7 +36,7 @@ from urllib.parse import urlparse
 from loguru import logger as optic
 from sqlalchemy import select
 
-from api.deps import get_effective_component_permission
+from api.deps import check_listing_visibility_async, get_effective_component_permission
 from models.mcp import ListingStatus, McpListing, McpVersion
 from models.mcp_webhook_sync import McpWebhookSync
 from models.user import User
@@ -445,6 +445,11 @@ async def enqueue_sync(sync_id: uuid.UUID, request: SyncRequest) -> None:
     await pool.enqueue_job("sync_mcp_webhook", str(sync_id), request.trigger, request.ref, request.changelog)
 
 
+def _as_utc(value: datetime) -> datetime:
+    # SQLite returns naive datetimes for timezone-aware columns.
+    return value if value.tzinfo else value.replace(tzinfo=UTC)
+
+
 async def _existing_versions(db: AsyncSession, listing_id: uuid.UUID) -> list[McpVersion]:
     result = await db.execute(select(McpVersion).where(McpVersion.listing_id == listing_id))
     return list(result.scalars().all())
@@ -459,7 +464,13 @@ async def _sync_listing(db: AsyncSession, sync: McpWebhookSync, request: SyncReq
     if not has_approved_version(listing):
         raise SyncError("The MCP server needs an approved version before it can sync")
     actor = await db.get(User, sync.enabled_by)
-    if actor is None or get_effective_component_permission(listing, actor) != "owner":
+    # The same gate as the owner routes (resolve_listing): the submitter stays "owner"
+    # forever, so someone removed from the listing's teamspace must also fail here.
+    if (
+        actor is None
+        or get_effective_component_permission(listing, actor) != "owner"
+        or not await check_listing_visibility_async(listing, actor, db)
+    ):
         raise SyncError("The user who enabled sync no longer owns this listing. Turn sync off and on again.")
     git_url = listing.git_url
     if not git_url:
@@ -472,6 +483,7 @@ async def _sync_listing(db: AsyncSession, sync: McpWebhookSync, request: SyncReq
     if request.trigger == "release" and release_version is None:
         raise SyncError(f"Release tag {request.ref} is not a semantic version")
 
+    fetch_started = datetime.now(UTC)
     tmp_dir = tempfile.mkdtemp(prefix="observal_mcp_sync_")
     try:
         try:
@@ -489,8 +501,16 @@ async def _sync_listing(db: AsyncSession, sync: McpWebhookSync, request: SyncReq
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
-    # Serialize syncs of one listing so two deliveries cannot claim the same version.
-    await db.execute(select(McpWebhookSync.id).where(McpWebhookSync.id == sync.id).with_for_update())
+    # Serialize syncs of one listing so two deliveries cannot claim the same version,
+    # and reload the row: another sync may have published while this one was fetching.
+    sync = (
+        await db.execute(
+            select(McpWebhookSync)
+            .where(McpWebhookSync.id == sync.id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+    ).scalar_one()
     versions = await _existing_versions(db, listing.id)
     if request.trigger == "release":
         existing = next((v for v in versions if v.version == release_version), None)
@@ -503,7 +523,13 @@ async def _sync_listing(db: AsyncSession, sync: McpWebhookSync, request: SyncReq
             return SyncOutcome(
                 status="skipped", detail=f"Commit {sha[:12]} is already version {existing.version}", sha=sha
             )
+        # Two pushes close together: the one fetched first can finish last. Its code is
+        # older, so publishing it would make stale code the latest version.
+        newest = sync.published_fetch_started_at
+        if newest is not None and fetch_started < _as_utc(newest):
+            return SyncOutcome(status="skipped", detail=f"A newer commit was published while {sha[:12]} was syncing")
         version = next_push_version([v.version for v in versions], declared)
+        sync.published_fetch_started_at = fetch_started
 
     ver = build_version(
         listing,
