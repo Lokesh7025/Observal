@@ -39,6 +39,7 @@ from sqlalchemy import select
 from api.deps import check_listing_visibility_async, get_effective_component_permission
 from models.mcp import ListingStatus, McpListing, McpVersion
 from models.mcp_webhook_sync import McpWebhookSync
+from models.team import TeamMembership
 from models.user import User
 from schemas.mcp_webhook_sync import valid_ref_name
 from services.agent_lock import CONTENT_FIELDS
@@ -445,6 +446,36 @@ async def enqueue_sync(sync_id: uuid.UUID, request: SyncRequest) -> None:
     await pool.enqueue_job("sync_mcp_webhook", str(sync_id), request.trigger, request.ref, request.changelog)
 
 
+async def _publishing_actor(
+    db: AsyncSession, listing: McpListing, user_id: uuid.UUID, *, lock_membership: bool = False
+) -> User:
+    """The user synced versions are published as, if they may still publish.
+
+    The same gate as the owner routes (resolve_listing): the submitter stays
+    "owner" forever, so someone removed from a private listing's teamspace fails
+    too. With ``lock_membership``, their membership row stays locked until the
+    publish commits, so a removal from the teamspace waits for it.
+    """
+    actor = (
+        await db.execute(select(User).where(User.id == user_id).execution_options(populate_existing=True))
+    ).scalar_one_or_none()
+    if actor is not None and lock_membership and listing.is_private and listing.team_id is not None:
+        await db.execute(
+            select(TeamMembership.id)
+            .where(TeamMembership.team_id == listing.team_id, TeamMembership.user_id == actor.id)
+            .with_for_update()
+        )
+    if (
+        actor is None
+        or get_effective_component_permission(listing, actor) != "owner"
+        or not await check_listing_visibility_async(listing, actor, db)
+    ):
+        raise SyncError(
+            "The user who enabled sync no longer has owner access to this listing. Turn sync off and on again."
+        )
+    return actor
+
+
 def _as_utc(value: datetime) -> datetime:
     # SQLite returns naive datetimes for timezone-aware columns.
     return value if value.tzinfo else value.replace(tzinfo=UTC)
@@ -463,15 +494,8 @@ async def _sync_listing(db: AsyncSession, sync: McpWebhookSync, request: SyncReq
         return SyncOutcome(status="skipped", detail="The listing is archived")
     if not has_approved_version(listing):
         raise SyncError("The MCP server needs an approved version before it can sync")
-    actor = await db.get(User, sync.enabled_by)
-    # The same gate as the owner routes (resolve_listing): the submitter stays "owner"
-    # forever, so someone removed from the listing's teamspace must also fail here.
-    if (
-        actor is None
-        or get_effective_component_permission(listing, actor) != "owner"
-        or not await check_listing_visibility_async(listing, actor, db)
-    ):
-        raise SyncError("The user who enabled sync no longer owns this listing. Turn sync off and on again.")
+    # Checked now to fail before fetching, and again below right before publishing.
+    await _publishing_actor(db, listing, sync.enabled_by)
     git_url = listing.git_url
     if not git_url:
         raise SyncError("The listing has no git repository URL")
@@ -511,6 +535,13 @@ async def _sync_listing(db: AsyncSession, sync: McpWebhookSync, request: SyncReq
             .execution_options(populate_existing=True)
         )
     ).scalar_one()
+    # Access may have changed during the fetch (co-authors, teamspace membership).
+    listing = (
+        await db.execute(
+            select(McpListing).where(McpListing.id == listing.id).execution_options(populate_existing=True)
+        )
+    ).scalar_one()
+    actor = await _publishing_actor(db, listing, sync.enabled_by, lock_membership=True)
     versions = await _existing_versions(db, listing.id)
     if request.trigger == "release":
         existing = next((v for v in versions if v.version == release_version), None)

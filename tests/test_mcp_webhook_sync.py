@@ -964,7 +964,7 @@ async def test_failures_are_recorded_for_the_owner(local_repo, monkeypatch):
         assert await _run(sessions, sync.id, svc.SyncRequest("push", "main"), monkeypatch) is None
         async with sessions() as session:
             stored = await session.get(McpWebhookSync, sync.id)
-            assert "no longer owns" in stored.last_sync_error
+            assert "no longer has owner access" in stored.last_sync_error
         versions, _ = await _versions(sessions, listing.id)
         assert set(versions) == {"1.0.0"}
 
@@ -988,9 +988,48 @@ async def test_sync_stops_when_the_enabler_leaves_the_private_teamspace(local_re
         _git(local_repo, "commit", "-q", "--allow-empty", "-m", "after removal")
         assert await _run(sessions, sync.id, svc.SyncRequest("push", "main"), monkeypatch) is None
         async with sessions() as session:
-            assert "no longer owns" in (await session.get(McpWebhookSync, sync.id)).last_sync_error
+            assert "no longer has owner access" in (await session.get(McpWebhookSync, sync.id)).last_sync_error
         versions, _ = await _versions(sessions, listing.id)
         assert set(versions) == {"1.0.0", "1.0.1"}
+
+
+@pytest.mark.asyncio
+async def test_removal_from_the_teamspace_during_a_fetch_stops_the_publish(local_repo, monkeypatch):
+    import asyncio
+    import threading
+
+    owner = _user()
+    team = Team(id=uuid.uuid4(), name="Weather", handle="weather", is_private=True, created_by=owner.id)
+    membership = TeamMembership(id=uuid.uuid4(), team_id=team.id, user_id=owner.id)
+    listing, ver = _listing(owner)
+    listing.is_private, listing.team_id = True, team.id
+    sync = _sync(listing, owner, "s3cret")
+    real_fetch = svc._fetch_checkout
+    fetched, release = threading.Event(), threading.Event()
+
+    def slow_fetch(*args):
+        result = real_fetch(*args)
+        fetched.set()
+        release.wait(timeout=30)
+        return result
+
+    async with _database() as sessions:
+        await _seed(sessions, owner, team, membership, listing, ver, sync)
+        monkeypatch.setattr(svc, "_fetch_checkout", slow_fetch)
+        job = asyncio.create_task(_run(sessions, sync.id, svc.SyncRequest("push", "main"), monkeypatch))
+        while not fetched.is_set():
+            await asyncio.sleep(0.01)
+
+        # Passed the check before fetching, then removed from the teamspace mid-fetch.
+        async with sessions() as session:
+            await session.delete(await session.get(TeamMembership, membership.id))
+            await session.commit()
+        release.set()
+        assert await job is None
+        async with sessions() as session:
+            assert "no longer has owner access" in (await session.get(McpWebhookSync, sync.id)).last_sync_error
+        versions, _ = await _versions(sessions, listing.id)
+        assert set(versions) == {"1.0.0"}
 
 
 @pytest.mark.asyncio

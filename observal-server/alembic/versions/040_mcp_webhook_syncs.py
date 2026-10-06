@@ -26,6 +26,13 @@ def upgrade() -> None:
     # docker/entrypoint.sh runs Base.metadata.create_all before Alembic, so on an
     # upgraded install this table can already exist.
     if _has_table("mcp_webhook_syncs"):
+        # A table created by an earlier build of this revision can lack later columns.
+        columns = {c["name"] for c in sa.inspect(op.get_bind()).get_columns("mcp_webhook_syncs")}
+        if "published_fetch_started_at" not in columns:
+            op.add_column(
+                "mcp_webhook_syncs",
+                sa.Column("published_fetch_started_at", sa.DateTime(timezone=True), nullable=True),
+            )
         return
     op.create_table(
         "mcp_webhook_syncs",

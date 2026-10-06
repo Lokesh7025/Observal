@@ -120,7 +120,7 @@ Observal fetches the repository with the server's `GIT_CLONE_TOKEN`, the same to
 - Each listing has its own secret, stored encrypted. GitHub deliveries need a valid `X-Hub-Signature-256` signature and GitLab deliveries the matching `X-Gitlab-Token`; anything else is rejected with `401`.
 - Each listing answers only on its own provider's endpoint, so a GitLab secret is never accepted as a GitHub signature or the reverse.
 - A delivery from a different repository than the listing's git URL is rejected with `422`.
-- Synced versions are published as the user who last turned on or changed sync. If that user no longer owns the listing, or was removed from the teamspace of a private listing, syncs fail until an owner turns sync off and on again.
+- Synced versions are published as the user who last turned on or changed sync. If that user no longer has owner-level access to the listing (as its owner, a co-author or an admin), or was removed from the teamspace of a private listing, syncs fail until an owner turns sync off and on again.
 - The receivers allow 60 deliveries per minute per client address.
 
 ## Why sync is one way
