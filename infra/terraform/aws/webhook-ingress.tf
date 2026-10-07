@@ -3,49 +3,30 @@
 
 # Public webhook entry point for private installs (opt-in).
 #
-# When the main ALB is internal (alb_scheme = "internal") or locked to company
-# CIDRs, github.com and gitlab.com cannot deliver webhooks, so MCP repository
-# sync has nothing to react to. This adds a second, internet-facing ALB that:
-#   - only accepts traffic from the providers' published webhook IP ranges,
-#   - only listens on HTTPS (both providers verify the certificate),
-#   - forwards only POST /api/v1/webhooks/<provider>/* to the api tasks,
-#   - answers 404 for everything else, so the UI, API and login stay private.
-# The receiver also authenticates each delivery (GitHub HMAC signature, GitLab
-# secret token) before doing anything.
+# When the main ALB is internal (alb_scheme = "internal"), github.com and
+# gitlab.com cannot deliver webhooks, so MCP repository sync has nothing to
+# react to. This adds an API Gateway HTTP API that:
+#   - has one route per provider, POST /api/v1/webhooks/<provider>/mcp/{sync_id},
+#     and answers 404 for everything else, so the UI, API and login stay private,
+#   - reaches the existing ALB privately through a VPC link (no public subnets,
+#     internet gateway or second load balancer needed),
+#   - throttles deliveries before they reach the VPC.
+# The receiver authenticates each delivery (GitHub HMAC signature, GitLab secret
+# token) before doing anything, so there is no source IP allowlist to keep current.
+#
+# The ALB must be internal: API Gateway connects to the addresses the ALB's DNS
+# name resolves to, and an internet-facing ALB resolves to public addresses the
+# VPC link cannot reach.
 
 locals {
   webhook_ingress_enabled = var.enable_webhook_ingress
+  webhook_custom_domain   = local.webhook_ingress_enabled && var.webhook_domain_name != ""
   webhook_zone_id         = var.webhook_route53_zone_id != "" ? var.webhook_route53_zone_id : var.route53_zone_id
-  webhook_public_url      = local.webhook_ingress_enabled ? "https://${var.webhook_domain_name}" : ""
-  webhook_github          = local.webhook_ingress_enabled && contains(var.webhook_providers, "github")
-  webhook_gitlab          = local.webhook_ingress_enabled && contains(var.webhook_providers, "gitlab")
-  webhook_paths           = [for provider in var.webhook_providers : "/api/v1/webhooks/${provider}/*"]
-
-  # GitHub also publishes IPv6 ranges; the ALB is IPv4-only, so keep IPv4.
-  github_hook_cidrs = local.webhook_github && length(data.http.github_meta) > 0 ? [
-    for cidr in jsondecode(data.http.github_meta[0].response_body).hooks : cidr if !strcontains(cidr, ":")
-  ] : []
-  webhook_ingress_cidrs = length(var.webhook_ingress_cidrs) > 0 ? var.webhook_ingress_cidrs : distinct(concat(
-    local.github_hook_cidrs,
-    local.webhook_gitlab ? var.gitlab_webhook_cidrs : [],
-  ))
-}
-
-# Read on every plan, so re-applying picks up changes to GitHub's ranges.
-data "http" "github_meta" {
-  count = local.webhook_github && length(var.webhook_ingress_cidrs) == 0 ? 1 : 0
-  url   = "https://api.github.com/meta"
-
-  request_headers = {
-    Accept = "application/vnd.github+json"
-  }
-
-  lifecycle {
-    postcondition {
-      condition     = self.status_code == 200
-      error_message = "Could not read GitHub's webhook IP ranges from https://api.github.com/meta (HTTP ${self.status_code}). Retry, or set webhook_ingress_cidrs explicitly."
-    }
-  }
+  webhook_public_url = !local.webhook_ingress_enabled ? "" : (
+    local.webhook_custom_domain ? "https://${var.webhook_domain_name}" : aws_apigatewayv2_api.webhook[0].api_endpoint
+  )
+  # The VPC link connects to the listener app traffic already uses.
+  webhook_alb_port = local.enable_tls ? 443 : 80
 }
 
 resource "terraform_data" "webhook_ingress_validation" {
@@ -53,108 +34,141 @@ resource "terraform_data" "webhook_ingress_validation" {
 
   lifecycle {
     precondition {
-      condition     = var.webhook_domain_name != ""
-      error_message = "webhook_domain_name is required when enable_webhook_ingress is true (GitHub and GitLab need a hostname with a valid TLS certificate)."
+      condition     = var.alb_scheme == "internal"
+      error_message = "enable_webhook_ingress needs alb_scheme = \"internal\": the API Gateway VPC link cannot reach an internet-facing ALB. An internet-facing ALB open to the internet does not need this endpoint."
     }
     precondition {
-      condition     = local.webhook_zone_id != ""
-      error_message = "A public Route 53 zone for webhook_domain_name is required: set webhook_route53_zone_id (or route53_zone_id)."
-    }
-    precondition {
-      condition     = local.should_create_vpc || (var.public_subnet_ids != null && length(coalesce(var.public_subnet_ids, [])) >= 2)
-      error_message = "enable_webhook_ingress needs at least 2 public subnets: set public_subnet_ids when vpc_id is set, even if alb_scheme is 'internal'."
-    }
-    precondition {
-      condition     = length(local.webhook_ingress_cidrs) > 0
-      error_message = "No webhook source ranges: none were found for webhook_providers and webhook_ingress_cidrs is empty."
+      condition     = !local.webhook_custom_domain || local.webhook_zone_id != ""
+      error_message = "webhook_domain_name needs a public Route 53 zone: set webhook_route53_zone_id (or route53_zone_id)."
     }
   }
 }
 
-# ── Security group ─────────────────────────────────────────────────────────
+# ── VPC link to the existing ALB ───────────────────────────────────────────
 
-resource "aws_security_group" "webhook_alb" {
+resource "aws_security_group" "webhook_vpc_link" {
   count       = local.webhook_ingress_enabled ? 1 : 0
-  name        = "${local.name}-webhook-alb"
-  description = "Git provider webhook deliveries only."
+  name        = "${local.name}-webhook-vpc-link"
+  description = "API Gateway VPC link for git provider webhooks. Egress to the ALB port only."
   vpc_id      = local.vpc_id
 
-  # tfsec:ignore:aws-ec2-no-public-ingress-sgr Limited to the providers' webhook ranges (or var.webhook_ingress_cidrs).
-  ingress {
-    description = "HTTPS from git provider webhook ranges"
-    from_port   = 443
-    to_port     = 443
-    protocol    = "tcp"
-    cidr_blocks = local.webhook_ingress_cidrs
-  }
-
+  # The ALB's security group admits this group, so this side uses the VPC CIDR
+  # rather than the ALB group (two groups referencing each other form a cycle).
   egress {
-    description = "API tasks inside the VPC"
-    from_port   = 8000
-    to_port     = 8000
+    description = "Webhook deliveries to the ALB"
+    from_port   = local.webhook_alb_port
+    to_port     = local.webhook_alb_port
     protocol    = "tcp"
     cidr_blocks = [local.vpc_cidr]
   }
 
-  tags = { Name = "${local.name}-webhook-alb-sg" }
+  tags = { Name = "${local.name}-webhook-vpc-link-sg" }
 }
 
-# Created task SGs get an inline rule in security.tf; a BYO task SG gets this one.
-resource "aws_vpc_security_group_ingress_rule" "ecs_from_webhook_alb" {
-  count                        = local.webhook_ingress_enabled && !local.create_ecs_sg ? 1 : 0
-  security_group_id            = var.ecs_security_group_id
-  description                  = "API HTTP from the webhook ALB"
-  from_port                    = 8000
-  to_port                      = 8000
+# A created ALB security group gets an inline rule in security.tf; a BYO one gets this.
+resource "aws_vpc_security_group_ingress_rule" "alb_from_webhook_vpc_link" {
+  count                        = local.webhook_ingress_enabled && !local.create_alb_sg ? 1 : 0
+  security_group_id            = var.alb_security_group_id
+  description                  = "Git provider webhooks from the API Gateway VPC link"
+  from_port                    = local.webhook_alb_port
+  to_port                      = local.webhook_alb_port
   ip_protocol                  = "tcp"
-  referenced_security_group_id = aws_security_group.webhook_alb[0].id
+  referenced_security_group_id = aws_security_group.webhook_vpc_link[0].id
 }
 
-# ── Load balancer ──────────────────────────────────────────────────────────
-
-# tfsec:ignore:aws-elb-alb-not-public Public by design; reachable only from the providers' webhook ranges.
-resource "aws_lb" "webhook" {
+resource "aws_apigatewayv2_vpc_link" "webhook" {
   count              = local.webhook_ingress_enabled ? 1 : 0
-  name               = "${local.name}-hooks"
-  internal           = false
-  load_balancer_type = "application"
-  security_groups    = [aws_security_group.webhook_alb[0].id]
-  subnets            = local.public_subnet_ids
-
-  drop_invalid_header_fields = true
-  tags                       = { Name = "${local.name}-hooks" }
-
-  depends_on = [terraform_data.webhook_ingress_validation]
+  name               = "${local.name}-webhooks"
+  subnet_ids         = local.private_subnet_ids
+  security_group_ids = [aws_security_group.webhook_vpc_link[0].id]
+  tags               = { Name = "${local.name}-webhooks" }
 }
 
-# A target group can belong to only one load balancer, so the api service
-# registers into this one as well as the main api target group.
-resource "aws_lb_target_group" "api_webhook" {
-  count       = local.webhook_ingress_enabled ? 1 : 0
-  name        = "${local.name}-hooks-tg"
-  port        = 8000
-  protocol    = "HTTP"
-  vpc_id      = local.vpc_id
-  target_type = "ip"
+# ── HTTP API ───────────────────────────────────────────────────────────────
 
-  deregistration_delay = 30
+resource "aws_apigatewayv2_api" "webhook" {
+  count         = local.webhook_ingress_enabled ? 1 : 0
+  name          = "${local.name}-webhooks"
+  description   = "Git provider webhook deliveries for MCP repository sync."
+  protocol_type = "HTTP"
+  # With a custom domain, that is the only way in.
+  disable_execute_api_endpoint = local.webhook_custom_domain
+  tags                         = { Name = "${local.name}-webhooks" }
+}
 
-  health_check {
-    path                = "/readyz"
-    matcher             = "200-399"
-    interval            = 30
-    timeout             = 10
-    healthy_threshold   = 2
-    unhealthy_threshold = 3
+resource "aws_apigatewayv2_integration" "webhook" {
+  count              = local.webhook_ingress_enabled ? 1 : 0
+  api_id             = aws_apigatewayv2_api.webhook[0].id
+  integration_type   = "HTTP_PROXY"
+  integration_method = "POST"
+  integration_uri    = local.enable_tls ? aws_lb_listener.https[0].arn : aws_lb_listener.http.arn
+  connection_type    = "VPC_LINK"
+  connection_id      = aws_apigatewayv2_vpc_link.webhook[0].id
+  # GitHub and GitLab give up after 10 seconds; the receiver answers well within that.
+  timeout_milliseconds = 10000
+
+  request_parameters = {
+    "overwrite:path" = "$request.path"
   }
 
-  tags = { Name = "${local.name}-hooks-tg" }
+  dynamic "tls_config" {
+    for_each = local.enable_tls ? [1] : []
+    content {
+      server_name_to_verify = var.domain_name
+    }
+  }
 }
 
-# ── TLS ────────────────────────────────────────────────────────────────────
+# Path parameters cannot contain "/", so nothing but these exact paths matches.
+resource "aws_apigatewayv2_route" "webhook" {
+  for_each  = local.webhook_ingress_enabled ? toset(var.webhook_providers) : toset([])
+  api_id    = aws_apigatewayv2_api.webhook[0].id
+  route_key = "POST /api/v1/webhooks/${each.value}/mcp/{sync_id}"
+  target    = "integrations/${aws_apigatewayv2_integration.webhook[0].id}"
+}
+
+resource "aws_cloudwatch_log_group" "webhook" {
+  count             = local.webhook_ingress_enabled ? 1 : 0
+  name              = "/aws/apigateway/${local.name}-webhooks"
+  retention_in_days = var.log_retention_days
+}
+
+resource "aws_apigatewayv2_stage" "webhook" {
+  count       = local.webhook_ingress_enabled ? 1 : 0
+  api_id      = aws_apigatewayv2_api.webhook[0].id
+  name        = "$default"
+  auto_deploy = true
+
+  default_route_settings {
+    throttling_rate_limit  = var.webhook_throttle_rate_limit
+    throttling_burst_limit = var.webhook_throttle_burst_limit
+  }
+
+  access_log_settings {
+    destination_arn = aws_cloudwatch_log_group.webhook[0].arn
+    format = jsonencode({
+      requestId          = "$context.requestId"
+      requestTime        = "$context.requestTime"
+      sourceIp           = "$context.identity.sourceIp"
+      routeKey           = "$context.routeKey"
+      path               = "$context.path"
+      status             = "$context.status"
+      integrationStatus  = "$context.integrationStatus"
+      integrationError   = "$context.integrationErrorMessage"
+      integrationLatency = "$context.integrationLatency"
+      responseLength     = "$context.responseLength"
+    })
+  }
+
+  depends_on = [aws_apigatewayv2_route.webhook]
+}
+
+# ── Optional custom domain ─────────────────────────────────────────────────
+# The execute-api URL already has a valid certificate. A custom domain keeps
+# the webhook URL stable if the API is ever recreated.
 
 resource "aws_acm_certificate" "webhook" {
-  count             = local.webhook_ingress_enabled ? 1 : 0
+  count             = local.webhook_custom_domain ? 1 : 0
   domain_name       = var.webhook_domain_name
   validation_method = "DNS"
 
@@ -166,7 +180,7 @@ resource "aws_acm_certificate" "webhook" {
 }
 
 resource "aws_route53_record" "webhook_cert_validation" {
-  for_each = local.webhook_ingress_enabled ? {
+  for_each = local.webhook_custom_domain ? {
     for dvo in aws_acm_certificate.webhook[0].domain_validation_options : dvo.domain_name => {
       name   = dvo.resource_record_name
       record = dvo.resource_record_value
@@ -183,65 +197,38 @@ resource "aws_route53_record" "webhook_cert_validation" {
 }
 
 resource "aws_acm_certificate_validation" "webhook" {
-  count                   = local.webhook_ingress_enabled ? 1 : 0
+  count                   = local.webhook_custom_domain ? 1 : 0
   certificate_arn         = aws_acm_certificate.webhook[0].arn
   validation_record_fqdns = [for r in aws_route53_record.webhook_cert_validation : r.fqdn]
 }
 
-# ── Listener: webhook path only ────────────────────────────────────────────
+resource "aws_apigatewayv2_domain_name" "webhook" {
+  count       = local.webhook_custom_domain ? 1 : 0
+  domain_name = var.webhook_domain_name
 
-resource "aws_lb_listener" "webhook" {
-  count             = local.webhook_ingress_enabled ? 1 : 0
-  load_balancer_arn = aws_lb.webhook[0].arn
-  port              = 443
-  protocol          = "HTTPS"
-  ssl_policy        = "ELBSecurityPolicy-TLS13-1-2-2021-06"
-  certificate_arn   = aws_acm_certificate_validation.webhook[0].certificate_arn
-
-  default_action {
-    type = "fixed-response"
-    fixed_response {
-      content_type = "text/plain"
-      message_body = "Not found"
-      status_code  = "404"
-    }
+  domain_name_configuration {
+    certificate_arn = aws_acm_certificate_validation.webhook[0].certificate_arn
+    endpoint_type   = "REGIONAL"
+    security_policy = "TLS_1_2"
   }
 }
 
-resource "aws_lb_listener_rule" "webhook_forward" {
-  count        = local.webhook_ingress_enabled ? 1 : 0
-  listener_arn = aws_lb_listener.webhook[0].arn
-  priority     = 100
-
-  action {
-    type             = "forward"
-    target_group_arn = aws_lb_target_group.api_webhook[0].arn
-  }
-
-  condition {
-    path_pattern {
-      values = local.webhook_paths
-    }
-  }
-
-  condition {
-    http_request_method {
-      values = ["POST"]
-    }
-  }
+resource "aws_apigatewayv2_api_mapping" "webhook" {
+  count       = local.webhook_custom_domain ? 1 : 0
+  api_id      = aws_apigatewayv2_api.webhook[0].id
+  domain_name = aws_apigatewayv2_domain_name.webhook[0].id
+  stage       = aws_apigatewayv2_stage.webhook[0].id
 }
-
-# ── DNS ────────────────────────────────────────────────────────────────────
 
 resource "aws_route53_record" "webhook" {
-  count   = local.webhook_ingress_enabled ? 1 : 0
+  count   = local.webhook_custom_domain ? 1 : 0
   zone_id = local.webhook_zone_id
   name    = var.webhook_domain_name
   type    = "A"
 
   alias {
-    name                   = aws_lb.webhook[0].dns_name
-    zone_id                = aws_lb.webhook[0].zone_id
-    evaluate_target_health = true
+    name                   = aws_apigatewayv2_domain_name.webhook[0].domain_name_configuration[0].target_domain_name
+    zone_id                = aws_apigatewayv2_domain_name.webhook[0].domain_name_configuration[0].hosted_zone_id
+    evaluate_target_health = false
   }
 }

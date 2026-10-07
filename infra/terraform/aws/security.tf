@@ -1,5 +1,4 @@
 # SPDX-FileCopyrightText: 2026 Apoorv Garg <apoorvgarg.21@gmail.com>
-# SPDX-FileCopyrightText: 2026 Lokesh <lokeshselvam7025@gmail.com>
 # SPDX-License-Identifier: Apache-2.0
 
 # ── ALB ────────────────────────────────────────────────────────────────────
@@ -25,6 +24,17 @@ resource "aws_security_group" "alb" {
     to_port     = 443
     protocol    = "tcp"
     cidr_blocks = var.alb_ingress_cidrs
+  }
+
+  dynamic "ingress" {
+    for_each = local.webhook_ingress_enabled ? [1] : []
+    content {
+      description     = "Git provider webhooks from the API Gateway VPC link"
+      from_port       = local.webhook_alb_port
+      to_port         = local.webhook_alb_port
+      protocol        = "tcp"
+      security_groups = [aws_security_group.webhook_vpc_link[0].id]
+    }
   }
 
   # tfsec:ignore:aws-ec2-no-public-egress-sgr ALB egress is constrained by routing to in-VPC targets.
@@ -60,17 +70,6 @@ resource "aws_security_group" "ecs_tasks" {
     to_port         = 3000
     protocol        = "tcp"
     security_groups = [local.alb_sg_id]
-  }
-
-  dynamic "ingress" {
-    for_each = local.webhook_ingress_enabled ? [1] : []
-    content {
-      description     = "API HTTP from the webhook ALB"
-      from_port       = 8000
-      to_port         = 8000
-      protocol        = "tcp"
-      security_groups = [aws_security_group.webhook_alb[0].id]
-    }
   }
 
   # tfsec:ignore:aws-ec2-no-public-egress-sgr Required: image pulls (ghcr.io), AWS API endpoints (SSM, CloudWatch, ECR), Postgres/Redis/ClickHouse in-VPC.

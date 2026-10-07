@@ -56,7 +56,7 @@ Set `domain_name`, `route53_zone_id`, and `enable_tls = true` to provision an AC
 
 ## Git webhooks on a private install
 
-With `alb_scheme = "internal"` or a restricted `alb_ingress_cidrs`, github.com and gitlab.com cannot deliver the webhooks that MCP repository sync relies on. Set `enable_webhook_ingress = true`, `webhook_providers` (`github`, `gitlab`, or both) and `webhook_domain_name` to add a second, public ALB that accepts only `POST /api/v1/webhooks/<provider>/*` over HTTPS from those providers' webhook IP ranges, and answers `404` to everything else. See [Git webhooks on a private install](../../../docs/self-hosting/aws-terraform.md#git-webhooks-on-a-private-install).
+With `alb_scheme = "internal"`, github.com and gitlab.com cannot deliver the webhooks that MCP repository sync relies on. Set `enable_webhook_ingress = true` and `webhook_providers` (`github`, `gitlab`, or both) to add an API Gateway HTTP API with one route per provider, `POST /api/v1/webhooks/<provider>/mcp/{sync_id}`, that reaches the ALB privately through a VPC link and answers `404` to everything else. See [Git webhooks on a private install](../../../docs/self-hosting/aws-terraform.md#git-webhooks-on-a-private-install).
 
 ## Differences from Enterprise Module
 
