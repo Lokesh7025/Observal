@@ -278,22 +278,12 @@ resource "aws_ecs_service" "api" {
     container_port   = 8000
   }
 
-  dynamic "load_balancer" {
-    for_each = aws_lb_target_group.api_webhook
-    content {
-      target_group_arn = load_balancer.value.arn
-      container_name   = "api"
-      container_port   = 8000
-    }
-  }
-
   lifecycle {
     ignore_changes = [desired_count]
   }
 
   depends_on = [
     aws_lb_listener.http,
-    aws_lb_listener_rule.webhook_forward,
     null_resource.run_init,
   ]
 

@@ -13,13 +13,8 @@ output "alb_dns_name" {
 }
 
 output "webhook_public_url" {
-  description = "Public base URL GitHub and GitLab use for webhook deliveries (empty unless enable_webhook_ingress is true). The MCP Sync tab shows full webhook URLs under it."
+  description = "Public base URL GitHub and GitLab use for webhook deliveries: the custom domain or the API Gateway execute-api URL (empty unless enable_webhook_ingress is true). The MCP Sync tab shows full webhook URLs under it."
   value       = local.webhook_public_url
-}
-
-output "webhook_ingress_cidrs" {
-  description = "Source ranges allowed through the webhook load balancer. Re-apply when GitHub publishes new webhook ranges."
-  value       = local.webhook_ingress_cidrs
 }
 
 output "ecs_cluster_name" {

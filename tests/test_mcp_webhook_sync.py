@@ -653,6 +653,62 @@ async def test_receiver_queues_signed_push_without_a_user_token(monkeypatch):
             assert (stored.last_event, stored.last_sync_status) == ("push", "queued")
 
 
+def _receiver_request(sync_id, peer: str, forwarded_for: str | None = None):
+    from starlette.requests import Request
+
+    headers = [(b"x-forwarded-for", forwarded_for.encode())] if forwarded_for else []
+    scope = {
+        "type": "http",
+        "method": "POST",
+        "path": f"/api/v1/webhooks/github/mcp/{sync_id}",
+        "headers": headers,
+        "query_string": b"",
+        "client": (peer, 40000),
+        "path_params": {"sync_id": sync_id},
+    }
+    return Request(scope)
+
+
+def test_receiver_rate_limit_is_per_sync_even_behind_one_proxy_address(monkeypatch):
+    import api.ratelimit as ratelimit
+    from api.routes.mcp_webhook_sync import _webhook_rate_key
+
+    monkeypatch.setattr(ratelimit.ds, "get_sync", lambda key: "10.0.0.0/8")
+    a, b = uuid.uuid4(), uuid.uuid4()
+
+    # API Gateway: the ALB (10.0.0.5) forwards for the VPC link (10.0.1.9), never the sender.
+    via_gateway_a = _webhook_rate_key(_receiver_request(a, "10.0.0.5", "10.0.1.9"))
+    via_gateway_b = _webhook_rate_key(_receiver_request(b, "10.0.0.5", "10.0.1.9"))
+    assert via_gateway_a != via_gateway_b
+
+    # A public ALB still separates senders on the same hook.
+    github = _webhook_rate_key(_receiver_request(a, "10.0.0.5", "140.82.115.1"))
+    attacker = _webhook_rate_key(_receiver_request(a, "10.0.0.5", "198.51.100.7"))
+    assert len({github, attacker, via_gateway_a}) == 3
+
+
+@pytest.mark.asyncio
+async def test_flooding_one_webhook_url_does_not_throttle_another(monkeypatch):
+    from limits.storage import MemoryStorage
+    from limits.strategies import FixedWindowRateLimiter
+
+    from api.ratelimit import limiter
+
+    storage = MemoryStorage()
+    monkeypatch.setattr(limiter, "_storage", storage)
+    monkeypatch.setattr(limiter, "_limiter", FixedWindowRateLimiter(storage))
+    async with _database() as sessions, _api(sessions, None, monkeypatch) as (client, _queued):
+        limiter.enabled = True
+        try:
+            flooded, other = uuid.uuid4(), uuid.uuid4()
+            statuses = [(await _deliver(client, flooded, _push())).status_code for _ in range(61)]
+            assert statuses[:60] == [404] * 60
+            assert statuses[60] == 429
+            assert (await _deliver(client, other, _push())).status_code == 404
+        finally:
+            limiter.enabled = False
+
+
 @pytest.mark.asyncio
 async def test_receiver_rejects_bad_signatures_and_unknown_hooks(monkeypatch):
     owner = _user()

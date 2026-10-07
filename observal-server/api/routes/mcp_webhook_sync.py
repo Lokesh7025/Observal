@@ -13,7 +13,7 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.deps import get_db, get_effective_component_permission, require_role, resolve_listing
-from api.ratelimit import limiter
+from api.ratelimit import _get_real_ip, limiter
 from models.mcp import ListingStatus, McpListing
 from models.mcp_webhook_sync import McpWebhookSync
 from models.user import User, UserRole
@@ -265,8 +265,17 @@ async def _handle_delivery(db: AsyncSession, sync: McpWebhookSync, event: str, p
     return McpWebhookDeliveryResponse(status="queued", trigger=plan.trigger, ref=plan.ref)
 
 
+def _webhook_rate_key(request: Request) -> str:
+    """One bucket per sync and sender, so junk sent to one webhook URL cannot use up another's.
+
+    Behind the API Gateway webhook endpoint every delivery reaches the app from the VPC
+    link's address, so the sync id is what keeps hooks apart there.
+    """
+    return f"mcp-webhook:{request.path_params.get('sync_id')}:{_get_real_ip(request)}"
+
+
 @webhook_router.post("/github/mcp/{sync_id}", response_model=McpWebhookDeliveryResponse, status_code=202)
-@limiter.limit("60/minute")
+@limiter.limit("60/minute", key_func=_webhook_rate_key)
 async def receive_github_webhook(
     sync_id: uuid.UUID,
     request: Request,
@@ -283,7 +292,7 @@ async def receive_github_webhook(
 
 
 @webhook_router.post("/gitlab/mcp/{sync_id}", response_model=McpWebhookDeliveryResponse, status_code=202)
-@limiter.limit("60/minute")
+@limiter.limit("60/minute", key_func=_webhook_rate_key)
 async def receive_gitlab_webhook(
     sync_id: uuid.UUID,
     request: Request,

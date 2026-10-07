@@ -214,19 +214,18 @@ variable "alb_scheme" {
 }
 
 # ── Git webhook ingress (optional) ─────────────────────────────────────────
-# For private installs (alb_scheme = "internal" or a restricted
-# alb_ingress_cidrs) that use MCP repository sync. Adds a separate
-# internet-facing ALB that only accepts GitHub and/or GitLab webhook
-# deliveries. See webhook-ingress.tf.
+# For private installs (alb_scheme = "internal") that use MCP repository sync.
+# Adds an API Gateway HTTP API that forwards only GitHub and/or GitLab webhook
+# deliveries to the ALB through a VPC link. See webhook-ingress.tf.
 
 variable "enable_webhook_ingress" {
-  description = "Create a public HTTPS load balancer that only forwards git provider webhook deliveries (POST /api/v1/webhooks/<provider>/*) from the providers' IP ranges, so MCP repository sync works on a private install."
+  description = "Create a public API Gateway endpoint that forwards only git provider webhook deliveries (POST /api/v1/webhooks/<provider>/mcp/{sync_id}) to the ALB through a VPC link, so MCP repository sync works on a private install. Requires alb_scheme = \"internal\"."
   type        = bool
   default     = false
 }
 
 variable "webhook_providers" {
-  description = "Providers whose webhooks the webhook load balancer accepts: github, gitlab, or both. Each adds its webhook path and, unless webhook_ingress_cidrs is set, its published source ranges."
+  description = "Providers whose webhooks the endpoint accepts: github, gitlab, or both. Each adds one route."
   type        = list(string)
   default     = ["github"]
 
@@ -237,7 +236,7 @@ variable "webhook_providers" {
 }
 
 variable "webhook_domain_name" {
-  description = "Public hostname for the webhook load balancer (e.g. hooks.observal.example.com). Required when enable_webhook_ingress is true."
+  description = "Optional custom hostname for the webhook endpoint (e.g. hooks.observal.example.com). Empty uses the API Gateway execute-api URL, which already has a valid certificate."
   type        = string
   default     = ""
 }
@@ -248,16 +247,16 @@ variable "webhook_route53_zone_id" {
   default     = ""
 }
 
-variable "webhook_ingress_cidrs" {
-  description = "IPv4 CIDRs allowed to reach the webhook load balancer, replacing the providers' published ranges. Set this for GitHub Enterprise Cloud with data residency (*.ghe.com), or a self-managed GitLab or GitHub server outside your network."
-  type        = list(string)
-  default     = []
+variable "webhook_throttle_rate_limit" {
+  description = "Steady-state webhook requests per second API Gateway lets through to the VPC (best effort, a coarse backstop; the API also limits each webhook URL to 60 deliveries a minute). Excess deliveries get 429 and show as failed in the provider's delivery log."
+  type        = number
+  default     = 10
 }
 
-variable "gitlab_webhook_cidrs" {
-  description = "GitLab.com's outbound webhook ranges (https://docs.gitlab.com/user/gitlab_com/#ip-range), used when webhook_providers includes gitlab and webhook_ingress_cidrs is empty."
-  type        = list(string)
-  default     = ["34.74.90.64/28", "34.74.226.0/24"]
+variable "webhook_throttle_burst_limit" {
+  description = "Webhook request burst API Gateway allows above webhook_throttle_rate_limit."
+  type        = number
+  default     = 50
 }
 
 # ── Application ───────────────────────────────────────────────────────────────
