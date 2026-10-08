@@ -171,7 +171,12 @@ def update_lockfile(mutate: Any) -> Any:
     LOCKFILE_PATH.parent.mkdir(parents=True, exist_ok=True)
     with _exclusive_lock(_LOCKFILE_LOCK):
         if LOCKFILE_PATH.exists():
-            data = json.loads(LOCKFILE_PATH.read_text())
+            try:
+                data = json.loads(LOCKFILE_PATH.read_text())
+            except (json.JSONDecodeError, OSError) as exc:
+                raise RuntimeError(f"Cannot read {LOCKFILE_PATH}: {exc}") from exc
+            if not isinstance(data, dict):
+                raise RuntimeError(f"Invalid lockfile structure in {LOCKFILE_PATH}")
             if data.get("lock_version") == 1:
                 url = current_registry_url()
                 data = {

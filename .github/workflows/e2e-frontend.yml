@@ -126,7 +126,7 @@ jobs:
           cp .env.example .env
           make rebuild
           for i in $(seq 1 45); do
-            if curl -fsS http://localhost/health > /dev/null 2>&1; then exit 0; fi
+            if curl -fsS http://localhost/health > /dev/null 2>&1 && curl -fsS http://localhost/ > /dev/null 2>&1; then exit 0; fi
             sleep 2
           done
           echo 'Disposable stack did not become healthy' >&2

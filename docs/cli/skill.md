@@ -51,7 +51,7 @@ observal registry skill submit \
   --output json
 ```
 
-For a new complete folder, use `observal registry skill submit --from-dir ./my-skill --name my-skill --description "My skill"`. To advance an approved listing, use `fork` (reviewed direct base) or `import-folder` (reviewed Git/historical direct base), then `replace-files --version-id UUID --from-dir ./my-skill --revision OBSERVED_REVISION` as needed. The [folder workflow](../skill-folder-workflow.md) covers exact-base selection, sensitive/excluded file acknowledgments, review, and immutable releases. JSON mode never prompts; supply all required inputs explicitly.
+For a new complete folder, use `observal registry skill submit --from-dir ./my-skill --name my-skill --description "My skill"`. To advance an approved listing, use `fork` (reviewed direct base) or `import-folder` (reviewed Git/historical direct base), then `observal registry skill replace-files my-skill --version-id UUID --from-dir ./my-skill --revision OBSERVED_REVISION` as needed. The [folder workflow](../skill-folder-workflow.md) covers exact-base selection, sensitive/excluded file acknowledgments, review, and immutable releases. JSON mode never prompts; supply all required inputs explicitly.
 
 Valid task types are `code-review`, `code-generation`, `testing`, `documentation`, `debugging`, `refactoring`, `deployment`, `security-audit`, `performance`, and `general`.
 

@@ -10,6 +10,8 @@ import base64
 import hashlib
 import os
 import tempfile
+import unicodedata
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -354,6 +356,48 @@ class TestDirectoryCapture:
             assert len(snapshot.extra_files) == 0
             assert ".git (Git metadata)" in snapshot.excluded_paths
 
+    @pytest.mark.parametrize("exclusion", ["secrets/private.txt", "secrets/", "./secrets/", "secrets\\private.txt"])
+    def test_capture_excludes_nested_paths_and_warns_before_replacement(self, exclusion):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            source = Path(tmpdir)
+            (source / "SKILL.md").write_text("---\nname: test\n---\n# Test")
+            (source / "secrets").mkdir()
+            (source / "secrets" / "private.txt").write_text("do not upload")
+            (source / "scripts").mkdir()
+            (source / "scripts" / "run.sh").write_text("echo safe")
+            snapshot = capture_directory(source, exclude=[exclusion])
+            assert [file.path for file in snapshot.extra_files] == ["scripts/run.sh"]
+            assert "secrets/private.txt" in snapshot.excluded_paths
+
+    def test_capture_exclusion_matches_canonically_equivalent_unicode(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            source = Path(tmpdir)
+            (source / "SKILL.md").write_text("---\nname: test\n---\n# Test")
+            decomposed = unicodedata.normalize("NFD", "café")
+            (source / decomposed).mkdir()
+            (source / decomposed / "private.txt").write_text("do not upload")
+            snapshot = capture_directory(source, exclude=["café/private.txt"])
+            assert not snapshot.extra_files
+            assert f"{decomposed}/private.txt" in snapshot.excluded_paths
+
+    def test_capture_allows_excluding_invalid_resource_names(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            source = Path(tmpdir)
+            (source / "SKILL.md").write_text("---\nname: test\n---\n# Test")
+            (source / "CON").write_text("not portable")
+            (source / ".DS_Store").write_text("ignored automatically")
+            snapshot = capture_directory(source, exclude=["CON", ".DS_Store"])
+            assert not snapshot.extra_files
+            assert "CON" in snapshot.excluded_paths
+
+    @pytest.mark.parametrize("exclusion", ["../outside", "..\\outside", "/absolute", "C:\\outside", "scripts/SKILL.md"])
+    def test_capture_refuses_invalid_or_skill_md_exclusions(self, exclusion):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            source = Path(tmpdir)
+            (source / "SKILL.md").write_text("---\nname: test\n---\n# Test")
+            with pytest.raises(DirectoryCaptureError):
+                capture_directory(source, exclude=[exclusion])
+
     def test_capture_rejects_symlinked_resource(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             source = Path(tmpdir)
@@ -454,8 +498,8 @@ class TestRollbackAndRecovery:
             stage_dirs = list(parent.glob(".test.stage.*"))
             assert len(stage_dirs) == 0
 
-    def test_staging_directory_preserved_on_validation_failure(self):
-        """Verify staging directory cleanup even on validation failure."""
+    def test_invalid_checksum_is_rejected_before_staging(self):
+        """Verify an invalid bundle cannot create a staging directory."""
         skill_md = b"---\nname: test\n---\n# Test"
         # Create bundle with wrong SHA
         bad_file = _make_file("SKILL.md", skill_md)
@@ -466,10 +510,10 @@ class TestRollbackAndRecovery:
             dest = Path(tmpdir) / "skills" / "test"
             dest.parent.mkdir(parents=True, exist_ok=True)
 
-            with pytest.raises(BundleInstallError):
-                install_folder_bundle(bundle, dest)
+            with pytest.raises(BundleValidationError, match="SHA-256 mismatch"):
+                validate_bundle(bundle)
 
-            # Staging directories should be cleaned up
+            # Invalid input is rejected before creating a stage
             stage_dirs = list(dest.parent.glob(".test.stage.*"))
             assert len(stage_dirs) == 0
 
@@ -483,14 +527,16 @@ class TestRollbackAndRecovery:
             dest.mkdir(parents=True)
             (dest / "SKILL.md").write_bytes(original_content)
 
-            # Create bundle with wrong SHA to trigger failure
-            bad_file = _make_file("SKILL.md", skill_md)
-            bad_file["sha256"] = "0" * 64
-            bundle = _make_bundle([bad_file])
+            # Corrupt an already-validated bundle to test staged-file verification.
+            validated = validate_bundle(_make_bundle([_make_file("SKILL.md", skill_md)]))
+            tampered = replace(validated, files=(replace(validated.files[0], sha256="0" * 64),))
 
-            with pytest.raises(BundleInstallError):
-                install_folder_bundle(bundle, dest)
+            backup = Path(tmpdir) / "backup"
+            with pytest.raises(BundleInstallError, match="Staged file content mismatch"):
+                install_folder_bundle(tampered, dest, backup_dir=backup)
 
+            assert not backup.exists()
+            assert not list(dest.parent.glob(".test.stage.*"))
             # Original content should be preserved
             assert dest.exists()
             assert (dest / "SKILL.md").read_bytes() == original_content

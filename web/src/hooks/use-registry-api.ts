@@ -272,7 +272,9 @@ export function useLoadSkillFolderDraft() {
   return useMutation({
     mutationFn: async ({ listingId, versionId }: { listingId: string; versionId: string }) => {
       const manifest = await registry.getSkillVersionManifest(listingId, versionId);
-      const files = await Promise.all(manifest.files.map(async (file) => {
+      const files: SkillResource[] = [];
+      for (let offset = 0; offset < manifest.files.length; offset += 6) {
+        const batch = await Promise.all(manifest.files.slice(offset, offset + 6).map(async (file) => {
         const result = await registry.getSkillFileContent(listingId, versionId, file.path);
         if (result.encoding === "utf-8" && (result.version_id !== versionId || result.revision !== manifest.revision)) {
           throw new Error("Saved folder changed while loading; retry from the latest manifest");
@@ -287,7 +289,9 @@ export function useLoadSkillFolderDraft() {
           ...(result.encoding === "binary" ? { encoding: "base64" as const } : {}),
           executable: file.mode === "0755",
         } satisfies SkillResource;
-      }));
+        }));
+        files.push(...batch);
+      }
       const latest = await registry.getSkillVersionManifest(listingId, versionId);
       if (manifest.revision !== latest.revision) throw new Error("Saved folder changed while loading; retry");
       const skillMd = files.find((file) => file.path === "SKILL.md");

@@ -513,9 +513,10 @@ function DiffDialogBody({
 	const [approveCategory, setApproveCategory] = useState("");
 	const [gitBaseAcknowledged, setGitBaseAcknowledged] = useState(false);
 	const [previewFailed, setPreviewFailed] = useState(false);
+	const [previewPending, setPreviewPending] = useState(false);
 	const reportPreviewError = useCallback(() => setPreviewFailed(true), []);
 	const skillDecision = useSkillVersionDecision();
-	useEffect(() => { setGitBaseAcknowledged(false); setPreviewFailed(false); }, [item.version_id]);
+	useEffect(() => { setGitBaseAcknowledged(false); setPreviewFailed(false); setPreviewPending(false); }, [item.version_id]);
 
 	const isAgent = item.type === "agent";
 	const { data: skillReview, isLoading: skillReviewLoading, isError: skillReviewError } = useSkillVersionReview(
@@ -655,7 +656,7 @@ function DiffDialogBody({
 	const disableApprove = item.components_ready === false ||
 		(item.type === "skill" && !!item.version_id && (
 			skillReviewLoading || skillReviewError || !skillReview ||
-			!skillReview.revision || skillDecision.isPending || previewFailed ||
+			!skillReview.revision || skillDecision.isPending || previewFailed || previewPending ||
 			(skillReview.base_delivery_mode === "git_fetch" && !gitBaseAcknowledged) ||
 			(!!skillReview.files?.length && (candidatePending || candidateError || candidateManifest?.revision !== skillReview.revision)) ||
 			(skillReview.base_delivery_mode === "registry_direct" &&
@@ -1079,7 +1080,7 @@ function DiffDialogBody({
 								: skillReview.files?.length ? (
 									<SkillFilesSection listingId={item.id} versionId={item.version_id}
 										baseVersionId={skillReview.base_version_id} baseDeliveryMode={skillReview.base_delivery_mode}
-									onPreviewError={reportPreviewError} />
+									onPreviewError={reportPreviewError} onPreviewPendingChange={setPreviewPending} />
 								) : <p className="text-xs text-muted-foreground">No reviewed folder files for this version.</p>}
 						</div>
 					) : isLoading ? (
@@ -1206,6 +1207,7 @@ function DiffDialogBody({
 								</TooltipTrigger>
 								<TooltipContent>
 									<p>{previewFailed ? "A file preview failed or changed. Refresh and inspect the exact files before approval."
+									: previewPending ? "Wait for selected file verification before approving."
 									: skillReview?.base_delivery_mode === "git_fetch"
 									? "Acknowledge the missing Git base files above before approval."
 									: "Cannot approve until the exact candidate and base files are available and reviewed."}</p>

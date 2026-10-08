@@ -661,10 +661,28 @@ def capture_directory(
 
     # Build exclusion set
     exclusions = set(_EXCLUDE_PATTERNS)
-    if exclude:
-        if any(SKILL_MD_NAME in PurePosixPath(value).parts for value in exclude):
+    exclude_prefixes: set[str] = set()
+    for value in exclude or []:
+        # Exclusions may name files that cannot be uploaded (reserved filenames,
+        # overlong paths) and may use Windows separators. Do not validate them
+        # as bundle resources, but never silently ignore an unsafe pattern.
+        relative = unicodedata.normalize("NFC", value.replace("\\", "/"))
+        path = PurePosixPath(relative)
+        if (
+            not path.parts
+            or path.is_absolute()
+            or ".." in path.parts
+            or (len(path.parts[0]) == 2 and path.parts[0][0].isalpha() and path.parts[0][1] == ":")
+            or "\x00" in relative
+        ):
+            raise DirectoryCaptureError(f"Invalid relative exclusion: {value!r}")
+        if SKILL_MD_NAME in path.parts:
             raise DirectoryCaptureError("SKILL.md cannot be excluded from a folder upload")
-        exclusions.update(exclude)
+        normalized = path.as_posix()
+        if "/" in normalized:
+            exclude_prefixes.add(normalized)
+        else:
+            exclusions.add(normalized)
 
     # Capture all files
     extra_files: list[CapturedFile] = []
@@ -675,14 +693,17 @@ def capture_directory(
 
     for file_path in sorted(source_dir.rglob("*")):
         rel_path = file_path.relative_to(source_dir).as_posix()
-        parts = PurePosixPath(rel_path).parts
+        normalized_rel_path = unicodedata.normalize("NFC", rel_path)
+        parts = PurePosixPath(normalized_rel_path).parts
         # Git metadata is never an authored skill resource. Report its root,
         # not every object in a local checkout.
         if ".git" in parts:
             if rel_path == ".git":
                 excluded_paths.append(".git (Git metadata)")
             continue
-        if any(segment in exclusions for segment in parts):
+        if any(segment in exclusions for segment in parts) or any(
+            normalized_rel_path == prefix or normalized_rel_path.startswith(prefix + "/") for prefix in exclude_prefixes
+        ):
             excluded_paths.append(rel_path)
             continue
         if file_path.is_symlink():

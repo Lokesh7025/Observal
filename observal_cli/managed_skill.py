@@ -130,11 +130,32 @@ def _backup_root(target: Path, root: Path | None, *, create: bool = True) -> Pat
     target_ancestor = next((part for part in (target.parent, *target.parent.parents) if part.exists()), None)
     if root_ancestor is None or target_ancestor is None or root_ancestor.stat().st_dev != target_ancestor.stat().st_dev:
         raise ManagedSkillError("Backup root is on another filesystem; provide --backup-root on the target filesystem")
-    git = subprocess.run(
-        ["git", "-C", str(root_ancestor), "rev-parse", "--show-toplevel"], capture_output=True, text=True, check=False
-    )
+    try:
+        git = subprocess.run(
+            ["git", "-C", str(root_ancestor), "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10,
+        )
+    except FileNotFoundError:
+        # Git is optional for registry-direct installs. Without it, do not
+        # assume that a backup under a discoverable worktree is ignored.
+        if any(
+            (parent / ".git").exists() or (parent / ".git").is_symlink()
+            for parent in (root_ancestor, *root_ancestor.parents)
+        ):
+            raise ManagedSkillError("Cannot verify that the backup root is Git-ignored without Git") from None
+        return root
+    except subprocess.TimeoutExpired as exc:
+        raise ManagedSkillError("Could not determine whether the backup root is Git-tracked") from exc
     if git.returncode == 0:
-        ignored = subprocess.run(["git", "-C", str(root_ancestor), "check-ignore", "-q", str(root)], check=False)
+        try:
+            ignored = subprocess.run(
+                ["git", "-C", str(root_ancestor), "check-ignore", "-q", str(root)], check=False, timeout=10
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise ManagedSkillError("Could not verify that the backup root is Git-ignored") from exc
         if ignored.returncode != 0:
             raise ManagedSkillError(f"Backup root in a Git worktree must be ignored by Git: {root}")
     return root

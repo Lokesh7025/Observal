@@ -124,7 +124,9 @@ export function ComponentInstallCommand({
         ) : (
           <p role="status" className="text-sm text-muted-foreground">
             {blockedByRollout ? "Complete-folder installs are not available on this server yet." :
-              componentType === "skill" && !skillVersion && release === "pinned" ? "Loading approved version…" : "No supported harness available"}
+              componentType === "skill" && !skillVersion && release === "pinned"
+                ? (selectedSkillVersion ? "The shown version is not approved yet; choose Follow latest or an approved version." : "Loading approved version…")
+                : "No supported harness available"}
           </p>
         )}
       </div>

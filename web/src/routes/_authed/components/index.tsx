@@ -47,6 +47,6 @@ export const Route = createFileRoute("/_authed/components/")({
     runtime_type: (search.runtime_type as string) || undefined,
     folderListingId: typeof search.folderListingId === "string" && /^[\da-f-]{36}$/i.test(search.folderListingId) ? search.folderListingId : undefined,
     folderVersionId: typeof search.folderVersionId === "string" && /^[\da-f-]{36}$/i.test(search.folderVersionId) ? search.folderVersionId : undefined,
-    folderVersion: typeof search.folderVersion === "string" && /^\d+\.\d+\.\d+$/.test(search.folderVersion) ? search.folderVersion : undefined,
+    folderVersion: typeof search.folderVersion === "string" && /^\d+\.\d+\.\d+(-[a-zA-Z0-9.]+)?$/.test(search.folderVersion) ? search.folderVersion : undefined,
   }),
 });

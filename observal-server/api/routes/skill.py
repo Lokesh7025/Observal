@@ -689,7 +689,7 @@ async def _save_skill_draft(req: SkillDraftRequest, db: AsyncSession, current_us
     await db.flush()
 
     listing.latest_version_id = version.id
-    if folder_authoring:
+    if folder_authoring or needs_bundle_delivery(version):
         version.content_revision = skill_content_revision(listing, version)
     await commit_or_name_conflict(db, "skill")
     await db.refresh(listing)
@@ -850,7 +850,7 @@ async def update_skill_draft(
         if val is not None:
             setattr(listing, field, val)
 
-    if ver.content_revision is not None:
+    if ver.content_revision is not None or needs_bundle_delivery(ver):
         ver.content_revision = skill_content_revision(listing, ver)
     await commit_or_name_conflict(db, "skill")
     await db.refresh(listing)

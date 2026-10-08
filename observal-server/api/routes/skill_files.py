@@ -7,6 +7,7 @@ import re
 import uuid
 from copy import deepcopy
 from datetime import UTC, datetime
+from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, Response
 from pydantic import ValidationError
@@ -922,7 +923,11 @@ async def get_skill_file(
     try:
         content = file.content.decode("utf-8")
     except UnicodeDecodeError:
-        headers["Content-Disposition"] = f'attachment; filename="{file.path.rsplit("/", 1)[-1]}"'
+        basename = file.path.rsplit("/", 1)[-1]
+        fallback = "".join(char if char.isascii() and (char.isalnum() or char in "._-") else "_" for char in basename)
+        headers["Content-Disposition"] = (
+            f"attachment; filename=\"{fallback}\"; filename*=UTF-8''{quote(basename, safe='')}"
+        )
         return Response(content=file.content, media_type="application/octet-stream", headers=headers)
     details = SkillFileContents(
         version_id=version.id, revision=revision, file=file.declaration, content=content, encoding="utf-8"

@@ -46,12 +46,9 @@ from observal_cli.skill_folder import (
     SUPPORTED_FEATURE as SKILL_FOLDER_FEATURE,
 )
 from observal_cli.skill_folder import (
-    BundleInstallError,
     BundleValidationError,
     DirectoryCaptureError,
     capture_directory,
-    detect_destination_collisions,
-    install_folder_bundle,
     snapshot_to_extra_files,
     validate_bundle,
 )
@@ -708,7 +705,10 @@ def skill_show(
                     if selected or page * 50 >= versions.get("total", 0):
                         break
                     page += 1
-                if not selected or selected.get("status") != "approved" or selected.get("requires_global_review"):
+                unavailable = (
+                    not selected or selected.get("status") != "approved" or selected.get("requires_global_review")
+                )
+                if unavailable and version:
                     fail(
                         ErrorCategory.CONFLICT,
                         "The selected approved skill version is unavailable.",
@@ -716,15 +716,18 @@ def skill_show(
                         resource=skill_id,
                         remediation="Select a visible reviewed release and retry.",
                     )
-                manifest = client.get(f"/api/v1/skills/{resolved}/versions/{selected['id']}/manifest")
-                if manifest.get("version_id") != selected["id"]:
-                    fail(
-                        ErrorCategory.CONFLICT,
-                        "The returned file manifest belongs to another release.",
-                        operation="Show skill",
-                        resource=skill_id,
-                        remediation="Refresh the exact approved version before inspecting files.",
-                    )
+                if unavailable:
+                    selected = None
+                else:
+                    manifest = client.get(f"/api/v1/skills/{resolved}/versions/{selected['id']}/manifest")
+                    if manifest.get("version_id") != selected["id"]:
+                        fail(
+                            ErrorCategory.CONFLICT,
+                            "The returned file manifest belongs to another release.",
+                            operation="Show skill",
+                            resource=skill_id,
+                            remediation="Refresh the exact approved version before inspecting files.",
+                        )
     if output == "json":
         output_json({**item, "selected_version": selected, "files": manifest.get("files") if manifest else None})
         return
@@ -1493,109 +1496,6 @@ def _install_managed_folder(
             remediation="Inspect the retained backup or restore it with registry skill backups restore; do not delete unowned files.",
         )
         raise AssertionError("unreachable") from exc
-
-
-def _install_complete_folder_bundle(
-    *,
-    bundle_response: dict,
-    result: dict,
-    harness: str,
-    scope: str,
-    skill_id: str,
-    output: OutputMode,
-) -> Path | None:
-    """Install a complete skill folder bundle from server response.
-
-    This handles skills with extra_files (multiple files beyond SKILL.md).
-    Validates all files, checks for collisions, and atomically installs.
-
-    Args:
-        bundle_response: The bundle dict from server response
-        result: Full install response for version info
-        harness: Target harness
-        scope: Install scope (user or project)
-        skill_id: Original skill identifier for error messages
-        output: Output mode for controlling print behavior
-
-    Returns:
-        Path to installed SKILL.md, or None on failure
-    """
-    machine_output = output == "json"
-
-    # Validate the bundle before any filesystem operations
-    try:
-        validated = validate_bundle(
-            bundle_response,
-            expected_version_id=result.get("version_id"),
-            expected_digest=result.get("digest"),
-        )
-    except BundleValidationError as e:
-        if not machine_output:
-            rprint(f"[red]✗ Bundle validation failed:[/red] {esc(str(e))}")
-        fail(
-            ErrorCategory.VALIDATION,
-            "The skill bundle from the registry is invalid.",
-            operation="Install skill",
-            resource=skill_id,
-            remediation="The server returned corrupted or tampered data. Report this issue.",
-            detail=str(e),
-        )
-        return None  # unreachable but helps type checker
-
-    # Use the selected harness' actual discovery root, not the legacy
-    # .agents/skills staging root used by resource-less installs.
-    from observal_shared.harness_registry import HARNESS_REGISTRY
-
-    template = HARNESS_REGISTRY.get(harness.replace("_", "-"), {}).get("skills", {}).get(scope)
-    expected_path = template.format(name=validated.folder_name) if template else None
-    if not expected_path or validated.skill_file_path != expected_path:
-        fail(
-            ErrorCategory.VALIDATION,
-            "The bundle skill path does not match the selected harness destination.",
-            operation="Install skill",
-            resource=skill_id,
-            remediation="Refresh the selected skill version and report a mismatched server path.",
-        )
-    target_dir = (Path(expected_path).expanduser() if scope == "user" else Path.cwd() / expected_path).parent
-
-    # Check for collisions
-    collisions = detect_destination_collisions(target_dir, validated)
-    if collisions:
-        if not machine_output:
-            rprint("[yellow]⚠ Destination conflicts detected:[/yellow]")
-            for collision in collisions:
-                rprint(f"  • {esc(collision)}")
-            rprint("[dim]Unowned folders cannot be overwritten; use --upgrade for verified installs.[/dim]")
-        # For now, fail on collision - the plan mentions backup/recovery UX needs design
-        fail(
-            ErrorCategory.CONFLICT,
-            "The skill destination conflicts with existing files.",
-            operation="Install skill",
-            resource=str(target_dir),
-            remediation="Remove the existing skill or choose a different destination.",
-        )
-        return None
-
-    # Install the bundle
-    try:
-        installed_path = install_folder_bundle(validated, target_dir, force=False)
-        if not machine_output:
-            rprint(f"[green]✓ Installed skill folder:[/green] {esc(str(target_dir))}")
-            rprint(f"  Files: {len(validated.files)}")
-            rprint(f"  Size: {validated.total_size:,} bytes")
-        return installed_path
-    except BundleInstallError as e:
-        if not machine_output:
-            rprint(f"[red]✗ Installation failed:[/red] {esc(str(e))}")
-        fail(
-            ErrorCategory.UNAVAILABLE,
-            "The skill folder could not be written.",
-            operation="Install skill",
-            resource=str(target_dir),
-            remediation="Check filesystem permissions and disk space, then retry.",
-            detail=str(e),
-        )
-        return None
 
 
 # Harness config dirs to check for symlinking (canonical name → dir name)

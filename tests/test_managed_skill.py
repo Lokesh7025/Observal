@@ -8,6 +8,7 @@ import base64
 import hashlib
 import json
 import os
+import subprocess
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
@@ -78,6 +79,46 @@ def install(b, target, root, *, check=False, old=None, fail=False):
         entry.update({"folder_receipt": proof, "version_id": b.version_id, "digest": b.digest})
 
     return managed_skill.transact(b, target, proof, record=record, old_bundle=old, backup_root=root, check=check)
+
+
+def test_git_free_backup_root_preserves_worktree_safety(store, monkeypatch, tmp_path):
+    target, root = store
+    real_run = managed_skill.subprocess.run
+
+    def missing_git(args, **kwargs):
+        if args[0] == "git":
+            raise FileNotFoundError("git unavailable")
+        return real_run(args, **kwargs)
+
+    monkeypatch.setattr(managed_skill.subprocess, "run", missing_git)
+    assert install(bundle("v1"), target, root, check=True)["action"] == "install"
+    assert install(bundle("v1"), target, root)["action"] == "install"
+    assert (target / "SKILL.md").read_bytes() == b"skill"
+
+    # Even without the executable, known Git metadata must not silently allow
+    # backups to be committed with the project.
+    project = tmp_path / "project"
+    (project / ".git").mkdir(parents=True)
+    with pytest.raises(managed_skill.ManagedSkillError, match="Git-ignored"):
+        install(bundle("v2"), project / "skills" / "example", project / "backups", check=True)
+
+
+@pytest.mark.parametrize("git_call", ["rev-parse", "check-ignore"])
+def test_backup_verification_timeouts_fail_closed(store, monkeypatch, tmp_path, git_call):
+    target, _root = store
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / ".git").mkdir()
+    root = project / "backups"
+
+    def timed_out(args, **kwargs):
+        if git_call in args:
+            raise subprocess.TimeoutExpired(args, kwargs["timeout"])
+        return subprocess.CompletedProcess(args, 0, stdout=str(project))
+
+    monkeypatch.setattr(managed_skill.subprocess, "run", timed_out)
+    with pytest.raises(managed_skill.ManagedSkillError, match=r"Git-tracked|Git-ignored"):
+        install(bundle("v1"), target, root, check=True)
 
 
 def test_upgrade_preview_does_not_create_backup_or_lock_directories(store):

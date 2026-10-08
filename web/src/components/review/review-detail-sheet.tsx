@@ -116,7 +116,7 @@ function McpConfigSection({ detail }: { detail: ReviewItem }) {
 	);
 }
 
-function useVerifiedReviewBinary(blob: Blob | null, file: SkillManifestFile | undefined, onPreviewError?: () => void) {
+function useVerifiedReviewBytes(blob: Blob | null, file: SkillManifestFile | undefined, onPreviewError?: () => void) {
 	const [result, setResult] = useState<{ source: Blob; sha256: string; verified: Blob | null; error: string } | null>(null);
 	useEffect(() => {
 		if (!blob || !file) return;
@@ -143,9 +143,9 @@ function useVerifiedReviewBinary(blob: Blob | null, file: SkillManifestFile | un
 	return result?.source === blob && result?.sha256 === file?.sha256 ? result : null;
 }
 
-export function SkillFilesSection({ listingId, versionId, baseVersionId, baseDeliveryMode, onPreviewError }: {
+export function SkillFilesSection({ listingId, versionId, baseVersionId, baseDeliveryMode, onPreviewError, onPreviewPendingChange }: {
 	listingId: string; versionId: string; baseVersionId?: string | null; baseDeliveryMode?: string | null;
-	onPreviewError?: () => void;
+	onPreviewError?: () => void; onPreviewPendingChange?: (pending: boolean) => void;
 }) {
 	const { data: manifest, isLoading } = useSkillVersionManifest(listingId, versionId);
 	const { data: baseManifest, isLoading: isLoadingBase, isError: baseError } = useSkillVersionManifest(
@@ -169,23 +169,40 @@ export function SkillFilesSection({ listingId, versionId, baseVersionId, baseDel
 	const baseMeta = selectedFile ? baseFiles.get(selectedFile) : undefined;
 	const candidateBlob = fileContent?.encoding === "binary" ? fileContent.content : null;
 	const baseBlob = baseContent?.encoding === "binary" ? baseContent.content : null;
-	const candidateBinary = useVerifiedReviewBinary(candidateBlob, candidateMeta, onPreviewError);
-	const baseBinary = useVerifiedReviewBinary(baseBlob, baseMeta, onPreviewError);
+	const candidateTextBlob = useMemo(() => fileContent?.encoding === "utf-8" && typeof fileContent.content === "string"
+		? new Blob([fileContent.content]) : null, [fileContent]);
+	const baseTextBlob = useMemo(() => baseContent?.encoding === "utf-8" && typeof baseContent.content === "string"
+		? new Blob([baseContent.content]) : null, [baseContent]);
+	const candidateBinary = useVerifiedReviewBytes(candidateBlob, candidateMeta, onPreviewError);
+	const baseBinary = useVerifiedReviewBytes(baseBlob, baseMeta, onPreviewError);
+	const candidateText = useVerifiedReviewBytes(candidateTextBlob, candidateMeta, onPreviewError);
+	const baseText = useVerifiedReviewBytes(baseTextBlob, baseMeta, onPreviewError);
 	const binaryUrl = useMemo(() => candidateBinary?.verified ? URL.createObjectURL(candidateBinary.verified) : null, [candidateBinary]);
 	useEffect(() => () => { if (binaryUrl) URL.revokeObjectURL(binaryUrl); }, [binaryUrl]);
 	const baseUrl = useMemo(() => baseBinary?.verified ? URL.createObjectURL(baseBinary.verified) : null, [baseBinary]);
 	useEffect(() => () => { if (baseUrl) URL.revokeObjectURL(baseUrl); }, [baseUrl]);
-	const candidateMismatch = fileContent?.encoding === "utf-8" && !!candidateMeta && (
-		fileContent.version_id !== versionId || fileContent.revision !== manifest?.revision ||
-		fileContent.file.path !== selectedFile || fileContent.file.sha256 !== candidateMeta.sha256
-	);
-	const baseMismatch = baseContent?.encoding === "utf-8" && !!baseMeta && (
-		baseContent.version_id !== baseVersionId || baseContent.revision !== baseManifest?.revision ||
-		baseContent.file.path !== selectedFile || baseContent.file.sha256 !== baseMeta.sha256
-	);
+	const candidateMismatch = !!fileContent && !!candidateMeta && (fileContent.encoding !== "binary" && (
+		fileContent.encoding !== "utf-8" || typeof fileContent.content !== "string" || fileContent.version_id !== versionId ||
+		fileContent.revision !== manifest?.revision || fileContent.file?.path !== selectedFile ||
+		fileContent.file?.sha256 !== candidateMeta.sha256
+	));
+	const baseMismatch = !!baseContent && !!baseMeta && (baseContent.encoding !== "binary" && (
+		baseContent.encoding !== "utf-8" || typeof baseContent.content !== "string" || baseContent.version_id !== baseVersionId ||
+		baseContent.revision !== baseManifest?.revision || baseContent.file?.path !== selectedFile ||
+		baseContent.file?.sha256 !== baseMeta.sha256
+	));
 	useEffect(() => {
-		if (selectedFile && (fileContentError || baseContentError || candidateMismatch || baseMismatch)) onPreviewError?.();
-	}, [selectedFile, fileContentError, baseContentError, candidateMismatch, baseMismatch, onPreviewError]);
+		if (selectedFile && (fileContentError || baseContentError || candidateMismatch || baseMismatch ||
+			(!!candidateMeta && !isLoadingContent && !fileContent) ||
+			(!!baseMeta && !isLoadingBaseContent && !baseContent))) onPreviewError?.();
+	}, [selectedFile, candidateMeta, baseMeta, isLoadingContent, isLoadingBaseContent,
+		fileContent, baseContent, fileContentError, baseContentError, candidateMismatch, baseMismatch, onPreviewError]);
+	useEffect(() => {
+		const candidatePending = !!candidateMeta && !(fileContent?.encoding === "binary" ? candidateBinary?.verified : candidateText?.verified);
+		const basePending = !!baseMeta && !(baseContent?.encoding === "binary" ? baseBinary?.verified : baseText?.verified);
+		onPreviewPendingChange?.(!!selectedFile && (candidatePending || basePending));
+	}, [selectedFile, candidateMeta, baseMeta, fileContent, baseContent, candidateBinary, baseBinary,
+		candidateText, baseText, onPreviewPendingChange]);
 	if (isLoading) {
 		return <div className="text-sm text-muted-foreground">Loading files...</div>;
 	}
@@ -265,7 +282,7 @@ export function SkillFilesSection({ listingId, versionId, baseVersionId, baseDel
 					) : (
 						<File className="h-3 w-3 text-muted-foreground" />
 					)}
-					{node.isDir && <Folder className="h-3 w-3 text-blue-500" />}
+					{node.isDir && <Folder className="h-3 w-3 text-warning" />}
 					<span className="truncate">{node.name}</span>
 					{node.mode === "0755" && <span className="text-[10px] text-muted-foreground ml-1">exec</span>}
 					{change && <span className="ml-1 text-[10px] font-medium text-primary">{change}</span>}
@@ -312,33 +329,29 @@ export function SkillFilesSection({ listingId, versionId, baseVersionId, baseDel
 					{candidateFiles.has(selectedFile) && (
 						<div>
 							<p className="text-xs font-medium">Candidate</p>
-							{isLoadingContent ? <p className="text-xs">Loading...</p> : candidateBinary?.error ? (
-								<p role="alert" className="text-xs text-destructive">{candidateBinary.error}</p>
+							{isLoadingContent ? <p className="text-xs">Loading...</p> : candidateBinary?.error || candidateText?.error ? (
+								<p role="alert" className="text-xs text-destructive">{candidateBinary?.error || candidateText?.error}</p>
 							) : candidateBlob && !binaryUrl ? <p className="text-xs">Verifying binary…</p> : candidateMismatch ? (
 								<p role="alert" className="text-xs text-destructive">Candidate file changed; refresh before review.</p>
 							) : binaryUrl ? (
 								<a href={binaryUrl} download={selectedFile.split("/").at(-1)} className="text-sm underline">Download candidate binary ({candidateBlob?.size} bytes)</a>
-							) : (
-								<pre className="max-h-60 overflow-auto rounded bg-muted p-2 text-xs font-mono whitespace-pre-wrap">
-									{fileContent?.encoding === "utf-8" ? fileContent.content : "File preview unavailable"}
-								</pre>
-							)}
+							) : candidateTextBlob && !candidateText?.verified ? <p className="text-xs">Verifying text…</p> : candidateText?.verified ? (
+								<pre className="max-h-60 overflow-auto rounded bg-muted p-2 text-xs font-mono whitespace-pre-wrap">{fileContent?.encoding === "utf-8" ? fileContent.content : null}</pre>
+							) : <p role="alert" className="text-xs text-destructive">File preview unavailable</p>}
 						</div>
 					)}
 					{baseFiles.has(selectedFile) && (
 						<div>
 							<p className="text-xs font-medium">Reviewed base</p>
-							{isLoadingBaseContent ? <p className="text-xs">Loading...</p> : baseBinary?.error ? (
-								<p role="alert" className="text-xs text-destructive">{baseBinary.error}</p>
+							{isLoadingBaseContent ? <p className="text-xs">Loading...</p> : baseBinary?.error || baseText?.error ? (
+								<p role="alert" className="text-xs text-destructive">{baseBinary?.error || baseText?.error}</p>
 							) : baseBlob && !baseUrl ? <p className="text-xs">Verifying binary…</p> : baseMismatch ? (
 								<p role="alert" className="text-xs text-destructive">Reviewed base file changed; refresh before review.</p>
 							) : baseUrl ? (
 								<a href={baseUrl} download={selectedFile.split("/").at(-1)} className="text-sm underline">Download base binary ({baseBlob?.size} bytes)</a>
-							) : (
-								<pre className="max-h-60 overflow-auto rounded bg-muted p-2 text-xs font-mono whitespace-pre-wrap">
-									{baseContent?.encoding === "utf-8" ? baseContent.content : "Base preview unavailable"}
-								</pre>
-							)}
+							) : baseTextBlob && !baseText?.verified ? <p className="text-xs">Verifying text…</p> : baseText?.verified ? (
+								<pre className="max-h-60 overflow-auto rounded bg-muted p-2 text-xs font-mono whitespace-pre-wrap">{baseContent?.encoding === "utf-8" ? baseContent.content : null}</pre>
+							) : <p role="alert" className="text-xs text-destructive">Base preview unavailable</p>}
 						</div>
 					)}
 				</div>

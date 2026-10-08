@@ -6,6 +6,7 @@
 import json
 from pathlib import Path
 from unittest.mock import AsyncMock
+from urllib.parse import quote
 
 import pytest
 from fastapi import FastAPI, HTTPException, Request, Response
@@ -18,9 +19,9 @@ from models.mcp import ListingStatus
 from models.skill import SkillListing, SkillVersion
 from models.team import TeamMembership, TeamRole
 from models.user import User, UserRole
-from schemas.skill import SkillFolderDraftRequest, SkillUpdateRequest
+from schemas.skill import SkillDraftRequest, SkillFolderDraftRequest, SkillUpdateRequest
 from schemas.skill_resources import SkillVersionRevisionRequest
-from services.skill_revisions import skill_content_revision
+from services.skill_revisions import skill_content_revision, verified_skill_revision
 from tests import discovery_support as ds
 
 FIXTURE = json.loads((Path(__file__).parent / "fixtures/skill_folder_contract.json").read_text())
@@ -57,6 +58,51 @@ async def test_create_initial_folder_draft_saves_exact_tree_without_git_or_legac
             assert version.git_url is None and version.git_ref is None
             assert version.script_filename is None and version.script_content is None
             assert version.content_revision == manifest.revision == skill_content_revision(listing, version)
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_legacy_draft_routes_bind_revision_when_folder_delivery_is_added():
+    engine = ds.make_engine()
+    maker = await ds.create_schema(engine)
+    try:
+        async with maker() as db:
+            owner = await ds.user(db)
+            data = FIXTURE["author_create"]["body"] | FIXTURE["snapshot"]
+            direct = await skill.save_skill_draft(
+                SkillDraftRequest.model_validate(
+                    data | {"name": "direct-revision", "delivery_mode": "registry_direct"}
+                ),
+                db,
+                owner,
+            )
+            direct_listing = await db.get(SkillListing, direct.id)
+            assert verified_skill_revision(direct_listing, direct_listing.latest_version)
+
+            git = await skill.save_skill_draft(
+                SkillDraftRequest.model_validate(
+                    {"name": "git-to-direct", "git_url": "https://example.test/skill.git"}
+                ),
+                db,
+                owner,
+            )
+            git_listing = await db.get(SkillListing, git.id)
+            assert git_listing.latest_version.content_revision is None
+            await skill.update_skill_draft(
+                str(git.id),
+                SkillUpdateRequest(
+                    delivery_mode="registry_direct",
+                    skill_md_content=data["skill_md_content"],
+                    extra_files=data["extra_files"],
+                    git_url="",
+                    git_ref="",
+                ),
+                db,
+                owner,
+            )
+            await db.refresh(git_listing)
+            assert verified_skill_revision(git_listing, git_listing.latest_version)
     finally:
         await engine.dispose()
 
@@ -123,13 +169,50 @@ async def test_folder_draft_http_route_returns_content_free_manifest():
                 assert binary.status_code == 200
                 assert binary.content == b"\x00\xff"
                 assert binary.headers["Content-Type"] == "application/octet-stream"
-                assert binary.headers["Content-Disposition"] == 'attachment; filename="logo.bin"'
+                assert (
+                    binary.headers["Content-Disposition"]
+                    == "attachment; filename=\"logo.bin\"; filename*=UTF-8''logo.bin"
+                )
                 assert binary.headers["Cache-Control"] == "no-store"
                 assert binary.headers["X-Content-Type-Options"] == "nosniff"
                 media = app.openapi()["paths"]["/api/v1/skills/{listing_id}/versions/{version_id}/files/{file_path}"][
                     "get"
                 ]["responses"]["200"]["content"]
                 assert set(media) == {"application/json", "application/octet-stream"}
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_binary_file_with_unicode_filename_downloads_without_invalid_header():
+    engine = ds.make_engine()
+    maker = await ds.create_schema(engine)
+    try:
+        async with maker() as db:
+            owner = await ds.user(db)
+            app = FastAPI()
+            app.include_router(skill.router)
+            app.dependency_overrides[get_db] = lambda: db
+            app.dependency_overrides[get_registry_user] = lambda: owner
+            app.dependency_overrides[get_current_user] = lambda: owner
+            name = "图标.bin"
+            data = FIXTURE["author_create"]["body"] | FIXTURE["snapshot"]
+            data["extra_files"] = [
+                *data["extra_files"],
+                {"path": f"assets/{name}", "content": "AP8=", "encoding": "base64"},
+            ]
+            async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+                created = await client.post(FIXTURE["author_create"]["path"], json=data)
+                assert created.status_code == 200, created.text
+                result = await client.get(
+                    f"/api/v1/skills/{created.json()['listing_id']}/versions/{created.json()['version_id']}"
+                    f"/files/assets/{quote(name)}"
+                )
+                assert result.status_code == 200, result.text
+                assert result.content == b"\x00\xff"
+                disposition = result.headers["content-disposition"]
+                assert disposition.startswith('attachment; filename="__.bin"; ')
+                assert disposition.endswith(f"filename*=UTF-8''{quote(name, safe='')}")
     finally:
         await engine.dispose()
 

@@ -692,6 +692,26 @@ def test_show_renders_metadata_and_json(monkeypatch):
     assert get.call_count == 6
 
 
+def test_show_archived_direct_skill_keeps_metadata_but_rejects_explicit_archived_version(monkeypatch):
+    item = _skill_item(delivery_mode="registry_direct", status="archived")
+    monkeypatch.setattr(skill.client, "resolve_registry_reference", Mock(return_value="resolved"))
+
+    def get_show(url, params=None):
+        if url == "/api/v1/skills/resolved":
+            return item
+        if url.endswith("/versions"):
+            return {"items": [{"id": "archived-uuid", "version": "1.2.3", "status": "archived"}], "total": 1}
+        pytest.fail(f"Archived skill must not fetch a file manifest: {url}")
+
+    monkeypatch.setattr(skill.client, "get", get_show)
+    shown = runner.invoke(app, ["registry", "skill", "show", "alice/review-skill", "--output", "json"])
+    explicit = runner.invoke(app, ["registry", "skill", "show", "alice/review-skill", "--version", "1.2.3"])
+    assert shown.exit_code == 0, shown.output
+    assert json.loads(shown.output) == {**item, "selected_version": None, "files": None}
+    assert explicit.exit_code != 0
+    assert "selected approved skill version is unavailable" in explicit.output
+
+
 def test_show_surfaces_http_failure(monkeypatch):
     monkeypatch.setattr(skill.client, "resolve_registry_reference", Mock(return_value="missing"))
     monkeypatch.setattr(skill.client, "get", Mock(side_effect=RuntimeError("registry offline")))
