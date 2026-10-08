@@ -86,7 +86,11 @@ existing install behavior while the folder-delivery gate is disabled.
 An installation receipt records exact registry, listing, release, target,
 owner, and sorted file hashes/modes in `~/.observal/lockfile.json`; it stores
 no file content or credentials. The CLI checks every local file, including
-unexpected files, before treating an existing folder as managed. A modified,
+unexpected files, before treating an existing folder as managed. Managed
+folder installs, upgrades, backup restores, and pinned Agent folder pulls
+currently require POSIX filesystem semantics (Linux/macOS or WSL on its Linux
+filesystem); native Windows is not supported and fails closed. This restriction
+does not apply to the existing Git and single-file workflows. A modified,
 symlinked, differently owned or ambiguous destination is **not** overwritten.
 Do not delete it or use `--force`; export the reviewed release, back up local
 changes separately, and resolve the mismatch deliberately. A historical folder

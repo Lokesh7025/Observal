@@ -1206,7 +1206,8 @@ function DiffDialogBody({
 									</span>
 								</TooltipTrigger>
 								<TooltipContent>
-									<p>{previewFailed ? "A file preview failed or changed. Refresh and inspect the exact files before approval."
+									<p>{item.components_ready === false ? "Approve the pending linked components before approving this item."
+									: previewFailed ? "A file preview failed or changed. Refresh and inspect the exact files before approval."
 									: previewPending ? "Wait for selected file verification before approving."
 									: skillReview?.base_delivery_mode === "git_fetch"
 									? "Acknowledge the missing Git base files above before approval."

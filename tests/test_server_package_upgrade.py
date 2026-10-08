@@ -14,14 +14,16 @@ import pytest
 INSTALLER = Path(__file__).resolve().parents[1] / "install-server.sh"
 
 
-def _run_upgrade(tmp_path, *, fail_setup=False, old_install=True, delay_setup=False, run=True):
+def _run_upgrade(tmp_path, *, fail_setup=False, old_install=True, delay_setup=False, real_setup=False, run=True):
     source = tmp_path / "package" / "server"
     source.mkdir(parents=True)
     setup = "#!/bin/bash\n"
     if delay_setup:
         setup += "sleep 0.5\n"
     setup += "exit 7\n" if fail_setup else "exit 0\n"
-    (source / "setup.sh").write_text(setup)
+    (source / "setup.sh").write_bytes(
+        (INSTALLER.parent / "docker/server-package/setup.sh").read_bytes() if real_setup else setup.encode()
+    )
     (source / "version.txt").write_text("new package")
     archive = tmp_path / "package.tar.gz"
     with tarfile.open(archive, "w:gz") as tar:
@@ -69,6 +71,17 @@ def test_package_upgrade_preserves_old_binary_env_and_secrets(tmp_path):
     assert (backups[0] / "version.txt").read_text() == "old package"
     assert (backups[0] / ".env").read_text() == "TEST_OLD_CONFIGURATION=yes\n"
     assert not (tmp_path / "installed.upgrade-in-progress").exists()
+
+
+def test_config_preserving_package_upgrade_reports_staged_not_deployed(tmp_path):
+    install, _, _, result = _run_upgrade(tmp_path, real_setup=True)
+    assert result.returncode == 0, result.stderr
+    assert (install / "version.txt").read_text() == "new package"
+    assert "services were NOT upgraded or migrated" in result.stdout
+    assert "TEST_OLD_CONFIGURATION=yes" in (install / ".env").read_text()
+    # The real setup exits before any Compose up or migration; cutover is
+    # intentionally a separate supervised step after stopping old processes.
+    assert "Starting Observal services" not in result.stdout
 
 
 def test_first_package_install_creates_no_unnecessary_backup(tmp_path):

@@ -123,17 +123,17 @@ function useVerifiedReviewBytes(blob: Blob | null, file: SkillManifestFile | und
 		let active = true;
 		void (async () => {
 			try {
-				if (!globalThis.crypto?.subtle) throw new Error("Verified binary review requires HTTPS or localhost.");
+				if (!globalThis.crypto?.subtle) throw new Error("Verified file review requires HTTPS or localhost.");
 				const bytes = await blob.arrayBuffer();
-				if (bytes.byteLength !== file.size) throw new Error("Binary size differs from its reviewed manifest.");
+				if (bytes.byteLength !== file.size) throw new Error("File size differs from its reviewed manifest.");
 				const hash = Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", bytes)), (byte) =>
 					byte.toString(16).padStart(2, "0")).join("");
-				if (hash !== file.sha256) throw new Error("Binary checksum differs from its reviewed manifest.");
+				if (hash !== file.sha256) throw new Error("File checksum differs from its reviewed manifest.");
 				if (active) setResult({ source: blob, sha256: file.sha256, verified: blob, error: "" });
 			} catch (error) {
 				if (active) {
 					setResult({ source: blob, sha256: file.sha256, verified: null,
-						error: error instanceof Error ? error.message : "Binary verification failed." });
+						error: error instanceof Error ? error.message : "File verification failed." });
 					onPreviewError?.();
 				}
 			}

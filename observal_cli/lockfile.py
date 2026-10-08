@@ -77,7 +77,7 @@ def migrate_lockfile_v1(server_url: str | None = None) -> bool:
         return False
     try:
         data = json.loads(LOCKFILE_PATH.read_text())
-    except (json.JSONDecodeError, OSError) as exc:
+    except (json.JSONDecodeError, OSError, UnicodeError) as exc:
         raise RuntimeError(f"Cannot read {LOCKFILE_PATH}: {exc}") from exc
     if not isinstance(data, dict):
         raise RuntimeError(f"Invalid lockfile structure in {LOCKFILE_PATH}")
@@ -106,7 +106,7 @@ def read_lockfile() -> dict:
         return _empty_lockfile()
     try:
         data = json.loads(LOCKFILE_PATH.read_text())
-    except (json.JSONDecodeError, OSError) as exc:
+    except (json.JSONDecodeError, OSError, UnicodeError) as exc:
         raise RuntimeError(f"Cannot read {LOCKFILE_PATH}: {exc}") from exc
     if not isinstance(data, dict):
         raise RuntimeError(f"Invalid lockfile structure in {LOCKFILE_PATH}")
@@ -173,7 +173,7 @@ def update_lockfile(mutate: Any) -> Any:
         if LOCKFILE_PATH.exists():
             try:
                 data = json.loads(LOCKFILE_PATH.read_text())
-            except (json.JSONDecodeError, OSError) as exc:
+            except (json.JSONDecodeError, OSError, UnicodeError) as exc:
                 raise RuntimeError(f"Cannot read {LOCKFILE_PATH}: {exc}") from exc
             if not isinstance(data, dict):
                 raise RuntimeError(f"Invalid lockfile structure in {LOCKFILE_PATH}")
@@ -710,7 +710,7 @@ def migrate_agent_markers() -> int:
                 try:
                     marker_data = json.loads(marker.read_text())
                     markers_found.append((marker.parent.parent, marker_data))
-                except (json.JSONDecodeError, OSError):
+                except (json.JSONDecodeError, OSError, UnicodeError):
                     continue
         except (OSError, PermissionError):
             continue

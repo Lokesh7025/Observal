@@ -138,6 +138,7 @@ def test_read_valid_lockfile_preserves_persisted_data(isolated_lockfile):
     ("payload", "message"),
     [
         ("{broken", "Cannot read"),
+        (b"\xff", "Cannot read"),
         ("[]", "Invalid lockfile structure"),
         (json.dumps({"lock_version": 2, "registries": []}), "Unsupported lockfile version"),
         (json.dumps({"lock_version": 2}), "Unsupported lockfile version"),
@@ -146,19 +147,20 @@ def test_read_valid_lockfile_preserves_persisted_data(isolated_lockfile):
 )
 def test_read_rejects_malformed_and_unsupported_data(isolated_lockfile, payload, message):
     isolated_lockfile.path.parent.mkdir(parents=True)
-    isolated_lockfile.path.write_text(payload, encoding="utf-8")
+    isolated_lockfile.path.write_bytes(payload if isinstance(payload, bytes) else payload.encode())
 
     with pytest.raises(RuntimeError, match=message):
         lockfile.read_lockfile()
 
 
-@pytest.mark.parametrize("payload", ["{broken", "[]"])
+@pytest.mark.parametrize("payload", ["{broken", "[]", b"\xff"])
 def test_atomic_update_rejects_corrupt_lockfile_without_writing(isolated_lockfile, payload):
     isolated_lockfile.path.parent.mkdir(parents=True)
-    isolated_lockfile.path.write_text(payload, encoding="utf-8")
+    original = payload if isinstance(payload, bytes) else payload.encode()
+    isolated_lockfile.path.write_bytes(original)
     with pytest.raises(RuntimeError, match=r"Cannot read|Invalid lockfile structure"):
         lockfile.update_lockfile(lambda data: data.update({"registries": {}}))
-    assert isolated_lockfile.path.read_text(encoding="utf-8") == payload
+    assert isolated_lockfile.path.read_bytes() == original
 
 
 def test_read_wraps_filesystem_errors(isolated_lockfile, monkeypatch):

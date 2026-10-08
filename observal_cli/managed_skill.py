@@ -163,17 +163,20 @@ def _backup_root(target: Path, root: Path | None, *, create: bool = True) -> Pat
 
 def _records(data: dict, target: Path) -> list[tuple[str, dict]]:
     matches = []
-    for url, registry in data.get("registries", {}).items():
-        for section in registry.get("harnesses", {}).values():
-            for entry in section.get("standalone", []):
-                proof = entry.get("folder_receipt")
-                if proof and proof.get("target") == str(target):
-                    matches.append((url, entry))
-            for agent in section.get("agents", []):
-                for component in agent.get("components", []):
-                    proof = component.get("folder_receipt")
+    try:
+        for url, registry in data.get("registries", {}).items():
+            for section in registry.get("harnesses", {}).values():
+                for entry in section.get("standalone", []):
+                    proof = entry.get("folder_receipt")
                     if proof and proof.get("target") == str(target):
-                        matches.append((url, component))
+                        matches.append((url, entry))
+                for agent in section.get("agents", []):
+                    for component in agent.get("components", []):
+                        proof = component.get("folder_receipt")
+                        if proof and proof.get("target") == str(target):
+                            matches.append((url, component))
+    except (AttributeError, TypeError) as exc:
+        raise ManagedSkillError("Invalid machine lockfile structure; inspect it before installing") from exc
     return matches
 
 
@@ -300,9 +303,16 @@ def transact(
             raise ManagedSkillError("Reserved or colliding skill destination: " + "; ".join(collisions))
         if check:
             if lockfile.LOCKFILE_PATH.exists():
-                data = json.loads(lockfile.LOCKFILE_PATH.read_text())
+                try:
+                    data = json.loads(lockfile.LOCKFILE_PATH.read_text())
+                except (json.JSONDecodeError, OSError, UnicodeError) as exc:
+                    raise ManagedSkillError(f"Cannot read {lockfile.LOCKFILE_PATH}: {exc}") from exc
+                if not isinstance(data, dict):
+                    raise ManagedSkillError(f"Invalid lockfile structure in {lockfile.LOCKFILE_PATH}")
                 if data.get("lock_version") != lockfile.LOCK_VERSION:
                     raise ManagedSkillError("Migrate the machine lockfile before previewing a folder upgrade")
+                if not isinstance(data.get("registries"), dict):
+                    raise ManagedSkillError(f"Invalid lockfile structure in {lockfile.LOCKFILE_PATH}")
             else:
                 data = {"registries": {}}
         else:

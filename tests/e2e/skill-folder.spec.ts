@@ -355,6 +355,30 @@ test("review approval stays blocked when an exact candidate file preview fails",
 	await expect(sheet.getByRole("button", { name: "Approve", exact: true })).toBeDisabled();
 });
 
+test("review approval blocks same-size tampered text even when its preview returns HTTP 200", async ({ page }) => {
+	test.skip(process.env.OBSERVAL_SKILL_FOLDER_DELIVERY_ENABLED !== "true", "Only run on isolated temporary gate-on stack");
+	const listingId = process.env.OBSERVAL_GATED_LISTING_ID!;
+	const versionId = process.env.OBSERVAL_GATED_VERSION_ID!;
+	let tampered = false;
+	await page.route(`**/api/v1/skills/${listingId}/versions/${versionId}/files/SKILL.md`, async (route) => {
+		const response = await route.fetch();
+		const file = await response.json();
+		if (response.status() !== 200 || !file.content.startsWith("---")) throw new Error("Expected the candidate SKILL.md response");
+		tampered = true;
+		await route.fulfill({ response, json: { ...file, content: `+${file.content.slice(1)}` } });
+	});
+	await loginToWebUI(page);
+	await page.goto("/review?tab=components");
+	await page.getByRole("tab", { name: /components/i }).click();
+	await page.locator(`[data-review-item="skill:${versionId}"]`).click();
+	await page.getByRole("button", { name: "View full diff" }).click();
+	const sheet = page.getByRole("dialog");
+	await sheet.getByRole("button", { name: "SKILL.md" }).click();
+	await expect(sheet.getByText("File checksum differs from its reviewed manifest.")).toBeVisible();
+	expect(tampered).toBe(true);
+	await expect(sheet.getByRole("button", { name: "Approve", exact: true })).toBeDisabled();
+});
+
 test("review approval blocks a binary whose downloaded bytes disagree with the exact manifest", async ({ page }) => {
 	test.skip(process.env.OBSERVAL_SKILL_FOLDER_DELIVERY_ENABLED !== "true", "Only run on isolated temporary gate-on stack");
 	const listingId = process.env.OBSERVAL_GATED_LISTING_ID!;
@@ -369,9 +393,38 @@ test("review approval blocks a binary whose downloaded bytes disagree with the e
 	const sheet = page.getByRole("dialog");
 	await sheet.getByRole("button", { name: "assets", exact: true }).click();
 	await sheet.getByRole("button", { name: /icon.bin/ }).click();
-	await expect(sheet.getByText("Binary checksum differs from its reviewed manifest.")).toBeVisible();
+	await expect(sheet.getByText("File checksum differs from its reviewed manifest.")).toBeVisible();
 	await expect(sheet.getByRole("link", { name: /Download candidate binary/ })).toHaveCount(0);
 	await expect(sheet.getByRole("button", { name: "Approve", exact: true })).toBeDisabled();
+});
+
+test("Agent review explains blocked linked components instead of reporting missing skill files", async ({ page }) => {
+	test.skip(process.env.OBSERVAL_ISOLATED_STACK !== "true", "Creates an Agent only on an isolated stack");
+	const auth = { ...(await headers()), "Content-Type": "application/json" };
+	const response = await fetch(`${API_BASE}/api/v1/agents`, { method: "POST", headers: auth,
+		body: JSON.stringify({ name: `blocked-agent-review-${Date.now()}`, version: "1.0.0", owner: "admin",
+			description: "Isolated reviewer tooltip test", model_name: "claude-sonnet-4", prompt: "Review the test input.", components: [] }) });
+	expect(response.status).toBe(200);
+	const agent = await response.json();
+	try {
+		await page.route("**/api/v1/review?tab=agents", async (route) => {
+			const original = await route.fetch();
+			const items = await original.json();
+			if (!items.some((item: { id: string }) => item.id === agent.id)) throw new Error("Test Agent not present in review queue");
+			await route.fulfill({ response: original, json: items.map((item: { id: string }) =>
+				item.id === agent.id ? { ...item, components_ready: false } : item) });
+		});
+		await loginToWebUI(page);
+		await page.goto("/review?tab=agents");
+		await page.locator(`[data-review-item="${agent.id}"]`).click();
+		await page.getByRole("button", { name: "View full diff" }).click();
+		const approve = page.getByRole("dialog").getByRole("button", { name: "Approve", exact: true });
+		await expect(approve).toBeDisabled();
+		await approve.hover({ force: true });
+		await expect(page.getByRole("tooltip").getByText("Approve the pending linked components before approving this item.")).toBeVisible();
+	} finally {
+		await fetch(`${API_BASE}/api/v1/agents/${agent.id}`, { method: "DELETE", headers: auth });
+	}
 });
 
 test("review queue approves a folder by exact reviewed version instead of legacy listing route", async ({ page }) => {

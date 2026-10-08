@@ -131,6 +131,34 @@ def test_upgrade_preview_does_not_create_backup_or_lock_directories(store):
     assert not lockfile.LOCKFILE_PATH.parent.exists()
 
 
+@pytest.mark.parametrize(
+    ("contents", "message"),
+    [
+        ("{invalid", "Cannot read"),
+        (b"\xff", "Cannot read"),
+        ("[]", "Invalid lockfile structure"),
+        ('{"lock_version": 2, "registries": []}', "Invalid lockfile structure"),
+        ('{"lock_version": 2, "registries": {"https://example.org": null}}', "Invalid machine lockfile structure"),
+        (
+            '{"lock_version": 2, "registries": {"https://example.org": {"harnesses": {"pi": {"standalone": [null]}}}}}',
+            "Invalid machine lockfile structure",
+        ),
+        ('{"lock_version": 1, "harnesses": {}}', "Migrate the machine lockfile"),
+    ],
+)
+def test_upgrade_preview_refuses_malformed_lockfile_without_writing(store, contents, message):
+    target, root = store
+    lockfile.LOCKFILE_PATH.parent.mkdir()
+    original = contents if isinstance(contents, bytes) else contents.encode()
+    lockfile.LOCKFILE_PATH.write_bytes(original)
+    with pytest.raises(managed_skill.ManagedSkillError, match=message):
+        install(bundle("v1"), target, root, check=True)
+    assert lockfile.LOCKFILE_PATH.read_bytes() == original
+    assert not lockfile._LOCKFILE_LOCK.exists()
+    assert not root.exists()
+    assert not target.parent.exists()
+
+
 def test_initial_upgrade_preview_restore_and_prune(store):
     target, root = store
     one, two = bundle("v1"), bundle("v2", content=b"changed")

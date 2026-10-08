@@ -51,7 +51,24 @@ test("isolated owner successor is reviewed and its displayed version installs ex
     await page.getByRole("tab", { name: /components/i }).click();
     await page.locator(`[data-review-item="skill:${next.version_id}"]`).click();
     await page.getByRole("button", { name: "View full diff" }).click();
-    await expect(page.getByRole("dialog").getByText(/Compared to base/)).toBeVisible();
+    const sheet = page.getByRole("dialog");
+    await expect(sheet.getByText(/Compared to base/)).toBeVisible();
+    // The CI gate-on job creates this pending version itself. A same-size altered
+    // HTTP 200 preview must fail SHA-256 verification before approval is offered.
+    const fileUrl = `**/api/v1/skills/${base.listing_id}/versions/${next.version_id}/files/SKILL.md`;
+    let tampered = false;
+    await page.route(fileUrl, async (route) => {
+      const response = await route.fetch();
+      const file = await response.json();
+      if (response.status() !== 200 || !file.content.startsWith("---")) throw new Error("Expected candidate SKILL.md");
+      tampered = true;
+      await route.fulfill({ response, json: { ...file, content: `+${file.content.slice(1)}` } });
+    });
+    await sheet.getByRole("button", { name: "SKILL.md" }).click();
+    await expect(sheet.getByText("File checksum differs from its reviewed manifest.")).toBeVisible();
+    expect(tampered).toBe(true);
+    await expect(sheet.getByRole("button", { name: "Approve", exact: true })).toBeDisabled();
+    await page.unroute(fileUrl);
     await call("POST", `/review/skills/${base.listing_id}/versions/${next.version_id}/decision`, {
       action: "approve", observed_revision: pending.revision,
     });
