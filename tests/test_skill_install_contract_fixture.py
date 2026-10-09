@@ -14,6 +14,7 @@ import pytest
 
 from models.mcp import ListingStatus
 from models.skill import SkillVersion
+from observal_cli.skill_folder import MAX_BUNDLE_FILES, MAX_TREE_SIZE, validate_bundle
 from observal_shared.harness_registry import HARNESS_REGISTRY
 from schemas.agent import AgentInstallRequest, AgentInstallResponse
 from schemas.skill import SkillInstallRequest, SkillInstallResponse
@@ -24,10 +25,55 @@ from services.skill_bundle import (
     complete_skill_folder,
     declared_skill_folder_name,
     prepare_agent_skill_folders,
+    validate_skill_bundle,
 )
 from services.skill_config_generator import generate_skill_config
 from services.skill_validator import SkillValidationError
 from tests import discovery_support as ds
+
+
+def _legacy_direct_bundle(*, extra_files=None, skill_md_content=None, script_content="echo ok"):
+    version = SimpleNamespace(
+        id=uuid.uuid4(),
+        version="1.0.0",
+        description="Historical skill",
+        task_type="general",
+        target_agents=[],
+        supported_harnesses=["pi"],
+        delivery_mode="registry_direct",
+        skill_path="/",
+        skill_md_content=skill_md_content or "---\nname: legacy\ndescription: Historical skill\n---\n",
+        script_filename="run.sh",
+        script_content=script_content,
+        extra_files=extra_files or [],
+    )
+    return complete_skill_folder(uuid.uuid4(), version, skill_file_path=".pi/skills/legacy/SKILL.md")
+
+
+def test_maximum_extra_files_with_legacy_script_install_through_client_contract():
+    bundle = _legacy_direct_bundle(extra_files=[{"path": f"templates/{i}", "content": ""} for i in range(128)])
+    assert len(bundle.files) == MAX_BUNDLE_FILES == 130
+    assert len(validate_bundle(bundle.model_dump(mode="json")).files) == 130
+
+
+def test_grandfathered_large_direct_files_install_without_widening_authoring_limit():
+    content = "---\nname: legacy\ndescription: Historical skill\n---\n" + "x" * (2 * 1024 * 1024)
+    bundle = _legacy_direct_bundle(skill_md_content=content)
+    assert len(bundle.files[0].content) > 2 * 1024 * 1024
+    assert validate_bundle(bundle.model_dump(mode="json")).total_size < MAX_TREE_SIZE
+    with pytest.raises(SkillValidationError, match="per-file"):
+        validate_skill_bundle(delivery_mode="registry_direct", skill_md_content=content, extra_files=[])
+    large_script = _legacy_direct_bundle(script_content="x" * (2 * 1024 * 1024 + 1))
+    assert len(validate_bundle(large_script.model_dump(mode="json")).files[1].content) > 2 * 1024 * 1024
+    with pytest.raises(SkillValidationError, match="bundle"):
+        validate_skill_bundle(
+            delivery_mode="registry_direct",
+            skill_md_content=content,
+            script_filename="run.sh",
+            script_content="x" * MAX_TREE_SIZE,
+            extra_files=[],
+            enforce_limits=False,
+        )
 
 
 def test_server_bundle_fixture_binds_selected_files_modes_and_v2_digest():

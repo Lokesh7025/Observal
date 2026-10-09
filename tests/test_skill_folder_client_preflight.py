@@ -106,6 +106,45 @@ def test_skill_export_verifies_binary_attachment_before_atomic_write(tmp_path, m
     assert not broken.exists()
 
 
+def test_export_accepts_server_manifest_with_legacy_script_and_128_extras(tmp_path, monkeypatch):
+    from observal_cli import cmd_skill
+
+    listing_id, version_id = "1" * 32, "2" * 32
+    md = b"---\nname: legacy\ndescription: complete folder\n---\n"
+    entries = [("SKILL.md", md), ("scripts/run.sh", b"echo ok")]
+    entries += [(f"templates/{i}", b"") for i in range(128)]
+    files = [
+        {"path": path, "size": len(body), "sha256": hashlib.sha256(body).hexdigest(), "mode": "0644"}
+        for path, body in entries
+    ]
+    manifest = {"listing_id": listing_id, "version_id": version_id, "revision": "a" * 64, "files": files}
+    monkeypatch.setattr(cmd_skill.client, "resolve_registry_reference", Mock(return_value=listing_id))
+    monkeypatch.setattr(cmd_skill.client, "get", Mock(return_value=manifest))
+    contents = dict(entries)
+    declarations = {file["path"]: file for file in files}
+
+    def get_file(url):
+        path = url.split("/files/", 1)[1]
+        return json.dumps(
+            {
+                "version_id": version_id,
+                "revision": manifest["revision"],
+                "file": declarations[path],
+                "content": contents[path].decode(),
+                "encoding": "utf-8",
+            }
+        ).encode(), {"content-type": "application/json"}
+
+    monkeypatch.setattr(cmd_skill.client, "get_bytes_with_headers", get_file)
+    dest = tmp_path / "exported"
+    result = CliRunner().invoke(
+        app, ["registry", "skill", "export", listing_id, str(dest), "--version-id", version_id, "--output", "json"]
+    )
+    assert result.exit_code == 0, result.output
+    assert (dest / "scripts" / "run.sh").read_bytes() == b"echo ok"
+    assert len(list(dest.rglob("*"))) == 132  # 130 files and two directories.
+
+
 def test_complete_folder_is_written_before_agent_activation(tmp_path, monkeypatch):
     response = _agent_install()
     snippet = response["config_snippet"]

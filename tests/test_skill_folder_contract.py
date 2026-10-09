@@ -5,10 +5,12 @@
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from pydantic import ValidationError
 
+from api.routes.skill_files import _forkable_direct_base
 from schemas.component_version import VersionReviewRequest
 from schemas.skill import SkillFolderDraftRequest, SkillInstallRequest
 from schemas.skill_resources import (
@@ -22,6 +24,25 @@ from services.skill_bundle import MAX_BUNDLE_BYTES, validate_skill_bundle
 from services.skill_validator import SkillValidationError, validate_skill_md_content_frontmatter
 
 FIXTURE = json.loads((Path(__file__).parent / "fixtures/skill_folder_contract.json").read_text())
+
+
+def test_historical_direct_base_needing_authoring_repairs_uses_import_not_fork():
+    base = SimpleNamespace(
+        delivery_mode="registry_direct",
+        skill_md_content=FIXTURE["snapshot"]["skill_md_content"],
+        script_filename=None,
+        script_content=None,
+        extra_files=[],
+    )
+    assert _forkable_direct_base(base)
+    base.skill_md_content += "x" * (2 * 1024 * 1024)
+    assert not _forkable_direct_base(base)
+    base.skill_md_content = FIXTURE["snapshot"]["skill_md_content"]
+    base.extra_files = [{"path": "template.txt", "content": "x" * (2 * 1024 * 1024 + 1)}]
+    assert not _forkable_direct_base(base)
+    base.extra_files = []
+    base.delivery_mode = "git_fetch"
+    assert not _forkable_direct_base(base)
 
 
 def test_full_tree_and_request_examples_bind_to_same_version():

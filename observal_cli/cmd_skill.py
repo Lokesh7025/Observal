@@ -2057,7 +2057,7 @@ def skill_export(
     from urllib.parse import quote
 
     from observal_cli.skill_folder import (
-        MAX_EXTRA_FILES,
+        MAX_BUNDLE_FILES,
         BundleInstallError,
         BundleValidationError,
         _normalize_path,
@@ -2065,7 +2065,7 @@ def skill_export(
         validate_bundle,
     )
 
-    if not isinstance(files, list) or len(files) > MAX_EXTRA_FILES + 1:
+    if not isinstance(files, list) or len(files) > MAX_BUNDLE_FILES:
         fail(
             ErrorCategory.UNAVAILABLE,
             "Invalid skill file manifest.",

@@ -44,8 +44,9 @@ SUPPORTED_FEATURE = "skill_extra_files_v1"
 
 # Bundle limits (from server contract)
 MAX_EXTRA_FILES = 128
-MAX_FILE_SIZE = 2 * 1024 * 1024  # 2 MiB per file
-MAX_TREE_SIZE = 4 * 1024 * 1024  # 4 MiB total decoded
+MAX_FILE_SIZE = 2 * 1024 * 1024  # 2 MiB per newly authored file
+MAX_TREE_SIZE = 4 * 1024 * 1024  # 4 MiB total decoded; grandfathered files may exceed 2 MiB
+MAX_BUNDLE_FILES = MAX_EXTRA_FILES + 2  # SKILL.md, 128 extras, and an optional legacy script
 MAX_PATH_BYTES = 240  # UTF-8 bytes total
 MAX_PATH_UTF16 = 240  # UTF-16 units total
 MAX_SEGMENT_LEN = 100  # per path segment
@@ -235,8 +236,8 @@ def validate_bundle(
     # File count check
     if len(files_raw) == 0:
         raise BundleValidationError("Bundle has no files")
-    if len(files_raw) > MAX_EXTRA_FILES + 1:  # +1 for SKILL.md
-        raise BundleValidationError(f"Too many files ({len(files_raw)} > {MAX_EXTRA_FILES + 1})")
+    if len(files_raw) > MAX_BUNDLE_FILES:
+        raise BundleValidationError(f"Too many files ({len(files_raw)} > {MAX_BUNDLE_FILES})")
 
     # Validate each file and check for collisions
     validated_files: list[BundleFile] = []
@@ -355,9 +356,10 @@ def _validate_file(file_raw: dict[str, Any], expected_version_id: str) -> Bundle
     if len(content) != size_expected:
         raise BundleValidationError(f"Size mismatch for {path}: expected {size_expected}, got {len(content)}")
 
-    # Check individual file size limit
-    if len(content) > MAX_FILE_SIZE:
-        raise BundleValidationError(f"File too large ({len(content)} > {MAX_FILE_SIZE}): {path}")
+    # Stored historical direct files may exceed the new 2 MiB authoring limit.
+    # The server bounds each delivered file and the entire decoded folder to 4 MiB.
+    if len(content) > MAX_TREE_SIZE:
+        raise BundleValidationError(f"File too large ({len(content)} > {MAX_TREE_SIZE}): {path}")
 
     # Verify SHA-256
     actual_sha256 = hashlib.sha256(content).hexdigest()

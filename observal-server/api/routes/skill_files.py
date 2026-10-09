@@ -210,6 +210,24 @@ async def _save_file_edit(listing, version, edit, db: AsyncSession, *, replace: 
     )
 
 
+def _forkable_direct_base(version: SkillVersion) -> bool:
+    """A stored direct release can be copied into a new bounded authoring draft."""
+    if version.delivery_mode != "registry_direct":
+        return False
+    try:
+        _validate_new_md(version.skill_md_content)
+        validate_skill_bundle(
+            delivery_mode="registry_direct",
+            skill_md_content=version.skill_md_content,
+            script_filename=version.script_filename,
+            script_content=version.script_content,
+            extra_files=version.extra_files or [],
+        )
+    except SkillValidationError:
+        return False
+    return True
+
+
 @router.get("/{listing_id}/approved-base")
 async def get_skill_approved_base(
     listing_id: str,
@@ -253,12 +271,7 @@ async def get_skill_approved_base(
         revision = verified_skill_revision(listing, base)
     except SkillValidationError as exc:
         raise HTTPException(status_code=409, detail="Approved skill base is invalid") from exc
-    import_required = base.delivery_mode == "git_fetch"
-    if base.delivery_mode == "registry_direct":
-        try:
-            _validate_new_md(base.skill_md_content)
-        except SkillValidationError:
-            import_required = True  # Historical bytes cannot be forked as a conforming folder.
+    import_required = not _forkable_direct_base(base)
     response.headers["Cache-Control"] = "no-store"
     return {
         "listing_id": str(listing.id),
@@ -404,11 +417,7 @@ async def import_skill_folder_candidate(
         )
     ).scalar_one()
     if base.delivery_mode == "registry_direct":
-        try:
-            _validate_new_md(base.skill_md_content)
-        except SkillValidationError:
-            pass  # Historic frontmatter requires an authored full-folder snapshot.
-        else:
+        if _forkable_direct_base(base):
             raise HTTPException(status_code=422, detail="Use fork for an existing reviewed direct folder")
     elif base.delivery_mode != "git_fetch":
         raise HTTPException(status_code=422, detail="Only reviewed Git or historical direct skills can be imported")
