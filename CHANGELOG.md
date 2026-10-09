@@ -18,6 +18,10 @@ All notable changes to this project will be documented in this file.
 
 - add opt-in, local-only harness inventory to `observal scan`
 
+### Fixes
+
+- register remote (HTTP/SSE) MCP servers when pulling an agent for Claude Code, and generate a valid `claude mcp add --transport` command for standalone remote MCP installs
+
 ### Documentation
 
 - correct the live log viewer command to `observal ops logs`

@@ -14,6 +14,29 @@ from services.harness.helpers import (
 )
 
 
+def _is_remote(cfg: dict) -> bool:
+    return bool(cfg.get("url")) or cfg.get("type") in ("sse", "streamable-http", "http")
+
+
+def _claude_mcp_add_command(name: str, cfg: dict, scope: str | None = None) -> list[str]:
+    """Build the ``claude mcp add`` command that registers one MCP server.
+
+    Remote servers (``url``) need ``--transport http|sse`` and the URL as the
+    positional argument; ``claude mcp add`` has no ``--url`` flag. Headers go
+    last because ``--header`` is variadic and would swallow the name and URL.
+    """
+    # Match a user-scoped agent; the default "local" scope only covers the
+    # directory the pull ran in.
+    scope_args = ["--scope", "user"] if scope == "user" else []
+    if _is_remote(cfg):
+        transport = "sse" if cfg.get("type") == "sse" else "http"
+        cmd = ["claude", "mcp", "add", "--transport", transport, *scope_args, name, cfg.get("url", "")]
+        for key, value in (cfg.get("headers") or {}).items():
+            cmd += ["--header", f"{key}: {value}"]
+        return cmd
+    return ["claude", "mcp", "add", *scope_args, name, "--", cfg.get("command", ""), *(cfg.get("args") or [])]
+
+
 class ClaudeCodeAdapter(BaseHarnessAdapter):
     """Claude Code harness adapter."""
 
@@ -53,7 +76,7 @@ class ClaudeCodeAdapter(BaseHarnessAdapter):
         if ctx.url:
             entry = ctx.standard_entry()
             return {
-                "command": ["claude", "mcp", "add", ctx.name, "--url", ctx.url],
+                "command": _claude_mcp_add_command(ctx.name, entry),
                 "type": "shell_command",
                 "claude_settings_snippet": {"env": ctx.server_env} if ctx.server_env else {},
                 "mcpServers": {ctx.name: entry},
@@ -80,19 +103,23 @@ class ClaudeCodeAdapter(BaseHarnessAdapter):
         rules_content = ctx.rules_content
         hook_configs = ctx.hook_configs
         skill_configs = ctx.skill_configs
+        scope = options.get("scope", HARNESS_REGISTRY["claude-code"]["default_scope"])
         setup_commands = []
         claude_mcps = {}
         for name, cfg in mcp_configs.items():
-            if cfg.get("url") or cfg.get("type") in ("sse", "streamable-http"):
-                # SSE/streamable-http entry: preserve as-is (url, headers, env)
+            if _is_remote(cfg):
+                # Remote (SSE/streamable-http) entry: preserve as-is (url, headers, env).
+                # The frontmatter only references servers by name, so each one must
+                # also be registered with Claude Code or the agent cannot load it.
                 claude_mcps[name] = cfg
             else:
-                cmd = cfg.get("command", "")
-                args = cfg.get("args", [])
-                setup_commands.append(["claude", "mcp", "add", name, "--", cmd, *args])
-                claude_mcps[name] = {"command": cmd, "args": args, "env": cfg.get("env", {})}
+                claude_mcps[name] = {
+                    "command": cfg.get("command", ""),
+                    "args": cfg.get("args", []),
+                    "env": cfg.get("env", {}),
+                }
+            setup_commands.append(_claude_mcp_add_command(name, claude_mcps[name], scope))
 
-        scope = options.get("scope", HARNESS_REGISTRY["claude-code"]["default_scope"])
         tools = options.get("tools", "")
         color = options.get("color", "")
 

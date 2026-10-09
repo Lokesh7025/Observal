@@ -853,8 +853,16 @@ class TestGenerateConfigSSE:
         listing = self._make_listing()
         cfg = generate_config(listing, "claude-code")
         assert cfg["type"] == "shell_command"
-        # Should have a command to add the MCP with --url
-        assert "--url" in cfg["command"]
+        # `claude mcp add` has no --url flag: transport flag + positional URL
+        assert cfg["command"] == [
+            "claude",
+            "mcp",
+            "add",
+            "--transport",
+            "sse",
+            "my-sse-server",
+            "https://example.com/mcp",
+        ]
         # mcpServers should also be present
         server = cfg["mcpServers"]["my-sse-server"]
         assert server["type"] == "sse"

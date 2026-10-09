@@ -563,6 +563,83 @@ class TestMcpListingClaudeCodeAdapter:
         assert cfg["mcp_config"]["my-mcp"]["args"] == ["-y", "my-mcp"]
         assert cfg["mcp_setup_commands"] == [["claude", "mcp", "add", "my-mcp", "--", "npx", "-y", "my-mcp"]]
 
+    @staticmethod
+    def _remote_listing(comp_id: uuid.UUID, transport: str = "streamable-http") -> MagicMock:
+        listing = MagicMock()
+        listing.name = "linear"
+        listing.id = comp_id
+        listing.url = "https://mcp.linear.app/mcp"
+        listing.transport = transport
+        listing.headers = None
+        listing.command = None
+        listing.args = None
+        listing.framework = None
+        listing.docker_image = None
+        listing.auto_approve = None
+        listing.environment_variables = []
+        return listing
+
+    def test_remote_mcp_gets_setup_command(self):
+        """A URL-based MCP must be registered, or the frontmatter reference dangles."""
+        comp_id = uuid.uuid4()
+        agent = _make_agent(components=[_make_component("mcp", comp_id)])
+        cfg = generate_agent_config(agent, "claude-code", mcp_listings={comp_id: self._remote_listing(comp_id)})
+
+        fm = yaml.safe_load(cfg["agent_profile"]["content"].split("---", 2)[1])
+        assert "linear" in fm["mcpServers"]
+        assert cfg["mcp_config"]["linear"]["url"] == "https://mcp.linear.app/mcp"
+        assert cfg["mcp_setup_commands"] == [
+            ["claude", "mcp", "add", "--transport", "http", "linear", "https://mcp.linear.app/mcp"]
+        ]
+
+    def test_remote_mcp_sse_transport_and_headers(self):
+        from services.harness.claude_code import _claude_mcp_add_command
+
+        cfg = {"type": "sse", "url": "https://example.com/sse", "headers": {"X-Api-Key": "abc", "X-Team": "core"}}
+        # --header is variadic, so it must come after the positional name and URL.
+        assert _claude_mcp_add_command("remote", cfg) == [
+            "claude",
+            "mcp",
+            "add",
+            "--transport",
+            "sse",
+            "remote",
+            "https://example.com/sse",
+            "--header",
+            "X-Api-Key: abc",
+            "--header",
+            "X-Team: core",
+        ]
+
+    def test_user_scope_registers_servers_at_user_scope(self):
+        comp_id = uuid.uuid4()
+        agent = _make_agent(
+            components=[_make_component("mcp", comp_id)],
+            external_mcps=[{"name": "srv", "command": "npx", "args": ["-y", "srv"]}],
+        )
+        cfg = generate_agent_config(
+            agent,
+            "claude-code",
+            options={"scope": "user"},
+            mcp_listings={comp_id: self._remote_listing(comp_id)},
+        )
+        assert sorted(cfg["mcp_setup_commands"]) == sorted(
+            [
+                [
+                    "claude",
+                    "mcp",
+                    "add",
+                    "--transport",
+                    "http",
+                    "--scope",
+                    "user",
+                    "linear",
+                    "https://mcp.linear.app/mcp",
+                ],
+                ["claude", "mcp", "add", "--scope", "user", "srv", "--", "npx", "-y", "srv"],
+            ]
+        )
+
 
 # ═══════════════════════════════════════════════════════════════════
 # 12. generate_agent_config — name sanitization in output
