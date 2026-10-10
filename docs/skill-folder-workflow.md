@@ -37,6 +37,21 @@ editable and the submission control explains why it is unavailable. A reviewer
 must inspect that exact candidate before approving it. Until approval, old
 released bytes and their installations remain unchanged.
 
+Reviewers can use the browser or the CLI. In the CLI, `review show` prints a
+folder candidate's version UUID, revision and files, and `review approve` lists
+the files (with added, removed, modified paths against a stored base) and binds
+the decision to that revision:
+
+```sh
+observal admin review show NAMESPACE/SLUG
+observal admin review approve NAMESPACE/SLUG --revision REVISION   # exactly what you inspected
+observal admin review approve NAMESPACE/SLUG --yes                  # accept the files listed for this run
+observal admin review approve NAMESPACE/SLUG --revision REVISION --ack-git-base   # Git -> folder conversion
+observal admin review reject NAMESPACE/SLUG --reason 'Unsafe script'
+```
+
+Pass `--version-id UUID` when a listing has several pending versions.
+
 To release a successor under the *same listing*:
 
 ```sh
