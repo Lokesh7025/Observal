@@ -462,3 +462,138 @@ def test_different_targets_cannot_orphan_listing_receipt(store):
     owned = entries[0]["folder_receipt"]["target"]
     assert owned in {str(target), str(second)}
     assert {str(path) for path in (target, second) if path.exists()} == {owned}
+
+
+def test_restore_lockfile_failure_after_atomic_replace_keeps_tree_and_lock_consistent(store, monkeypatch):
+    target, root = store
+    install(bundle("v1"), target, root)
+    done = install(bundle("v2", content=b"changed"), target, root)
+    saved = lockfile._write_locked
+
+    def fail_after_commit(data):
+        saved(data)  # the receipt now names v1, then e.g. the directory fsync fails
+        raise OSError("injected post-replace failure")
+
+    monkeypatch.setattr(lockfile, "_write_locked", fail_after_commit)
+    with pytest.raises(managed_skill.ManagedSkillError, match="Restored skill is complete and recorded"):
+        managed_skill.restore_backup(done["backup_id"], backup_root=root)
+    monkeypatch.setattr(lockfile, "_write_locked", saved)
+    entry = lockfile.read_lockfile()["registries"]["https://example.org"]["harnesses"]["pi"]["standalone"][0]
+    assert entry["version_id"] == "v1"
+    assert (target / "SKILL.md").read_bytes() == b"skill"  # never roll the files back under an advanced lock
+    managed_skill.recover(target, backup_root=root)  # the retained marker must finalize cleanly
+    assert (target / "SKILL.md").read_bytes() == b"skill"
+    managed_skill.verify_tree(target, entry["folder_receipt"])
+    assert not list(root.glob("*/marker.json"))
+
+
+def test_restore_lockfile_unreadable_after_swap_refuses_rollback(store, monkeypatch):
+    target, root = store
+    install(bundle("v1"), target, root)
+    done = install(bundle("v2", content=b"changed"), target, root)
+
+    saved_read = lockfile.read_lockfile
+    failed = []
+
+    def fail_write(_record):
+        failed.append(True)
+        raise OSError("boom")
+
+    def unreadable_after_failure():
+        if failed:
+            raise RuntimeError("lock unreadable")
+        return saved_read()
+
+    monkeypatch.setattr(lockfile, "update_lockfile", fail_write)
+    monkeypatch.setattr(lockfile, "read_lockfile", unreadable_after_failure)
+    with pytest.raises(managed_skill.ManagedSkillError, match="Cannot read lock after restore"):
+        managed_skill.restore_backup(done["backup_id"], backup_root=root)
+    assert list(root.glob("*/marker.json"))  # recovery evidence is retained, not silently deleted
+
+
+def test_ancestor_symlink_swapped_during_staging_is_refused(tmp_path, monkeypatch):
+    config = tmp_path / "config"
+    monkeypatch.setattr(lockfile, "CONFIG_DIR", config)
+    monkeypatch.setattr(lockfile, "LOCKFILE_PATH", config / "lockfile.json")
+    monkeypatch.setattr(lockfile, "_LOCKFILE_LOCK", config / "lockfile.lock")
+    project = tmp_path / "project"
+    target = project / ".pi" / "skills" / "example"
+    outside = tmp_path / "outside"
+    (outside / "skills").mkdir(parents=True)
+    real_install = managed_skill.install_folder_bundle
+
+    swapped = []
+
+    def swap_ancestor(b, stage):
+        real_install(b, stage)
+        (project / ".pi").rename(project / ".pi-original")
+        (project / ".pi").symlink_to(outside, target_is_directory=True)
+        swapped.append(True)
+
+    monkeypatch.setattr(managed_skill, "install_folder_bundle", swap_ancestor)
+    with pytest.raises(managed_skill.ManagedSkillError, match="changed"):
+        install(bundle("v1"), target, tmp_path / "backups")
+    assert swapped  # the refusal came from the detected substitution, not an unrelated early failure
+    assert not (outside / "skills" / "example").exists()
+    registries = lockfile.read_lockfile().get("registries", {})
+    assert not registries.get("https://example.org", {}).get("harnesses", {}).get("pi", {}).get("standalone")
+
+
+def _isolated_machine(tmp_path, monkeypatch):
+    config = tmp_path / "config"
+    monkeypatch.setattr(lockfile, "CONFIG_DIR", config)
+    monkeypatch.setattr(lockfile, "LOCKFILE_PATH", config / "lockfile.json")
+    monkeypatch.setattr(lockfile, "_LOCKFILE_LOCK", config / "lockfile.lock")
+
+
+def test_backup_ancestor_swap_never_deletes_redirected_staging_directory(tmp_path, monkeypatch):
+    _isolated_machine(tmp_path, monkeypatch)
+    target = tmp_path / "project" / ".pi" / "skills" / "example"
+    backups = tmp_path / "bk" / "root"
+    outside = tmp_path / "outside"
+    real_install = managed_skill.install_folder_bundle
+    sentinel = []
+
+    def swap_backup_ancestor(b, stage):
+        real_install(b, stage)
+        (tmp_path / "bk").rename(tmp_path / "bk-original")
+        redirected = outside / "root" / stage.parent.name / "staged"
+        redirected.mkdir(parents=True)
+        (redirected / "unrelated.txt").write_text("not ours")
+        sentinel.append(redirected / "unrelated.txt")
+        (tmp_path / "bk").symlink_to(outside, target_is_directory=True)
+
+    monkeypatch.setattr(managed_skill, "install_folder_bundle", swap_backup_ancestor)
+    with pytest.raises(managed_skill.ManagedSkillError):
+        install(bundle("v1"), target, backups)
+    assert sentinel and sentinel[0].read_text() == "not ours"  # cleanup must not follow the substituted ancestor
+    assert not target.exists()
+
+
+def test_restore_refuses_when_destination_ancestor_is_swapped_after_pinning(tmp_path, monkeypatch):
+    _isolated_machine(tmp_path, monkeypatch)
+    project = tmp_path / "project"
+    target = project / ".pi" / "skills" / "example"
+    backups = tmp_path / "backups"
+    install(bundle("v1"), target, backups)
+    done = install(bundle("v2", content=b"changed"), target, backups)
+    outside = tmp_path / "outside"
+    (outside / "skills" / "example").mkdir(parents=True)
+    (outside / "skills" / "example" / "unrelated.txt").write_text("not ours")
+    real_pin = managed_skill._pin_dir
+    calls = []
+
+    def pin_then_swap(path):
+        fd = real_pin(path)
+        calls.append(path)
+        if len(calls) == 3:  # destination parent, backup folder and replacement are all pinned
+            (project / ".pi").rename(project / ".pi-original")
+            (project / ".pi").symlink_to(outside, target_is_directory=True)
+        return fd
+
+    monkeypatch.setattr(managed_skill, "_pin_dir", pin_then_swap)
+    with pytest.raises(managed_skill.ManagedSkillError, match="changed"):
+        managed_skill.restore_backup(done["backup_id"], backup_root=backups)
+    assert calls and (outside / "skills" / "example" / "unrelated.txt").read_text() == "not ours"
+    assert not (outside / "skills" / "example" / "SKILL.md").exists()
+    assert (project / ".pi-original" / "skills" / "example" / "SKILL.md").read_bytes() == b"changed"

@@ -98,6 +98,36 @@ def _safe_parents(path: Path) -> None:
             raise ManagedSkillError(f"Symlink in destination or backup path: {part}")
 
 
+def _pin_dir(path: Path) -> int:
+    """Open `path` by walking from `/` with O_NOFOLLOW on *every* component.
+
+    O_NOFOLLOW on the final component alone lets a symlinked ancestor (say `.pi`) redirect an install elsewhere.
+    """
+    fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        for part in path.parts[1:]:
+            child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            os.close(fd)
+            fd = child
+    except OSError as exc:
+        os.close(fd)
+        raise ManagedSkillError(f"Symlinked or missing directory in path: {path}") from exc
+    return fd
+
+
+def _still_pinned(path: Path, pinned_fd: int) -> bool:
+    """True only if `path` still resolves, with no symlink anywhere, to the directory we pinned."""
+    try:
+        probe = _pin_dir(path)
+    except ManagedSkillError:
+        return False
+    try:
+        now, then = os.fstat(probe), os.fstat(pinned_fd)
+        return (now.st_dev, now.st_ino) == (then.st_dev, then.st_ino)
+    finally:
+        os.close(probe)
+
+
 def _backup_root(target: Path, root: Path | None, *, create: bool = True) -> Path:
     root = (root or lockfile.CONFIG_DIR / "backups" / "skills").expanduser().absolute()
     _safe_parents(root)
@@ -464,16 +494,20 @@ def transact(
         folder_fd: int | None = None
 
         def parent_stable() -> bool:
-            if parent_fd is None or target.parent.is_symlink():
-                return False
-            try:
-                current = target.parent.stat(follow_symlinks=False)
-                pinned = os.fstat(parent_fd)
-            except OSError:
-                return False
-            return (current.st_dev, current.st_ino) == (pinned.st_dev, pinned.st_ino)
+            return parent_fd is not None and _still_pinned(target.parent, parent_fd)
+
+        def folder_stable() -> bool:
+            return folder_fd is not None and _still_pinned(folder, folder_fd)
+
+        def require_stable() -> None:
+            # Pathname deletes below would follow a substituted ancestor and remove unrelated files.
+            if not parent_stable() or not folder_stable():
+                raise ManagedSkillError(f"Skill destination or backup path changed; inspect recovery marker {marker}")
 
         try:
+            # Pin both hierarchies before any staging so a later ancestor swap cannot move the install elsewhere.
+            parent_fd = _pin_dir(target.parent)
+            folder_fd = _pin_dir(folder)
             install_folder_bundle(bundle, stage)
             verify_tree(stage, proof)
             # Marker exists before any rename. Atomic replacement + fsync for crash visibility.
@@ -481,12 +515,11 @@ def transact(
             os.chmod(marker, 0o600)
             with marker.open("rb") as handle:
                 os.fsync(handle.fileno())
-            # Pin both parents before changing any active path; never follow a
-            # substituted symlink through a path-based rename during the swap.
-            parent_fd = os.open(target.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-            folder_fd = os.open(folder, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-            if not parent_stable():
-                raise ManagedSkillError("Skill destination parent changed during staging; no files were swapped")
+            # Renames use the descriptors pinned above; refuse if either path no longer leads to those directories.
+            if not parent_stable() or not folder_stable():
+                raise ManagedSkillError(
+                    "Skill destination or backup path changed during staging; no files were swapped"
+                )
             if previous:
                 verify_tree(target, previous)
                 os.rename(target.name, "old", src_dir_fd=parent_fd, dst_dir_fd=folder_fd)
@@ -554,6 +587,7 @@ def transact(
                     verify_tree(backup, previous)
                     if target.exists():
                         verify_tree(target, proof)
+                        require_stable()
                         shutil.rmtree(target)
                     if parent_fd is not None and folder_fd is not None:
                         os.rename("old", target.name, src_dir_fd=folder_fd, dst_dir_fd=parent_fd)
@@ -567,6 +601,7 @@ def transact(
             elif target.exists() and not previous:
                 try:
                     verify_tree(target, proof)
+                    require_stable()
                     shutil.rmtree(target)
                     marker.unlink(missing_ok=True)
                 except Exception as recovery_error:
@@ -575,12 +610,12 @@ def transact(
                     ) from exc
             raise ManagedSkillError(f"Folder transaction failed; original installation preserved: {exc}") from exc
         finally:
+            if folder_stable() and stage.exists():  # a redirected `staged` path may not be ours to delete
+                shutil.rmtree(stage)
             if folder_fd is not None:
                 os.close(folder_fd)
             if parent_fd is not None:
                 os.close(parent_fd)
-            if stage.exists():
-                shutil.rmtree(stage)
 
 
 def backups_list(*, backup_root: Path | None = None) -> list[dict]:
@@ -632,66 +667,106 @@ def restore_backup(backup_id: str, *, backup_root: Path | None = None, prune: bo
         # Restoring consumes the old backup. Retain the current release as a new backup.
         replacement = root / f"{key}-{uuid.uuid4().hex}"
         replacement.mkdir(mode=0o700)
-        (replacement / "marker.json").write_text(
-            json.dumps(
-                {
-                    "target": str(target),
-                    "old": state["new"],
-                    "new": state["old"],
-                    "restore_from": str(folder / "old"),
-                }
-            )
-        )
-        os.chmod(replacement / "marker.json", 0o600)
-        committed = False
+        pins: list[tuple[Path, int]] = []
         try:
-            target.rename(replacement / "old")
-            (folder / "old").rename(target)
+            # Same boundary as transact(): every rename below is descriptor-relative to directories pinned here.
+            for path in (target.parent, folder, replacement):
+                pins.append((path, _pin_dir(path)))
+        except ManagedSkillError:
+            for _path, fd in pins:
+                os.close(fd)
+            replacement.rmdir()
+            raise
+        parent_fd, folder_fd, replacement_fd = (fd for _path, fd in pins)
 
-            def update(data: dict) -> None:
-                records = _records(data, target)
-                records[0][1]["folder_receipt"] = state["old"]
-                records[0][1]["version_id"] = state["old"]["version_id"]
-                records[0][1]["digest"] = state["old"]["digest"]
-                if state.get("old_version"):
-                    records[0][1]["version"] = state["old_version"]
-                records[0][1].pop("requested_version", None)
+        def stable() -> bool:
+            return all(_still_pinned(path, fd) for path, fd in pins)
 
-            (replacement / "backup.json").write_text(
+        try:
+            if not stable():
+                raise ManagedSkillError("Skill destination or backup path changed; no files were moved")
+            (replacement / "marker.json").write_text(
                 json.dumps(
                     {
                         "target": str(target),
                         "old": state["new"],
                         "new": state["old"],
-                        "old_version": matches[0][1].get("version"),
-                        "new_version": state.get("old_version"),
+                        "restore_from": str(folder / "old"),
                     }
                 )
             )
-            os.chmod(replacement / "backup.json", 0o600)
-            lockfile.update_lockfile(update)
-            committed = True
-            (replacement / "marker.json").unlink()
-            shutil.rmtree(folder)
-            return {"restored": backup_id, "current_backup": replacement.name}
-        except Exception as exc:
-            if committed:
-                raise ManagedSkillError(
-                    f"Restored skill is complete and recorded; finalize backup at {replacement}: {exc}"
-                ) from exc
+            os.chmod(replacement / "marker.json", 0o600)
+            committed = False
             try:
-                current = replacement / "old"
-                original = folder / "old"
-                if current.is_dir():
-                    verify_tree(current, state["new"])
-                    if target.exists():
-                        verify_tree(target, state["old"])
-                        target.rename(original)
-                    if not target.exists():
-                        current.rename(target)
-                    (replacement / "marker.json").unlink(missing_ok=True)
-            except (OSError, ManagedSkillError) as rollback_error:
-                raise ManagedSkillError(
-                    f"Restore interrupted; manual recovery at {replacement} and {folder}: {rollback_error}"
-                ) from exc
-            raise ManagedSkillError(f"Restore failed; active installation preserved: {exc}") from exc
+                os.rename(target.name, "old", src_dir_fd=parent_fd, dst_dir_fd=replacement_fd)
+                os.rename("old", target.name, src_dir_fd=folder_fd, dst_dir_fd=parent_fd)
+
+                def update(data: dict) -> None:
+                    records = _records(data, target)
+                    records[0][1]["folder_receipt"] = state["old"]
+                    records[0][1]["version_id"] = state["old"]["version_id"]
+                    records[0][1]["digest"] = state["old"]["digest"]
+                    if state.get("old_version"):
+                        records[0][1]["version"] = state["old_version"]
+                    records[0][1].pop("requested_version", None)
+
+                (replacement / "backup.json").write_text(
+                    json.dumps(
+                        {
+                            "target": str(target),
+                            "old": state["new"],
+                            "new": state["old"],
+                            "old_version": matches[0][1].get("version"),
+                            "new_version": state.get("old_version"),
+                        }
+                    )
+                )
+                os.chmod(replacement / "backup.json", 0o600)
+                lockfile.update_lockfile(update)
+                committed = True
+                (replacement / "marker.json").unlink()
+                if stable():  # never rmtree through a substituted ancestor
+                    shutil.rmtree(folder)
+                return {"restored": backup_id, "current_backup": replacement.name}
+            except Exception as exc:
+                if committed:
+                    raise ManagedSkillError(
+                        f"Restored skill is complete and recorded; finalize backup at {replacement}: {exc}"
+                    ) from exc
+                # update_lockfile can fail after its atomic replace (e.g. the directory fsync), so the lock may
+                # already name the restored release. Never roll the files back until the persisted receipt is known.
+                try:
+                    observed = _records(lockfile.read_lockfile(), target)
+                except Exception as uncertain:
+                    raise ManagedSkillError(
+                        f"Cannot read lock after restore at {target}; inspect {replacement} and {folder}"
+                    ) from uncertain
+                persisted = observed[0][1].get("folder_receipt") if len(observed) == 1 else None
+                if persisted == state["old"]:
+                    raise ManagedSkillError(
+                        f"Restored skill is complete and recorded; finalize backup at {replacement}: {exc}"
+                    ) from exc
+                if persisted != state["new"]:
+                    raise ManagedSkillError(
+                        f"Lock state changed during restore; inspect {replacement} and {folder} before retrying"
+                    ) from exc
+                try:
+                    if not stable():
+                        raise ManagedSkillError("Skill destination or backup path changed during restore")
+                    current = replacement / "old"
+                    if current.is_dir():
+                        verify_tree(current, state["new"])
+                        if target.exists():
+                            verify_tree(target, state["old"])
+                            os.rename(target.name, "old", src_dir_fd=parent_fd, dst_dir_fd=folder_fd)
+                        if not target.exists():
+                            os.rename("old", target.name, src_dir_fd=replacement_fd, dst_dir_fd=parent_fd)
+                        (replacement / "marker.json").unlink(missing_ok=True)
+                except (OSError, ManagedSkillError) as rollback_error:
+                    raise ManagedSkillError(
+                        f"Restore interrupted; manual recovery at {replacement} and {folder}: {rollback_error}"
+                    ) from exc
+                raise ManagedSkillError(f"Restore failed; active installation preserved: {exc}") from exc
+        finally:
+            for _path, fd in pins:
+                os.close(fd)
