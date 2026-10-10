@@ -19,7 +19,7 @@ from observal_cli import lockfile, managed_skill
 from observal_cli.skill_folder import validate_bundle
 
 
-def bundle(version, content=b"skill", script=b"\x00\xff"):
+def bundle(version, content=b"skill", script=b"\x00\xff", script_mode="0755"):
     def file(path, data, mode):
         return {
             "path": path,
@@ -38,7 +38,7 @@ def bundle(version, content=b"skill", script=b"\x00\xff"):
             "skill_file_path": ".pi/skills/example/SKILL.md",
             "files": [
                 file("SKILL.md", content, "0644"),
-                file("scripts/run", script, "0755"),
+                file("scripts/run", script, script_mode),
                 file("empty", b"", "0644"),
             ],
         }
@@ -623,6 +623,45 @@ def test_replacement_on_another_filesystem_names_the_backup_root_fix(store, monk
     assert (target / "SKILL.md").read_bytes() == b"skill"
 
 
+def test_upgrade_preview_reports_modified_files_and_mode_changes(store):
+    target, root = store
+    install(bundle("v1"), target, root)
+    preview = install(bundle("v2", content=b"changed", script_mode="0644"), target, root, check=True)
+    assert preview["modified"] == ["SKILL.md"]
+    assert preview["mode_changed"] == ["scripts/run"]
+    assert preview["added"] == [] and preview["removed"] == []
+    identical = install(bundle("v1"), target, root, check=True)
+    assert identical["action"] == "unchanged"
+
+
+def test_ancestor_swapped_after_record_is_never_reported_as_success(tmp_path, monkeypatch):
+    _isolated_machine(tmp_path, monkeypatch)
+    project = tmp_path / "project"
+    target = project / ".pi" / "skills" / "example"
+    backups = tmp_path / "backups"
+    outside = tmp_path / "outside"
+    (outside / "skills").mkdir(parents=True)
+    real_update = lockfile.update_lockfile
+
+    def update_then_swap(mutate):
+        result = real_update(mutate)  # the receipt is durable, then the destination ancestor is substituted
+        (project / ".pi").rename(project / ".pi-original")
+        (project / ".pi").symlink_to(outside, target_is_directory=True)
+        return result
+
+    monkeypatch.setattr(lockfile, "update_lockfile", update_then_swap)
+    with pytest.raises(managed_skill.ManagedSkillCommittedError, match="recorded, but") as exc:
+        install(bundle("v1"), target, backups)
+    assert exc.value.remediation
+    assert exc.value.outcome["action"] == "install"  # callers learn the lock advanced, so they must not roll back
+    assert list(backups.glob("*/marker.json"))  # evidence retained for reconciliation
+    assert not (outside / "skills" / "example").exists()
+    monkeypatch.setattr(lockfile, "update_lockfile", real_update)
+    with pytest.raises(managed_skill.ManagedSkillError):  # fails closed until the path is repaired
+        install(bundle("v2", content=b"changed"), target, backups)
+    assert not (outside / "skills" / "example").exists()
+
+
 def test_crash_while_staging_beside_the_destination_is_cleaned_up_by_recovery(store, monkeypatch):
     target, root = store
     monkeypatch.setattr(managed_skill, "_same_device", lambda _root, _target: False)
@@ -667,34 +706,6 @@ def test_recovery_refuses_a_marker_that_names_a_stage_elsewhere(store):
     with pytest.raises(managed_skill.ManagedSkillError, match="Invalid recovery marker stage"):
         managed_skill.recover(target, backup_root=root)
     assert victim.is_dir()
-
-
-def test_ancestor_swapped_after_record_is_never_reported_as_success(tmp_path, monkeypatch):
-    _isolated_machine(tmp_path, monkeypatch)
-    project = tmp_path / "project"
-    target = project / ".pi" / "skills" / "example"
-    backups = tmp_path / "backups"
-    outside = tmp_path / "outside"
-    (outside / "skills").mkdir(parents=True)
-    real_update = lockfile.update_lockfile
-
-    def update_then_swap(mutate):
-        result = real_update(mutate)  # the receipt is durable, then the destination ancestor is substituted
-        (project / ".pi").rename(project / ".pi-original")
-        (project / ".pi").symlink_to(outside, target_is_directory=True)
-        return result
-
-    monkeypatch.setattr(lockfile, "update_lockfile", update_then_swap)
-    with pytest.raises(managed_skill.ManagedSkillCommittedError, match="recorded, but") as exc:
-        install(bundle("v1"), target, backups)
-    assert exc.value.remediation
-    assert exc.value.outcome["action"] == "install"  # callers learn the lock advanced, so they must not roll back
-    assert list(backups.glob("*/marker.json"))  # evidence retained for reconciliation
-    assert not (outside / "skills" / "example").exists()
-    monkeypatch.setattr(lockfile, "update_lockfile", real_update)
-    with pytest.raises(managed_skill.ManagedSkillError):  # fails closed until the path is repaired
-        install(bundle("v2", content=b"changed"), target, backups)
-    assert not (outside / "skills" / "example").exists()
 
 
 def test_unchanged_reinstall_after_a_cross_filesystem_first_install_is_not_refused(store, monkeypatch):

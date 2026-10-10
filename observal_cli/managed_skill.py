@@ -535,20 +535,19 @@ def transact(
         if previous is not None:
             _require_backup_device(root, target)  # only a replacement moves the old folder into the backup root
         if check:
+            before = {f["path"]: f for f in previous["files"]} if previous else {}
+            after = {f["path"]: f for f in proof["files"]}
+            common = sorted(before.keys() & after.keys())
             return {
                 "action": "upgrade" if previous else "install",
                 "target": str(target),
                 "from_version_id": previous["version_id"] if previous else None,
                 "to_version_id": bundle.version_id,
                 "backup_root": str(root),
-                "added": sorted(
-                    {f["path"] for f in proof["files"]}
-                    - ({f["path"] for f in previous["files"]} if previous else set())
-                ),
-                "removed": sorted(
-                    ({f["path"] for f in previous["files"]} if previous else set())
-                    - {f["path"] for f in proof["files"]}
-                ),
+                "added": sorted(after.keys() - before.keys()),
+                "removed": sorted(before.keys() - after.keys()),
+                "modified": [path for path in common if before[path]["sha256"] != after[path]["sha256"]],
+                "mode_changed": [path for path in common if before[path]["mode"] != after[path]["mode"]],
             }
         folder = root / f"{key}-{uuid.uuid4().hex}"
         # A first install renames nothing out of the way, so when the backup root is on another filesystem it
