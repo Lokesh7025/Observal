@@ -597,3 +597,117 @@ def test_restore_refuses_when_destination_ancestor_is_swapped_after_pinning(tmp_
     assert calls and (outside / "skills" / "example" / "unrelated.txt").read_text() == "not ours"
     assert not (outside / "skills" / "example" / "SKILL.md").exists()
     assert (project / ".pi-original" / "skills" / "example" / "SKILL.md").read_bytes() == b"changed"
+
+
+def test_first_install_does_not_need_a_same_filesystem_backup_root(store, monkeypatch):
+    target, root = store
+    # Model a backup root on another device: only a replacement renames across it.
+    monkeypatch.setattr(managed_skill, "_same_device", lambda _root, _target: False)
+    assert install(bundle("v1"), target, root, check=True)["action"] == "install"
+    done = install(bundle("v1"), target, root)
+    assert done["action"] == "install" and (target / "SKILL.md").read_bytes() == b"skill"
+    assert [p.name for p in target.parent.iterdir()] == [target.name]  # nothing but the skill where harnesses scan
+    assert not list(target.parent.parent.glob(".example.*"))  # and no staging leftovers one level up
+    managed_skill.verify_tree(
+        target, managed_skill.receipt(bundle("v1"), target, "pi", "project", registry_url="https://example.org")
+    )
+
+
+def test_replacement_on_another_filesystem_names_the_backup_root_fix(store, monkeypatch):
+    target, root = store
+    install(bundle("v1"), target, root)
+    monkeypatch.setattr(managed_skill, "_same_device", lambda _root, _target: False)
+    with pytest.raises(managed_skill.ManagedSkillError, match="another filesystem") as exc:
+        install(bundle("v2", content=b"changed"), target, root)
+    assert "--backup-root" in exc.value.remediation
+    assert (target / "SKILL.md").read_bytes() == b"skill"
+
+
+def test_crash_while_staging_beside_the_destination_is_cleaned_up_by_recovery(store, monkeypatch):
+    target, root = store
+    monkeypatch.setattr(managed_skill, "_same_device", lambda _root, _target: False)
+    real_install = managed_skill.install_folder_bundle
+    stages = []
+
+    def crash_after_staging(b, stage):
+        real_install(b, stage)
+        inner = stage.parent / f".{stage.name}.stage.leftover"  # install_folder_bundle's own temporary directory
+        inner.mkdir()
+        (inner / "SKILL.md").write_text("orphan")
+        stages.append((stage, inner))
+        raise KeyboardInterrupt  # stands in for a kill: nothing after this point gets to clean up
+
+    monkeypatch.setattr(managed_skill, "install_folder_bundle", crash_after_staging)
+    real_discard = managed_skill._discard_stage
+    monkeypatch.setattr(managed_skill, "_discard_stage", lambda _stage: None)
+    with pytest.raises(KeyboardInterrupt):
+        install(bundle("v1"), target, root)
+    (stage, inner) = stages[0]
+    assert stage.is_dir() and inner.is_dir() and list(root.glob("*/marker.json"))
+    assert stage.parent == target.parent.parent  # never inside the directory a harness scans for skills
+    assert not list(target.parent.glob("*"))  # nothing discoverable was left where harnesses scan
+
+    monkeypatch.setattr(managed_skill, "_discard_stage", real_discard)
+    managed_skill.recover(target, backup_root=root, require_same_device=False)
+    assert not stage.exists() and not inner.exists()
+    assert not list(root.glob("*/marker.json"))
+
+
+def test_recovery_refuses_a_marker_that_names_a_stage_elsewhere(store):
+    target, root = store
+    root.mkdir(parents=True)
+    key = hashlib.sha256(str(target).encode()).hexdigest()
+    folder = root / f"{key}-deadbeef"
+    folder.mkdir()
+    victim = target.parent.parent / "precious"
+    victim.mkdir(parents=True)
+    (folder / "marker.json").write_text(
+        json.dumps({"target": str(target), "old": None, "new": {}, "stage": str(victim)})
+    )
+    with pytest.raises(managed_skill.ManagedSkillError, match="Invalid recovery marker stage"):
+        managed_skill.recover(target, backup_root=root)
+    assert victim.is_dir()
+
+
+def test_unchanged_reinstall_after_a_cross_filesystem_first_install_is_not_refused(store, monkeypatch):
+    target, root = store
+    monkeypatch.setattr(managed_skill, "_same_device", lambda _root, _target: False)
+    assert install(bundle("v1"), target, root)["action"] == "install"
+    # Nothing is replaced, so no rename crosses the backup root and the device must not matter.
+    assert install(bundle("v1"), target, root)["action"] == "unchanged"
+    assert install(bundle("v1"), target, root, check=True)["action"] == "unchanged"
+
+
+def test_stage_falls_back_to_the_skills_directory_when_the_parent_is_not_usable(store, monkeypatch):
+    target, root = store
+    monkeypatch.setattr(managed_skill, "_same_device", lambda _root, _target: False)
+    real_access = os.access
+    monkeypatch.setattr(
+        managed_skill.os,
+        "access",
+        lambda path, mode: False if Path(path) == target.parent.parent else real_access(path, mode),
+    )
+    real_install = managed_skill.install_folder_bundle
+    seen = []
+    monkeypatch.setattr(
+        managed_skill, "install_folder_bundle", lambda b, stage: seen.append(stage) or real_install(b, stage)
+    )
+    assert install(bundle("v1"), target, root)["action"] == "install"
+    assert seen[0].parent == target.parent  # not writable one level up, so it stages beside the destination
+    assert [p.name for p in target.parent.iterdir()] == [target.name]  # and cleans up after itself
+
+
+def test_recovery_removes_a_stage_recorded_inside_the_skills_directory(store):
+    target, root = store
+    root.mkdir(parents=True)
+    key = hashlib.sha256(str(target).encode()).hexdigest()
+    folder = root / f"{key}-cafe"
+    folder.mkdir()
+    stage = target.parent / f".{target.name}.observal-stage-abc123"
+    stage.mkdir(parents=True)
+    (stage / "SKILL.md").write_text("orphan")
+    (folder / "marker.json").write_text(
+        json.dumps({"target": str(target), "old": None, "new": {}, "stage": str(stage)})
+    )
+    managed_skill.recover(target, backup_root=root, require_same_device=False)
+    assert not stage.exists() and not list(root.glob("*/marker.json"))

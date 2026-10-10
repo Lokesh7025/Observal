@@ -120,7 +120,8 @@ def skill_backups_restore(
             str(exc),
             operation="Restore skill backup",
             resource=backup_id,
-            remediation="Inspect the active folder and retained backup before retrying.",
+            remediation=getattr(exc, "remediation", None)
+            or "Inspect the active folder and retained backup before retrying.",
         )
     if output == "json":
         output_json(result)
@@ -1418,7 +1419,10 @@ def _install_managed_folder(
             if len(existing) == 1 and existing[0][1].get("version") and result.get("version"):
                 try:
                     if Version(str(result["version"])) < Version(str(existing[0][1]["version"])):
-                        raise managed_skill.ManagedSkillError("Downgrading requires an explicit --version pin")
+                        raise managed_skill.ManagedSkillError(
+                            "Downgrading requires an explicit --version pin",
+                            remediation="Re-run with --version VERSION --upgrade to downgrade deliberately.",
+                        )
                 except InvalidVersion as exc:
                     raise managed_skill.ManagedSkillError(
                         "Cannot compare installed and selected release versions"
@@ -1428,7 +1432,8 @@ def _install_managed_folder(
             existing = managed_skill._records(lockfile.read_lockfile(), target)
             if len(existing) != 1 or existing[0][1].get("folder_receipt", {}).get("version_id") != bundle.version_id:
                 raise managed_skill.ManagedSkillError(
-                    "Folder exists; use --upgrade after verifying the selected version"
+                    "Folder exists; use --upgrade after verifying the selected version",
+                    remediation="Preview with --check-upgrade, then re-run with --upgrade to replace it.",
                 )
 
         def record(data: dict) -> None:
@@ -1493,7 +1498,8 @@ def _install_managed_folder(
             str(exc),
             operation="Install skill",
             resource=skill_id,
-            remediation="Inspect the retained backup or restore it with registry skill backups restore; do not delete unowned files.",
+            remediation=getattr(exc, "remediation", None)
+            or "No files were overwritten. Inspect the reported path; see registry skill backups list for retained backups.",
         )
         raise AssertionError("unreachable") from exc
 

@@ -111,9 +111,10 @@ observal registry skill backups restore BACKUP_ID
 observal registry skill backups prune BACKUP_ID
 ```
 
-Choose an explicit `--backup-root DIR` on the target filesystem if the default
-private `~/.observal/backups/skills/` cannot support same-filesystem renames.
-The backup root must be outside all harness skill-discovery roots and ignored by
+A first install needs no backup, so it works whatever filesystem the default
+private `~/.observal/backups/skills/` is on. Replacing an existing folder moves
+it into the backup root by rename, so choose an explicit `--backup-root DIR` on
+the target filesystem if the default is on another one. The backup root must be outside all harness skill-discovery roots and ignored by
 Git when inside a repository. Backups are retained until explicitly pruned;
 restore refuses an edited active folder. A downgrade requires both an exact
 older `--version` and explicit update intent. A process crash can briefly leave

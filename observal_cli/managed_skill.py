@@ -10,6 +10,7 @@ bundles (including the old release for receipt-less adoption).
 
 from __future__ import annotations
 
+import glob
 import hashlib
 import json
 import os
@@ -29,7 +30,20 @@ from observal_cli.skill_folder import ValidatedBundle, detect_destination_collis
 
 
 class ManagedSkillError(RuntimeError):
-    pass
+    """A managed-folder refusal. `remediation` is the exact next step for this failure, when one is known."""
+
+    def __init__(self, message: str, *, remediation: str | None = None) -> None:
+        super().__init__(message)
+        self.remediation = remediation
+
+
+def _discard_stage(stage: Path) -> None:
+    """Remove a first-install stage and the temporary directory install_folder_bundle keeps beside it."""
+    for leftover in (stage, *stage.parent.glob(f".{glob.escape(stage.name)}.stage.*")):
+        if leftover.is_symlink():
+            leftover.unlink()
+        elif leftover.is_dir():
+            shutil.rmtree(leftover)
 
 
 def receipt(
@@ -87,7 +101,13 @@ def verify_tree(target: Path, proof: dict) -> None:
             or stat.S_IMODE(path.stat().st_mode) != int(record["mode"], 8)
             or hashlib.sha256(path.read_bytes()).hexdigest() != record["sha256"]
         ):
-            raise ManagedSkillError(f"Modified or unexpected skill file: {path}")
+            raise ManagedSkillError(
+                f"Modified or unexpected skill file: {path}",
+                remediation=(
+                    "Local edits were not overwritten. Export the reviewed release with 'registry skill export', "
+                    "back up your changes separately and reconcile the folder yourself; do not delete it or use --force."
+                ),
+            )
     if actual != expected.keys():
         raise ManagedSkillError(f"Missing skill files: {sorted(expected.keys() - actual)}")
 
@@ -128,7 +148,29 @@ def _still_pinned(path: Path, pinned_fd: int) -> bool:
         os.close(probe)
 
 
-def _backup_root(target: Path, root: Path | None, *, create: bool = True) -> Path:
+def _device_of(path: Path) -> int | None:
+    ancestor = next((part for part in (path, *path.parents) if part.exists()), None)
+    return None if ancestor is None else ancestor.stat().st_dev
+
+
+def _same_device(root: Path, target: Path) -> bool:
+    root_dev, target_dev = _device_of(root), _device_of(target.parent)
+    return root_dev is not None and root_dev == target_dev
+
+
+def _require_backup_device(root: Path, target: Path) -> None:
+    if not _same_device(root, target):
+        raise ManagedSkillError(
+            "Backup root is on another filesystem, so the existing folder cannot be backed up by rename",
+            remediation=(
+                "Pass --backup-root DIR on the same filesystem as the skill folder, outside every skill "
+                "discovery root and ignored by Git."
+            ),
+        )
+
+
+def _backup_root(target: Path, root: Path | None, *, create: bool = True, require_same_device: bool = True) -> Path:
+    """Validate the backup root. Only a replacement renames across it, so a first install may live elsewhere."""
     root = (root or lockfile.CONFIG_DIR / "backups" / "skills").expanduser().absolute()
     _safe_parents(root)
     _safe_parents(target)
@@ -157,9 +199,10 @@ def _backup_root(target: Path, root: Path | None, *, create: bool = True) -> Pat
         os.chmod(root, 0o700)
         target.parent.mkdir(parents=True, exist_ok=True)
     root_ancestor = next((part for part in (root, *root.parents) if part.exists()), None)
-    target_ancestor = next((part for part in (target.parent, *target.parent.parents) if part.exists()), None)
-    if root_ancestor is None or target_ancestor is None or root_ancestor.stat().st_dev != target_ancestor.stat().st_dev:
-        raise ManagedSkillError("Backup root is on another filesystem; provide --backup-root on the target filesystem")
+    if root_ancestor is None:
+        raise ManagedSkillError(f"Backup root has no existing ancestor: {root}")
+    if require_same_device:
+        _require_backup_device(root, target)
     try:
         git = subprocess.run(
             ["git", "-C", str(root_ancestor), "rev-parse", "--show-toplevel"],
@@ -215,14 +258,22 @@ def _marker(root: Path, target: Path) -> list[Path]:
     return list(root.glob(f"{key}-*/marker.json"))
 
 
-def recover(target: Path, *, backup_root: Path | None = None) -> None:
+def recover(target: Path, *, backup_root: Path | None = None, require_same_device: bool = True) -> None:
     """On the next invocation restore a missing target, or refuse ambiguous state."""
-    root = _backup_root(target, backup_root)
+    root = _backup_root(target, backup_root, require_same_device=require_same_device)
     for marker in _marker(root, target):
         state = json.loads(marker.read_text())
         backup = marker.parent / "old"
         if state.get("target") != str(target):
             raise ManagedSkillError(f"Invalid recovery marker: {marker}")
+        recorded_stage = state.get("stage")
+        if recorded_stage:  # a first install interrupted while staging beside its destination
+            stage = Path(recorded_stage)
+            if stage.parent not in (target.parent.parent, target.parent) or not stage.name.startswith(
+                f".{target.name}.observal-stage-"
+            ):
+                raise ManagedSkillError(f"Invalid recovery marker stage: {marker}")
+            _discard_stage(stage)
         if not target.exists() and not target.is_symlink() and backup.is_dir():
             verify_tree(backup, state["old"])
             backup.rename(target)
@@ -322,12 +373,14 @@ def transact(
     key = hashlib.sha256(str(target).encode()).hexdigest()
     target_lock = nullcontext() if check else lockfile._exclusive_lock(lockfile.CONFIG_DIR / f"skill-{key}.lock")
     with target_lock:
-        root = _backup_root(target, backup_root, create=not check)
+        # Whether the backup root must share the destination's filesystem is only known once we know a folder is
+        # actually being replaced; an unchanged install or a first install never renames across it.
+        root = _backup_root(target, backup_root, create=not check, require_same_device=False)
         if check:
             if _marker(root, target):
                 raise ManagedSkillError("Interrupted folder swap; recover before previewing another change")
         else:
-            recover(target, backup_root=root)
+            recover(target, backup_root=root, require_same_device=False)
         collisions = detect_destination_collisions(target, bundle)
         if any("bundled" in message or "case-insensitive" in message for message in collisions):
             raise ManagedSkillError("Reserved or colliding skill destination: " + "; ".join(collisions))
@@ -467,6 +520,8 @@ def transact(
             raise ManagedSkillError("Managed folder missing; restore a backup before installing")
         elif collisions:
             raise ManagedSkillError("Destination conflicts with existing files: " + "; ".join(collisions))
+        if previous is not None:
+            _require_backup_device(root, target)  # only a replacement moves the old folder into the backup root
         if check:
             return {
                 "action": "upgrade" if previous else "install",
@@ -484,7 +539,21 @@ def transact(
                 ),
             }
         folder = root / f"{key}-{uuid.uuid4().hex}"
-        stage = folder / "staged"
+        # A first install renames nothing out of the way, so when the backup root is on another filesystem it
+        # stages beside the destination (always the same filesystem) instead of failing.
+        stage_beside = previous is None and not _same_device(root, target)
+        if stage_beside:
+            # One level up, so a crash can never leave a SKILL.md where a harness scans for skills, unless that
+            # directory is on another filesystem (a mountpoint) or not writable; then stage in the skills directory,
+            # where the recovery marker still tracks it.
+            stage_home = target.parent.parent
+            if os.stat(stage_home).st_dev != os.stat(target.parent).st_dev or not os.access(
+                stage_home, os.W_OK | os.X_OK
+            ):
+                stage_home = target.parent
+            stage = stage_home / f".{target.name}.observal-stage-{uuid.uuid4().hex[:12]}"
+        else:
+            stage = folder / "staged"
         folder.mkdir(mode=0o700)
         os.chmod(folder, 0o700)
         marker = folder / "marker.json"
@@ -492,6 +561,19 @@ def transact(
         old_version = matches[0][1].get("version") if matches else None
         parent_fd: int | None = None
         folder_fd: int | None = None
+        stage_home_fd: int | None = None
+
+        def stage_home_stable() -> bool:
+            return stage_home_fd is not None and _still_pinned(stage.parent, stage_home_fd)
+
+        def write_marker() -> None:
+            payload = {"target": str(target), "old": previous, "new": proof}
+            if stage_beside:
+                payload["stage"] = str(stage)
+            marker.write_text(json.dumps(payload))
+            os.chmod(marker, 0o600)
+            with marker.open("rb") as handle:
+                os.fsync(handle.fileno())
 
         def parent_stable() -> bool:
             return parent_fd is not None and _still_pinned(target.parent, parent_fd)
@@ -501,22 +583,24 @@ def transact(
 
         def require_stable() -> None:
             # Pathname deletes below would follow a substituted ancestor and remove unrelated files.
-            if not parent_stable() or not folder_stable():
+            if not parent_stable() or not folder_stable() or (stage_beside and not stage_home_stable()):
                 raise ManagedSkillError(f"Skill destination or backup path changed; inspect recovery marker {marker}")
 
         try:
             # Pin both hierarchies before any staging so a later ancestor swap cannot move the install elsewhere.
             parent_fd = _pin_dir(target.parent)
             folder_fd = _pin_dir(folder)
+            if stage_beside:
+                stage_home_fd = _pin_dir(stage.parent)
+                # Recorded before the first byte is staged, so recovery can always remove what a crash leaves.
+                write_marker()
             install_folder_bundle(bundle, stage)
             verify_tree(stage, proof)
-            # Marker exists before any rename. Atomic replacement + fsync for crash visibility.
-            marker.write_text(json.dumps({"target": str(target), "old": previous, "new": proof}))
-            os.chmod(marker, 0o600)
-            with marker.open("rb") as handle:
-                os.fsync(handle.fileno())
+            if not stage_beside:
+                # Marker exists before any rename. Atomic replacement + fsync for crash visibility.
+                write_marker()
             # Renames use the descriptors pinned above; refuse if either path no longer leads to those directories.
-            if not parent_stable() or not folder_stable():
+            if not parent_stable() or not folder_stable() or (stage_beside and not stage_home_stable()):
                 raise ManagedSkillError(
                     "Skill destination or backup path changed during staging; no files were swapped"
                 )
@@ -527,7 +611,8 @@ def transact(
                 # verification. Never record a release if the folder actually
                 # moved into the backup differs from the reviewed old tree.
                 verify_tree(backup, previous)
-            os.rename("staged", target.name, src_dir_fd=folder_fd, dst_dir_fd=parent_fd)
+            stage_dir_fd = stage_home_fd if stage_beside else folder_fd
+            os.rename(stage.name, target.name, src_dir_fd=stage_dir_fd, dst_dir_fd=parent_fd)
             if not parent_stable():
                 raise ManagedSkillError(f"Destination parent moved during swap; inspect recovery marker {marker}")
             if previous:
@@ -610,12 +695,15 @@ def transact(
                     ) from exc
             raise ManagedSkillError(f"Folder transaction failed; original installation preserved: {exc}") from exc
         finally:
-            if folder_stable() and stage.exists():  # a redirected `staged` path may not be ours to delete
+            # A redirected stage path may not be ours to delete, so only clean up what is still pinned.
+            if stage_beside:
+                if stage_home_stable():
+                    _discard_stage(stage)
+            elif folder_stable() and stage.exists():
                 shutil.rmtree(stage)
-            if folder_fd is not None:
-                os.close(folder_fd)
-            if parent_fd is not None:
-                os.close(parent_fd)
+            for fd in (folder_fd, parent_fd, stage_home_fd):
+                if fd is not None:
+                    os.close(fd)
 
 
 def backups_list(*, backup_root: Path | None = None) -> list[dict]:

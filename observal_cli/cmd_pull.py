@@ -2399,7 +2399,8 @@ def register_pull(app: typer.Typer):
                 str(error),
                 operation="Pull agent",
                 resource=qualified_name,
-                remediation="Choose another destination or perform an explicit safe migration first.",
+                remediation=getattr(error, "remediation", None)
+                or "Choose another destination or perform an explicit safe migration first.",
             )
 
         if not result.get("skill_bundles"):
