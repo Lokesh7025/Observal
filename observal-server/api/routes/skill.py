@@ -348,14 +348,12 @@ async def create_skill_folder_draft(
     current_user: User = Depends(require_role(UserRole.user)),
 ):
     """Create a saved direct draft with a complete initial folder, never a blank tree."""
-    frontmatter = _validate_stored_skill_md(req.skill_md_content).frontmatter
-    if (
-        not isinstance(frontmatter.get("name"), str)
-        or not frontmatter["name"].strip()
-        or not isinstance(frontmatter.get("description"), str)
-        or not frontmatter["description"].strip()
-    ):
-        raise HTTPException(status_code=422, detail="SKILL.md must have nonempty name and description frontmatter")
+    _validate_stored_skill_md(req.skill_md_content)
+    try:
+        # Newly authored bytes must meet the Agent Skills name rules, or review would approve an uninstallable folder.
+        _validate_new_md(req.skill_md_content, authored=True)
+    except SkillValidationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     draft = SkillDraftRequest(
         name=req.name,
         version=req.version,

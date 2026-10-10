@@ -411,3 +411,52 @@ async def test_folder_draft_rejects_missing_required_frontmatter_without_persist
             assert (await db.execute(select(SkillListing))).scalars().all() == []
     finally:
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("name", ["Bad_Name", "a--b", "-lead", "trail-", "x" * 65])
+async def test_folder_draft_rejects_invalid_agent_skills_name_without_persisting(name):
+    engine = ds.make_engine()
+    maker = await ds.create_schema(engine)
+    try:
+        async with maker() as db:
+            owner = await ds.user(db)
+            md = f"---\nname: {name}\ndescription: valid\n---\n"
+            req = SkillFolderDraftRequest.model_validate(FIXTURE["author_create"]["body"] | {"skill_md_content": md})
+            with pytest.raises(HTTPException) as exc:
+                await skill.create_skill_folder_draft(req, db, owner)
+            assert exc.value.status_code == 422
+            assert (await db.execute(select(SkillListing))).scalars().all() == []
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_submission_refuses_folder_whose_name_cannot_install(monkeypatch):
+    engine = ds.make_engine()
+    maker = await ds.create_schema(engine)
+    try:
+        async with maker() as db:
+            owner = await ds.user(db)
+            data = FIXTURE["author_create"]["body"] | FIXTURE["snapshot"]
+            manifest = await skill.create_skill_folder_draft(SkillFolderDraftRequest.model_validate(data), db, owner)
+            version = await db.get(SkillVersion, manifest.version_id)
+            listing = await db.get(SkillListing, manifest.listing_id)
+            version.skill_md_content = "---\nname: Bad_Name\ndescription: valid\n---\n"  # e.g. a pre-fix draft
+            version.content_revision = manifest.revision = skill_content_revision(listing, version)
+            await db.commit()
+            monkeypatch.setattr(skill_files._ds, "get_bool", AsyncMock(return_value=True))
+            with pytest.raises(HTTPException) as exc:
+                await skill_files.submit_skill_version_draft(
+                    str(manifest.listing_id),
+                    manifest.version_id,
+                    SkillVersionRevisionRequest(observed_revision=manifest.revision),
+                    Response(),
+                    db,
+                    owner,
+                )
+            assert exc.value.status_code == 422
+            await db.rollback()
+            assert (await db.get(SkillVersion, manifest.version_id)).status == ListingStatus.draft
+    finally:
+        await engine.dispose()

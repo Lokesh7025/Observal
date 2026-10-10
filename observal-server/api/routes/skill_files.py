@@ -43,6 +43,7 @@ from services.inbox import sources as inbox
 from services.skill_bundle import (
     MAX_BUNDLE_BYTES,
     MAX_EXTRA_FILES,
+    declared_skill_folder_name,
     needs_bundle_delivery,
     validate_bundle_path,
     validate_skill_bundle,
@@ -786,6 +787,8 @@ async def submit_skill_version_draft(
         )
         if version.base_version_id is not None and version.delivery_mode == "registry_direct":
             _validate_new_md(version.skill_md_content)
+        if needs_bundle_delivery(version):
+            declared_skill_folder_name(version.skill_md_content)  # approval must never yield an uninstallable folder
         if version.skill_md_content:
             analysis = validate_skill_md_content_frontmatter(
                 version.skill_md_content, slash_command=version.slash_command
