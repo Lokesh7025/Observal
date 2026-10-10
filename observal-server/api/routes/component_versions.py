@@ -46,7 +46,7 @@ from services.agent_lock import INSTALLABLE_STATUSES
 from services.component_version_extras import ALLOWED_FIELDS, REQUIRED_FIELDS, validate_and_extract
 from services.editing_lock import is_actively_editing
 from services.inbox import sources as inbox
-from services.skill_bundle import needs_bundle_delivery, validate_skill_bundle
+from services.skill_bundle import declared_skill_folder_name, needs_bundle_delivery, validate_skill_bundle
 from services.skill_revisions import skill_content_revision, verified_skill_revision
 from services.skill_validator import SkillValidationError
 from services.teamspace import can_review, review_scope
@@ -540,6 +540,11 @@ async def _review_version(
                 raise HTTPException(status_code=409, detail="Review the bundled skill UUID with its observed revision")
             if not await _ds.get_bool("registry.skill_folder_delivery_enabled", False):
                 raise HTTPException(status_code=409, detail="Skill folder review is disabled until fleet rollout")
+            if req.action == "approve":
+                try:  # Whatever route created this version, never approve a folder that cannot install.
+                    declared_skill_folder_name(ver.skill_md_content)
+                except SkillValidationError as exc:
+                    raise HTTPException(status_code=422, detail=str(exc)) from exc
         if (ver.base_version_id is not None or ver.content_revision is not None or (ver.review_epoch or 0) > 0) and (
             req.observed_revision is None
         ):

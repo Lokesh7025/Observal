@@ -66,7 +66,8 @@ def declared_skill_folder_name(skill_md_content: str | None) -> str:
         raise SkillValidationError("Complete skill folder requires a string SKILL.md name")
     canonical = unicodedata.normalize("NFKC", name.strip())
     if (
-        not 1 <= len(canonical) <= 64
+        canonical != name  # the directory must equal the stored frontmatter name, never a rewritten one
+        or not 1 <= len(canonical) <= 64
         or canonical != canonical.lower()
         or canonical.startswith("-")
         or canonical.endswith("-")

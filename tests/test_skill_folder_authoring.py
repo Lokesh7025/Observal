@@ -460,3 +460,42 @@ async def test_submission_refuses_folder_whose_name_cannot_install(monkeypatch):
             assert (await db.get(SkillVersion, manifest.version_id)).status == ListingStatus.draft
     finally:
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_approval_refuses_folder_whose_name_cannot_install(monkeypatch):
+    """Any route that produced the version (generic publish, pre-fix drafts) hits this last gate."""
+    from schemas.component_version import VersionReviewRequest
+
+    engine = ds.make_engine()
+    maker = await ds.create_schema(engine)
+    try:
+        async with maker() as db:
+            owner = await ds.user(db)
+            admin = await ds.user(db, role=UserRole.admin, email="reviewer@example.com")
+            data = FIXTURE["author_create"]["body"] | FIXTURE["snapshot"]
+            manifest = await skill.create_skill_folder_draft(SkillFolderDraftRequest.model_validate(data), db, owner)
+            version = await db.get(SkillVersion, manifest.version_id)
+            listing = await db.get(SkillListing, manifest.listing_id)
+            version.skill_md_content = "---\nname: Bad_Name\ndescription: valid\n---\n"
+            version.status = ListingStatus.pending
+            version.content_revision = skill_content_revision(listing, version)
+            await db.commit()
+            monkeypatch.setattr(component_versions._ds, "get_bool", AsyncMock(return_value=True))
+            with pytest.raises(HTTPException) as exc:
+                await component_versions._review_version(
+                    str(listing.id),
+                    "",
+                    VersionReviewRequest(action="approve", observed_revision=version.content_revision),
+                    SkillListing,
+                    SkillVersion,
+                    "skill",
+                    db,
+                    admin,
+                    selected_id=version.id,
+                )
+            assert exc.value.status_code == 422
+            await db.rollback()
+            assert (await db.get(SkillVersion, manifest.version_id)).status == ListingStatus.pending
+    finally:
+        await engine.dispose()

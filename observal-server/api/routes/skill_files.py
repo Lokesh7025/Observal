@@ -614,7 +614,7 @@ async def update_skill_version_draft(
     )
     try:
         if md_changed and version.delivery_mode == "registry_direct":
-            _validate_new_md(md)
+            _validate_new_md(md, authored=True)
         elif md_changed:
             validate_skill_md_content_frontmatter(md)
         unchanged_orphan_git_script = (

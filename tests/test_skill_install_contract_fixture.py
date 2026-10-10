@@ -285,6 +285,14 @@ def test_complete_folder_name_refuses_invalid_or_unportable_frontmatter(name):
         declared_skill_folder_name(content)
 
 
+@pytest.mark.parametrize("name", [" padded ", "\ufb01le", "\uff46\uff55\uff4c\uff4c"])  # padded, ligature, fullwidth
+def test_complete_folder_name_refuses_names_that_would_be_rewritten(name):
+    # The installed directory must equal the stored frontmatter name, not a stripped or NFKC-folded variant.
+    content = f'---\nname: "{name}"\ndescription: Test\n---\n# Body\n'
+    with pytest.raises(SkillValidationError):
+        declared_skill_folder_name(content)
+
+
 @pytest.mark.asyncio
 async def test_fixture_digest_includes_actual_persisted_skill_version_defaults():
     example = json.loads((Path(__file__).parent / "fixtures" / "skill_folder_install_contract.json").read_text())
