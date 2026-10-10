@@ -157,6 +157,7 @@ def prepare_agent_skill_folders(
     if len({name.casefold() for name in local_names.values()}) != len(local_names):
         raise SkillValidationError("Skill aliases collide at the harness destination")
     folders = []
+    destinations: dict[str, str] = {}
     chosen_paths: set[str] = set()
     duplicates: set[str] = set()
     for listing_id, proxy in bundled.items():
@@ -179,6 +180,7 @@ def prepare_agent_skill_folders(
             raise SkillValidationError("Harness emitted duplicate SKILL.md entries")
         folder = complete_skill_folder(listing_id, proxy.pinned_version, skill_file_path=destination)
         folders.append(folder)
+        destinations[name] = destination
         duplicates.add(destination)
     # Do not mutate the config until every component and file has passed.
     if (
@@ -194,6 +196,13 @@ def prepare_agent_skill_folders(
             for field in ("skill_md_content", "script_content", "script_filename"):
                 component.pop(field, None)
             component["bundle_version_id"] = str(version_by_name[component["name"]])
+            # Clients require the exact destination; only some adapters emit it themselves.
+            component["path"] = destinations[component["name"]]
+    # Adapters that emit only SKILL.md file entries (e.g. Antigravity) have no component to carry the bundle id.
+    for name in bundled_names - {component.get("name") for component in components}:
+        components.append({"name": name, "path": destinations[name], "bundle_version_id": str(version_by_name[name])})
+    if components:
+        snippet["skill_components"] = components
     snippet["skills"] = [file for file in emitted if file.get("path") not in duplicates]
     if not snippet["skills"]:
         snippet.pop("skills", None)

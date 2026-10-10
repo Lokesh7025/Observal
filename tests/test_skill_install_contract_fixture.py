@@ -260,10 +260,11 @@ def test_negotiated_agent_uses_pinned_frontmatter_name_even_if_registry_slug_dif
     folders = prepare_agent_skill_folders({skill_id: listing}, snippet, harness, scope=scope, folder_names=names)
     assert len(folders) == 1
     assert folders[0].skill_file_path.endswith("/café/SKILL.md")
-    if "skill_components" in snippet:
-        assert snippet["skill_components"][0]["name"] == "café"
-        if "path" in snippet["skill_components"][0]:
-            assert snippet["skill_components"][0]["path"] == folders[0].skill_file_path
+    # The pull client requires exactly one component naming the bundle and its destination, for every harness.
+    [component] = snippet["skill_components"]
+    assert component["name"] == "café"
+    assert component["path"] == folders[0].skill_file_path
+    assert component["bundle_version_id"] == str(folders[0].version_id)
     assert "skills" not in snippet
 
 
