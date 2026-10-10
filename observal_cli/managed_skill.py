@@ -37,6 +37,18 @@ class ManagedSkillError(RuntimeError):
         self.remediation = remediation
 
 
+class ManagedSkillCommittedError(ManagedSkillError):
+    """The release is installed and recorded in the lock, but finishing the transaction failed.
+
+    Callers must keep what is recorded (the lock matches the disk) and report a partial result: rolling back
+    would contradict the receipt. `outcome` is what transact() would have returned.
+    """
+
+    def __init__(self, message: str, *, outcome: dict, remediation: str | None = None) -> None:
+        super().__init__(message, remediation=remediation)
+        self.outcome = outcome
+
+
 def _discard_stage(stage: Path) -> None:
     """Remove a first-install stage and the temporary directory install_folder_bundle keeps beside it."""
     for leftover in (stage, *stage.parent.glob(f".{glob.escape(stage.name)}.stage.*")):
@@ -559,6 +571,12 @@ def transact(
         marker = folder / "marker.json"
         backup = folder / "old"
         old_version = matches[0][1].get("version") if matches else None
+        outcome = {
+            "action": "upgrade" if previous else "install",
+            "target": str(target),
+            "backup": str(backup) if previous else None,
+            "backup_id": folder.name,
+        }
         parent_fd: int | None = None
         folder_fd: int | None = None
         stage_home_fd: int | None = None
@@ -629,33 +647,50 @@ def transact(
                 )
                 os.chmod(folder / "backup.json", 0o600)
             lockfile.update_lockfile(record)
+            # A substitution after the last identity check cannot be excluded by pathname checks alone, and the
+            # receipt names a path. Re-verify once the lock has advanced so success is never reported for a path
+            # that no longer leads to the tree we installed. The marker is kept, and the next managed
+            # invocation fails closed rather than overwriting anything.
+            try:
+                if not parent_stable():
+                    raise ManagedSkillCommittedError(
+                        "New skill is complete and recorded, but its destination path was substituted afterwards; "
+                        f"inspect {target.parent} and recovery marker {marker}",
+                        outcome=outcome,
+                        remediation="Verify the destination path, then run the command again to reconcile.",
+                    )
+                verify_tree(target, proof)
+            except ManagedSkillCommittedError:
+                raise
+            except (ManagedSkillError, OSError) as exc:
+                # A read failure (e.g. PermissionError) after the lock advanced is still a committed install.
+                raise ManagedSkillCommittedError(
+                    f"New skill is complete and recorded, but {target} could not be verified; inspect {marker}: {exc}",
+                    outcome=outcome,
+                ) from exc
             try:
                 marker.unlink()
             except OSError as exc:
                 # The lock has advanced: never roll back a committed installation.
-                raise ManagedSkillError(
-                    f"New skill is complete and recorded; finalize marker at {marker}: {exc}"
+                raise ManagedSkillCommittedError(
+                    f"New skill is complete and recorded; finalize marker at {marker}: {exc}", outcome=outcome
                 ) from exc
-            return {
-                "action": "upgrade" if previous else "install",
-                "target": str(target),
-                "backup": str(backup) if previous else None,
-                "backup_id": folder.name,
-            }
+            return outcome
         except Exception as exc:
-            if isinstance(exc, ManagedSkillError) and str(exc).startswith("New skill is complete and recorded"):
+            if isinstance(exc, ManagedSkillCommittedError):
                 raise
             if marker.exists() and target.is_dir() and not target.is_symlink():
                 try:
                     observed = _records(lockfile.read_lockfile(), target)
                     if len(observed) == 1 and observed[0][1].get("folder_receipt") == proof:
                         verify_tree(target, proof)
-                        raise ManagedSkillError(
-                            f"New skill is complete and recorded; finalize recovery marker at {marker}: {exc}"
+                        raise ManagedSkillCommittedError(
+                            f"New skill is complete and recorded; finalize recovery marker at {marker}: {exc}",
+                            outcome=outcome,
                         ) from exc
+                except ManagedSkillCommittedError:
+                    raise
                 except ManagedSkillError as committed:
-                    if str(committed).startswith("New skill is complete and recorded"):
-                        raise
                     raise ManagedSkillError(
                         f"Cannot establish lock state after swap at {target}; inspect retained backup {folder}"
                     ) from committed

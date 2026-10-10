@@ -2785,3 +2785,76 @@ def test_inline_hook_rewrite_survives_a_malformed_entry():
         "a bare string someone hand-edited in",
         {"command": "echo mine"},
     ]
+
+
+def _folder_install_result() -> dict:
+    import base64
+    import hashlib
+
+    def entry(path: str, data: bytes) -> dict:
+        return {
+            "path": path,
+            "content": base64.b64encode(data).decode(),
+            "sha256": hashlib.sha256(data).hexdigest(),
+            "size": len(data),
+            "mode": "0644",
+            "version_id": "ver-1",
+        }
+
+    result = _install_result("1.1.0")
+    result["config_snippet"]["skill_components"] = [
+        {"name": "demo", "path": ".claude/skills/demo/SKILL.md", "bundle_version_id": "ver-1"}
+    ]
+    result["skill_bundles"] = [
+        {
+            "listing_id": "skill-1",
+            "version_id": "ver-1",
+            "digest": "sha256:" + "d" * 64,
+            "skill_file_path": ".claude/skills/demo/SKILL.md",
+            "files": [entry("SKILL.md", b"---\nname: demo\n---\n")],
+        }
+    ]
+    result["lock"]["components"] = [
+        {
+            "type": "skill",
+            "id": "skill-1",
+            "qualified_name": "acme/demo",
+            "version": "1.0.0",
+            "version_id": "ver-1",
+            "digest": "sha256:" + "d" * 64,
+            "source": "lock",
+        }
+    ]
+    return result
+
+
+def test_committed_folder_failure_reports_a_partial_pull_and_rolls_nothing_back(
+    pull_app_boundary, registry, tmp_path, monkeypatch
+):
+    from observal_cli import managed_skill
+
+    target = tmp_path / "project"
+    registry.post.side_effect = lambda _path, _body: _folder_install_result()
+    plan = [(object(), target / "f", {"target": str(target / "f"), "listing_id": "skill-1"}, {})]
+    monkeypatch.setattr(cmd_pull, "_managed_agent_folders", lambda *_a, **_k: plan)
+
+    def committed(*_args, **_kwargs):
+        raise managed_skill.ManagedSkillCommittedError(
+            "New skill is complete and recorded, but its destination path was substituted afterwards",
+            outcome={"action": "install", "target": str(target / "f")},
+            remediation="Verify the destination path.",
+        )
+
+    def forbidden_rollback(*_args, **_kwargs):
+        raise AssertionError("a committed folder must never be rolled back")
+
+    monkeypatch.setattr(managed_skill, "transact", committed)
+    monkeypatch.setattr(cmd_pull, "_rollback_managed_agent_state", forbidden_rollback)
+
+    result = _invoke(pull_app_boundary, target, "--output", "json")
+
+    assert result.exit_code == 6, result.output
+    error = json.loads(result.stderr)["error"]
+    assert "partially applied" in error["message"]
+    assert error["result"]["installation_tracked"] is True
+    assert error["result"]["committed_folders"] == [str(target / "f")]

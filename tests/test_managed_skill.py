@@ -669,6 +669,34 @@ def test_recovery_refuses_a_marker_that_names_a_stage_elsewhere(store):
     assert victim.is_dir()
 
 
+def test_ancestor_swapped_after_record_is_never_reported_as_success(tmp_path, monkeypatch):
+    _isolated_machine(tmp_path, monkeypatch)
+    project = tmp_path / "project"
+    target = project / ".pi" / "skills" / "example"
+    backups = tmp_path / "backups"
+    outside = tmp_path / "outside"
+    (outside / "skills").mkdir(parents=True)
+    real_update = lockfile.update_lockfile
+
+    def update_then_swap(mutate):
+        result = real_update(mutate)  # the receipt is durable, then the destination ancestor is substituted
+        (project / ".pi").rename(project / ".pi-original")
+        (project / ".pi").symlink_to(outside, target_is_directory=True)
+        return result
+
+    monkeypatch.setattr(lockfile, "update_lockfile", update_then_swap)
+    with pytest.raises(managed_skill.ManagedSkillCommittedError, match="recorded, but") as exc:
+        install(bundle("v1"), target, backups)
+    assert exc.value.remediation
+    assert exc.value.outcome["action"] == "install"  # callers learn the lock advanced, so they must not roll back
+    assert list(backups.glob("*/marker.json"))  # evidence retained for reconciliation
+    assert not (outside / "skills" / "example").exists()
+    monkeypatch.setattr(lockfile, "update_lockfile", real_update)
+    with pytest.raises(managed_skill.ManagedSkillError):  # fails closed until the path is repaired
+        install(bundle("v2", content=b"changed"), target, backups)
+    assert not (outside / "skills" / "example").exists()
+
+
 def test_unchanged_reinstall_after_a_cross_filesystem_first_install_is_not_refused(store, monkeypatch):
     target, root = store
     monkeypatch.setattr(managed_skill, "_same_device", lambda _root, _target: False)
@@ -711,3 +739,27 @@ def test_recovery_removes_a_stage_recorded_inside_the_skills_directory(store):
     )
     managed_skill.recover(target, backup_root=root, require_same_device=False)
     assert not stage.exists() and not list(root.glob("*/marker.json"))
+
+
+def test_read_failure_while_verifying_after_the_lock_advanced_is_still_a_committed_install(tmp_path, monkeypatch):
+    _isolated_machine(tmp_path, monkeypatch)
+    target = tmp_path / "project" / ".pi" / "skills" / "example"
+    real_update, real_verify = lockfile.update_lockfile, managed_skill.verify_tree
+    recorded = []
+
+    def update(mutate):
+        result = real_update(mutate)
+        recorded.append(True)
+        return result
+
+    def verify(path, proof):
+        if recorded:
+            raise PermissionError("cannot read installed tree")
+        return real_verify(path, proof)
+
+    monkeypatch.setattr(lockfile, "update_lockfile", update)
+    monkeypatch.setattr(managed_skill, "verify_tree", verify)
+    with pytest.raises(managed_skill.ManagedSkillCommittedError, match="could not be verified") as exc:
+        install(bundle("v1"), target, tmp_path / "backups")
+    assert exc.value.outcome["action"] == "install"  # callers must keep the recorded install, not roll it back
+    assert list((tmp_path / "backups").glob("*/marker.json"))

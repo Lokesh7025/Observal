@@ -2489,6 +2489,23 @@ def register_pull(app: typer.Typer):
                             allow_agent_pin_change=bool(upgrade or version),
                         )
                         applied_folders.append((proof, outcome))
+            except managed_skill.ManagedSkillCommittedError as error:
+                # The lock already advanced for this folder, so a rollback would contradict its receipt (and the
+                # path may no longer lead to the tree). Keep every recorded folder and report a partial pull.
+                fail(
+                    ErrorCategory.CONFLICT,
+                    f"Agent pull is partially applied: {error}",
+                    operation="Pull agent",
+                    resource="agent skills",
+                    remediation=error.remediation
+                    or "Repair the reported path, then run the pull again; recorded folders verify as unchanged.",
+                    result={
+                        "folder_recovery_errors": [],
+                        "installation_tracked": True,
+                        "committed_folders": [proof["target"] for proof, _ in applied_folders]
+                        + [error.outcome["target"]],
+                    },
+                )
             except (managed_skill.ManagedSkillError, OSError, RuntimeError, ValueError) as error:
                 recovery = _rollback_managed_agent_state(
                     applied_folders,
